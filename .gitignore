@@ -1,16 +1,15 @@
-﻿# Environment
+# Environment
 backend/.env
 .env
 *.env
 
-# Patient data — never commit
+# Patient data
 data/raw/iemr/*.json
 data/fhir/bundles/*.json
 data/synthetic/*.json
 
-# AI tool files — personal, never commit
-CLAUDE.md
-# .claude/
+# AI hooks only (personal workflow)
+.claude/hooks/
 
 # Python
 __pycache__/
@@ -35,8 +34,3 @@ Thumbs.db
 # IDE
 .vscode/settings.json
 .idea/
-AGENTS.md
-
-# Codex agent files
-AGENTS.md
-**/AGENTS.md
