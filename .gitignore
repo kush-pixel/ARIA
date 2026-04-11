@@ -10,7 +10,7 @@ data/synthetic/*.json
 
 # AI tool files — personal, never commit
 CLAUDE.md
-.claude/
+# .claude/
 
 # Python
 __pycache__/
