@@ -1,5 +1,5 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-12 by Kush Patel
+Last updated: 2026-04-13 by Nesh Rochwani
 
 ---
 
@@ -31,6 +31,10 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [NEXT] Synthet
 - backend/app/services/fhir/ingestion.py — ingest_fhir_bundle() populates patients, clinical_context, readings, audit_events; idempotent (patients ON CONFLICT DO NOTHING, clinical_context ON CONFLICT DO UPDATE, readings COUNT guard); 65 clinic readings inserted for patient 1091; risk_tier=high set via CHF override (I50.9 in problem codes); audit event always written in finally block
 - scripts/run_ingestion.py — CLI: reads FHIR Bundle, validates, ingests to PostgreSQL, prints summary; accepts --bundle flag (default: data/fhir/bundles/1091_bundle.json)
 - backend/tests/test_ingestion.py — 36 unit tests passing, 1 integration test (@pytest.mark.integration); covers success path, idempotency, CHF tier override, failure audit event, all summary fields
+- backend/app/services/worker/processor.py — WorkerProcessor async polling class; polls processing_jobs every 30s; status flow queued→running→succeeded|failed; atomic claim via conditional UPDATE (rowcount guard); finished_at always written; three handlers: bundle_import (fully implemented, calls ingest_fhir_bundle), pattern_recompute (stub, Week 2), briefing_generation (stub, Week 3); session_factory injectable for tests
+- backend/app/services/worker/scheduler.py — enqueue_briefing_jobs() finds monitoring_active patients with next_appointment::DATE = today and no existing briefing, inserts briefing_generation jobs; idempotent via ON CONFLICT DO NOTHING on idempotency_key ("briefing_generation:{patient_id}:{YYYY-MM-DD}"); mirrors spec Section 7.4 query exactly; callable from POST /api/admin/trigger-scheduler for demo mode
+- scripts/run_worker.py — CLI entry point; starts WorkerProcessor + APScheduler cron at 07:30Z daily; graceful Ctrl+C shutdown
+- backend/tests/test_worker.py — 19 unit tests passing, 1 integration test (@pytest.mark.integration); covers processor status transitions, claim guard, error handling, unknown job type, both handler stubs, scheduler enqueue logic, idempotency key format
 
 ### IN PROGRESS
 - backend/app/services/generator/reading_generator.py — Task 4: synthetic 28-day home BP readings for Patient A scenario (starting)
@@ -39,7 +43,6 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [NEXT] Synthet
 - backend/app/services/generator/ (reading_generator, confirmation_generator)
 - backend/app/services/pattern_engine/ (all detectors + risk_scorer)
 - backend/app/services/briefing/ (composer, summarizer)
-- backend/app/services/worker/ (processor, scheduler)
 - backend/app/api/ (all routes)
 - All frontend components
 
