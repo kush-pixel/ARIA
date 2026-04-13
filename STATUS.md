@@ -1,12 +1,12 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-13 by Nesh Rochwani
+Last updated: 2026-04-13 by Sahil Khalsa
 
 ---
 
 ## Pipeline Status
 
 ```
-iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [NEXT] Synthetic readings → [ ] Pattern engine → [ ] Briefing → [ ] Dashboard
+iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [NEXT] Synthetic readings → [ ] Pattern engine → [DONE] Briefing → [ ] Dashboard
 ```
 
 ---
@@ -37,13 +37,18 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [NEXT] Synthet
 - backend/tests/test_worker.py — 19 unit tests passing, 1 integration test (@pytest.mark.integration); covers processor status transitions, claim guard, error handling, unknown job type, both handler stubs, scheduler enqueue logic, idempotency key format
 - backend/tests/test_ingestion.py — 37 unit tests passing, 1 integration test (@pytest.mark.integration); covers success path, idempotency, CHF tier override, failure audit event, all summary fields, med_history stored in upsert
 
+- backend/app/services/briefing/composer.py — compose_briefing() async function; queries DB for 28-day readings, unacknowledged alerts, medication confirmations, clinical context; assembles all 9 deterministic briefing fields (trend_summary, medication_status, adherence_summary, active_problems, overdue_labs, visit_agenda, urgent_flags, risk_score, data_limitations); persists Briefing row + audit_event row; clinical language enforced at code level ("possible adherence concern", "treatment review warranted"); Layer 1 only — no LLM
+- backend/app/services/briefing/summarizer.py — generate_llm_summary() async function; loads prompt from prompts/briefing_summary_prompt.md; computes SHA-256 prompt_hash; calls claude-sonnet-4-20250514 for 3-sentence readable summary; writes readable_summary into llm_response JSONB; populates model_version, prompt_hash, generated_at on briefing row for audit; must only run after Layer 1 is verified
+- backend/app/services/briefing/__init__.py — exports compose_briefing, generate_llm_summary
+- prompts/briefing_summary_prompt.md — Layer 3 system prompt; enforces 3-sentence output, clinical language rules, no medication recommendations
+- backend/tests/test_briefing_composer.py — 61 unit tests (all passing); covers all helper functions, all 9 briefing fields, clinical language enforcement, async compose_briefing with mocked session, error handling, summarizer helpers
+
 ### IN PROGRESS
 - backend/app/services/generator/reading_generator.py — Task 4: synthetic 28-day home BP readings for Patient A scenario (starting)
 
 ### NOT STARTED
 - backend/app/services/generator/ (reading_generator, confirmation_generator)
 - backend/app/services/pattern_engine/ (all detectors + risk_scorer)
-- backend/app/services/briefing/ (composer, summarizer)
 - backend/app/api/ (all routes)
 - All frontend components
 
