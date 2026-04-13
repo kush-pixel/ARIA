@@ -99,10 +99,7 @@ async def _handle_bundle_import(job: ProcessingJob, session: AsyncSession) -> No
 async def _handle_pattern_recompute(job: ProcessingJob, session: AsyncSession) -> None:
     """Run Layer 1 pattern detectors and Layer 2 risk scorer for the patient.
 
-    Stub — wired up once all detectors in pattern_engine/ are built (Week 2).
-    See: backend/app/services/pattern_engine/
-
-    Execution order when implemented:
+    Execution order once Layer 1 detectors are implemented:
       1. gap_detector.detect_gap(patient_id, session)
       2. inertia_detector.detect_inertia(patient_id, session)
       3. adherence_analyzer.analyze_adherence(patient_id, session)
@@ -114,12 +111,24 @@ async def _handle_pattern_recompute(job: ProcessingJob, session: AsyncSession) -
         session: Async database session.
 
     Raises:
-        NotImplementedError: Always — stub not yet implemented.
+        ValueError: patient_id is missing from the job.
     """
-    # TODO(Week 2): replace this stub with real detector calls.
-    raise NotImplementedError(
-        "pattern_recompute handler not yet implemented — "
-        "build pattern_engine/ detectors first (Week 2)"
+    from app.services.pattern_engine.risk_scorer import compute_risk_score
+
+    if not job.patient_id:
+        raise ValueError("pattern_recompute job is missing patient_id")
+
+    # TODO(Week 2): wire Layer 1 detectors once built:
+    #   gap_detector.detect_gap(job.patient_id, session)
+    #   inertia_detector.detect_inertia(job.patient_id, session)
+    #   adherence_analyzer.analyze_adherence(job.patient_id, session)
+    #   deterioration_detector.detect_deterioration(job.patient_id, session)
+    # Layer 2 MUST run after Layer 1; do not parallelize these calls.
+    score = await compute_risk_score(job.patient_id, session)
+    logger.info(
+        "pattern_recompute completed: patient=%s risk_score=%.2f",
+        job.patient_id,
+        score,
     )
 
 
