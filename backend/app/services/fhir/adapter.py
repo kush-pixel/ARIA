@@ -295,6 +295,54 @@ def _build_medication_requests(visits: list[dict[str, Any]]) -> list[dict[str, A
     return list(seen.values())
 
 
+def _build_med_history(visits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build a chronological medication history from all iEMR visits.
+
+    Unlike :func:`_build_medication_requests`, this does **not** deduplicate
+    by ``MED_CODE``.  Instead it collects every unique ``(name, date, activity)``
+    combination across all visits so the briefing layer can show the full
+    timeline of medication events (new prescriptions, dose increases, refills).
+
+    Args:
+        visits: All VISIT dicts for this patient, ordered oldest-first.
+
+    Returns:
+        List of dicts sorted chronologically ascending by date (nulls last)::
+
+            [{"name": str, "rxnorm": str | None, "date": str | None, "activity": str | None}, ...]
+    """
+    seen: set[tuple[str | None, str | None, str | None]] = set()
+    history: list[dict[str, Any]] = []
+
+    for visit in visits:
+        for med in visit.get("MEDICATIONS", []):
+            try:
+                med_name = med.get("MED_NAME", "")
+                med_dose = med.get("MED_DOSE", "")
+                name = f"{med_name} {med_dose}".strip() or None
+                if not name:
+                    continue
+
+                iso_dt = _parse_iemr_datetime(med.get("MED_DATE_ADDED"))
+                date_str: str | None = iso_dt[:10] if iso_dt else None
+                activity: str | None = med.get("MED_ACTIVITY") or None
+                rxnorm = _extract_rxnorm(med.get("code_mappings"))
+
+                key = (name, date_str, activity)
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                history.append(
+                    {"name": name, "rxnorm": rxnorm, "date": date_str, "activity": activity}
+                )
+            except (KeyError, TypeError) as exc:
+                logger.warning("Skipping malformed MEDICATIONS entry in med_history: %s", exc)
+
+    history.sort(key=lambda e: (e["date"] is None, e["date"] or ""))
+    return history
+
+
 def _build_observations(visits: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Build FHIR Observation resources from iEMR VITALS arrays.
 
@@ -519,6 +567,7 @@ def convert_iemr_to_fhir(
     observations = _build_observations(visits)
     allergy_intolerances = _build_allergy_intolerances(visits)
     service_requests = _build_service_requests(visits)
+    med_history = _build_med_history(visits)
 
     all_resources: list[dict[str, Any]] = (
         [patient_resource]
@@ -538,9 +587,11 @@ def convert_iemr_to_fhir(
         len(allergy_intolerances),
         len(service_requests),
     )
+    logger.info("med_history: %d entries collected", len(med_history))
 
     return {
         "resourceType": "Bundle",
         "type": "collection",
         "entry": [{"resource": r} for r in all_resources],
+        "_aria_med_history": med_history,  # non-FHIR metadata — consumed by ingestion.py
     }

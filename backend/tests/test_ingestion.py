@@ -124,7 +124,7 @@ def minimal_bundle() -> dict:
 @pytest.fixture
 def full_bundle() -> dict:
     """Bundle with all resource types and one clinic BP observation."""
-    return _make_bundle(
+    bundle = _make_bundle(
         [
             _patient_resource(),
             _condition_resource("HYPERTENSION", "I10"),
@@ -134,6 +134,10 @@ def full_bundle() -> dict:
             _service_request_resource("HbA1c"),
         ]
     )
+    bundle["_aria_med_history"] = [
+        {"name": "LISINOPRIL 10MG", "rxnorm": "29046", "date": "2020-03-15", "activity": "New"}
+    ]
+    return bundle
 
 
 @pytest.fixture
@@ -488,6 +492,23 @@ async def test_ingest_commit_called_twice(full_bundle: dict) -> None:
     session = _make_mock_session()
     await ingest_fhir_bundle(full_bundle, session)
     assert session.commit.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_ingest_med_history_stored(full_bundle: dict) -> None:
+    """med_history from _aria_med_history is written into the ClinicalContext upsert."""
+    session = _make_mock_session()
+    await ingest_fhir_bundle(full_bundle, session)
+    # The ClinicalContext upsert is execute call index 2 (0=SELECT Patient,
+    # 1=INSERT Patient, 2=UPSERT ClinicalContext, 3=SELECT COUNT readings).
+    upsert_call = session.execute.call_args_list[2]
+    stmt = upsert_call.args[0]
+    # Compile without literal_binds (JSONB cannot be rendered as literal).
+    # The column name "med_history" must appear in the compiled SQL and its
+    # bound parameter value must match the list from _aria_med_history.
+    compiled = stmt.compile()
+    assert "med_history" in str(compiled)
+    assert compiled.params.get("med_history") == full_bundle["_aria_med_history"]
 
 
 # ---------------------------------------------------------------------------

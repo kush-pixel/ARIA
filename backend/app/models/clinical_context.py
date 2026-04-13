@@ -12,7 +12,7 @@ because asyncpg has known issues with DATE[] arrays in async context.
 from datetime import date, datetime
 
 from sqlalchemy import Date, DateTime, SmallInteger, String, func
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -38,6 +38,7 @@ class ClinicalContext(Base):
     med_rxnorm_codes: Mapped[list[str] | None] = mapped_column(
         ARRAY(String), nullable=True
     )
+    med_history: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=None)
     last_med_change: Mapped[date | None] = mapped_column(Date, nullable=True)
     allergies: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
     last_visit_date: Mapped[date | None] = mapped_column(Date, nullable=True)

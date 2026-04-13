@@ -286,6 +286,10 @@ active_problems     TEXT[]                  parallel to problem_codes
 problem_codes       TEXT[]                  ICD-10 or SNOMED
 current_medications TEXT[]                  parallel to med_rxnorm_codes
 med_rxnorm_codes    TEXT[]
+med_history         JSONB               full medication timeline,
+                                        list of {name, rxnorm, date, activity}
+                                        sorted chronologically, deduped by
+                                        (name, date, activity)
 last_med_change     DATE
 allergies           TEXT[]
 last_visit_date     DATE
@@ -311,8 +315,11 @@ diastolic_avg       NUMERIC(5,1) NOT NULL
 heart_rate_avg      NUMERIC(5,1)
 effective_datetime  TIMESTAMPTZ NOT NULL
 session             TEXT NOT NULL           morning | evening | ad_hoc
-source              TEXT NOT NULL           generated | manual | ble_auto
-submitted_by        TEXT NOT NULL           patient | carer | generator
+                                            clinic ingestion uses ad_hoc
+source              TEXT NOT NULL           generated | manual | ble_auto | clinic
+                                            clinic = inserted by FHIR ingestion
+                                            used by idempotency COUNT check
+submitted_by        TEXT NOT NULL           patient | carer | generator | clinic
 bp_position         TEXT                    seated | standing
 bp_site             TEXT                    left_arm | right_arm
 consent_version     TEXT NOT NULL DEFAULT '1.0'
@@ -416,6 +423,10 @@ CREATE INDEX idx_audit_events_patient_time
 CREATE INDEX idx_patients_risk_score
   ON patients (risk_tier, risk_score DESC);
 
+-- Migration (added after initial schema) — run via setup_db.py, not a CREATE INDEX:
+ALTER TABLE clinical_context
+  ADD COLUMN IF NOT EXISTS med_history JSONB;
+
 ---
 
 ## SYNTHETIC DATA RULES (never violate — clinical reviewer will catch errors)
@@ -447,10 +458,17 @@ Adherence signal: 91% synthetic confirmations across all three medications.
 PROBLEM.value + PROBLEM_CODE  -> Condition
   clinicalStatus=active, code.text=problem name, code.coding[0].code=ICD-10
 
-MEDICATIONS.*                 -> MedicationRequest
+MEDICATIONS (all visits)      -> _aria_med_history (non-FHIR bundle key)
+  Not a FHIR resource. Passed as bundle["_aria_med_history"].
+  Full medication timeline across all visits, distinct from
+  MedicationRequest resources (current med list, most-recent-wins).
+  Consumed by ingestion.py, stored in clinical_context.med_history.
+
+MEDICATIONS.*                 -> MedicationRequest (current med list only)
   medicationCodeableConcept from MED_NAME+MED_DOSE
   authoredOn from MED_DATE_ADDED
   RxNorm from code_mappings
+  Deduplication: most-recent-wins by MED_CODE across all visits.
 
 VITALS SYSTOLIC+DIASTOLIC     -> Observation
   LOINC 55284-4 (BP panel)

@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from app.services.fhir.adapter import (
+    _build_med_history,
     _map_gender,
     _parse_iemr_datetime,
     convert_iemr_to_fhir,
@@ -498,6 +499,107 @@ def test_deduplication_medication_keeps_last() -> None:
     ]
     assert len(meds) == 1
     assert "10 mg" in meds[0]["medicationCodeableConcept"]["text"]
+
+
+# ---------------------------------------------------------------------------
+# _build_med_history
+# ---------------------------------------------------------------------------
+
+
+def _medication_with_date(
+    name: str = "Lisinopril",
+    dose: str = "10 mg",
+    date_added: str = "01/14/2008 14:45",
+    activity: str = "New",
+    rxnorm: str = "314076",
+    med_code: str = "M001",
+) -> dict:
+    """Convenience builder for a medication entry with explicit date and activity."""
+    return {
+        "code": "internal_x",
+        "MED_CODE": med_code,
+        "MED_NAME": name,
+        "MED_DOSE": dose,
+        "MED_DATE_ADDED": date_added,
+        "MED_ACTIVITY": activity,
+        "code_mappings": {
+            "code_mappings": [{"code": rxnorm, "code_type": "RxNORM"}]
+        },
+    }
+
+
+class TestBuildMedHistory:
+    def test_empty_visits_returns_empty_list(self) -> None:
+        assert _build_med_history([]) == []
+
+    def test_single_entry_extracted(self) -> None:
+        visits = [_make_visit(medications=[_medication_with_date()])]
+        history = _build_med_history(visits)
+        assert len(history) == 1
+        entry = history[0]
+        assert entry["name"] == "Lisinopril 10 mg"
+        assert entry["rxnorm"] == "314076"
+        assert entry["date"] == "2008-01-14"
+        assert entry["activity"] == "New"
+
+    def test_deduplication_same_name_date_activity(self) -> None:
+        """Same (name, date, activity) in two visits produces only one entry."""
+        med = _medication_with_date(date_added="01/14/2008 14:45", activity="Refill")
+        visits = [_make_visit(medications=[med]), _make_visit(medications=[med])]
+        history = _build_med_history(visits)
+        assert len(history) == 1
+
+    def test_different_activities_not_deduplicated(self) -> None:
+        """Same drug and date but different activity = two distinct events."""
+        med_new = _medication_with_date(date_added="01/14/2008 14:45", activity="New")
+        med_refill = _medication_with_date(date_added="01/14/2008 14:45", activity="Refill")
+        visits = [_make_visit(medications=[med_new, med_refill])]
+        history = _build_med_history(visits)
+        assert len(history) == 2
+        activities = {e["activity"] for e in history}
+        assert activities == {"New", "Refill"}
+
+    def test_sorted_chronologically(self) -> None:
+        med_newer = _medication_with_date(name="Drug A", date_added="06/01/2020 09:00")
+        med_older = _medication_with_date(name="Drug B", date_added="03/15/2015 09:00", med_code="M002")
+        visits = [_make_visit(medications=[med_newer, med_older])]
+        history = _build_med_history(visits)
+        assert history[0]["date"] == "2015-03-15"
+        assert history[1]["date"] == "2020-06-01"
+
+    def test_nulls_last_in_sort(self) -> None:
+        med_no_date = {
+            "MED_CODE": "M_NODATE",
+            "MED_NAME": "NullDrug",
+            "MED_DOSE": "5 mg",
+            "MED_ACTIVITY": "New",
+        }
+        med_with_date = _medication_with_date(date_added="01/01/2010 00:00", med_code="M_DATE")
+        visits = [_make_visit(medications=[med_no_date, med_with_date])]
+        history = _build_med_history(visits)
+        assert history[-1]["date"] is None
+
+    def test_med_without_name_skipped(self) -> None:
+        med_no_name = {
+            "MED_CODE": "M_EMPTY",
+            "MED_NAME": "",
+            "MED_DOSE": "",
+            "MED_DATE_ADDED": "01/01/2020 00:00",
+            "MED_ACTIVITY": "New",
+        }
+        visits = [_make_visit(medications=[med_no_name])]
+        history = _build_med_history(visits)
+        assert history == []
+
+
+def test_bundle_contains_aria_med_history_key() -> None:
+    """convert_iemr_to_fhir must attach _aria_med_history to the bundle dict."""
+    visit = _make_visit(medications=[_medication_with_date()])
+    data = _make_iemr([visit])
+    bundle = convert_iemr_to_fhir(data)
+    assert "_aria_med_history" in bundle
+    assert isinstance(bundle["_aria_med_history"], list)
+    assert len(bundle["_aria_med_history"]) == 1
 
 
 # ---------------------------------------------------------------------------

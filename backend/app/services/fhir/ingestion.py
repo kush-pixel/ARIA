@@ -306,6 +306,9 @@ async def ingest_fhir_bundle(
             if s.get("code", {}).get("text")
         ]
 
+        # Non-FHIR metadata injected by adapter.py — full medication timeline.
+        med_history: list[dict] = bundle.get("_aria_med_history") or []
+
         # Sort Observations by effectiveDateTime (ASC) for historical arrays.
         observations = groups.get("Observation", [])
         obs_with_dt: list[tuple[datetime, dict[str, Any]]] = []
@@ -346,6 +349,7 @@ async def ingest_fhir_bundle(
             "problem_codes": problem_codes_list or None,
             "current_medications": current_medications or None,
             "med_rxnorm_codes": med_rxnorm_codes or None,
+            "med_history": med_history or None,
             "last_med_change": last_med_change,
             "allergies": allergies or None,
             "overdue_labs": overdue_labs or None,

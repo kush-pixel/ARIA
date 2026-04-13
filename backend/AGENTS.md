@@ -20,6 +20,10 @@ ruff format app/
 ## Database
 PostgreSQL via Supabase. DATABASE_URL in backend/.env
 Async driver: asyncpg. ORM: SQLAlchemy 2.0 async.
+Schema: 8 tables, 11 indexes (CREATE INDEX IF NOT EXISTS) + 1 ALTER TABLE
+  migration — all managed by scripts/setup_db.py, safe to re-run.
+clinical_context.med_history JSONB — added via ALTER TABLE migration in
+  setup_db.py. Stores full medication timeline from iEMR visits.
 
 ## Critical Syntax
 SQLAlchemy 2.0 async:

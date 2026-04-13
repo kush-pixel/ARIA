@@ -103,6 +103,10 @@ INDEXES: list[tuple[str, str]] = [
         "CREATE INDEX IF NOT EXISTS idx_patients_risk_score "
         "ON patients (risk_tier, risk_score DESC)",
     ),
+    (
+        "clinical_context_med_history_col",
+        "ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS med_history JSONB",
+    ),
 ]
 
 
