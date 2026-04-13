@@ -22,3 +22,9 @@ Non-negotiable rules:
 
 Patient A scenario must match CLAUDE.md days 1-28 exactly.
 Anchor all generation on real historic_bp_systolic from clinical_context.
+Patient 1091 confirmed populated:
+  65 readings, dates stored as ISO strings in historic_bp_dates (TEXT[] not DATE[])
+  Date range: 2008-01-21 to 2013-09-26
+  Systolic range: 105 to 185 mmHg, mean 133.8, SD 16.2
+  Use this mean and SD to anchor the Patient A synthetic baseline (~163 mmHg
+  reflects the elevated period targeted for the demo scenario).

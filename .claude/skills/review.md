@@ -37,9 +37,13 @@ Audit:
   [ ] alert_acknowledged -> audit_events
 
 Database:
-  [ ] All 11 indexes created before data inserted
+  [ ] All 12 indexes created before data inserted (11 CREATE INDEX + 1 ALTER TABLE)
   [ ] TIMESTAMPTZ not TIMESTAMP
   [ ] risk_score column exists on patients
+  [ ] clinical_context.med_history JSONB column present
+  [ ] _aria_med_history consumed from bundle in ingestion.py
+  [ ] Clinic readings use session="ad_hoc" source="clinic"
+  [ ] Index count is 12 not 11
 
 Code:
   [ ] SQLAlchemy 2.0 async syntax throughout
