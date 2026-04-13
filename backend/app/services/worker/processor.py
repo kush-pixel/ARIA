@@ -1,0 +1,361 @@
+"""Background job processor for ARIA.
+
+What was implemented
+---------------------
+WorkerProcessor: an async polling class that claims and executes queued jobs
+from the processing_jobs table.
+
+- Polling loop runs every 30 seconds (configurable); drains the queue without
+  waiting between jobs so bursts are handled quickly.
+- Status transitions: queued → running → succeeded | failed.
+- Claim step uses a conditional UPDATE (WHERE status='queued') so the same job
+  cannot be double-processed if two workers run concurrently in future.
+- finished_at is always written on completion or failure.
+- error_message is written on failure so the cause is visible in the DB.
+
+Three job-type handlers are registered:
+  bundle_import       — loads FHIR Bundle JSON from payload_ref path and
+                        calls ingest_fhir_bundle() [fully implemented].
+  pattern_recompute   — stub; wired up once pattern_engine/ is built (Week 2).
+  briefing_generation — stub; wired up once briefing/ is built (Week 3).
+
+The session_factory parameter is injectable for unit testing — pass a mock
+factory to avoid real DB connections in tests.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from pathlib import Path
+
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.db.base import AsyncSessionLocal
+from app.models.processing_job import ProcessingJob
+from app.utils.logging_utils import get_logger
+
+logger = get_logger(__name__)
+
+# Worker tuning constants — do not hardcode in call sites
+_POLL_INTERVAL_SECONDS: int = 30
+_BATCH_SIZE: int = 10
+
+# Type alias for async job handler functions
+_JobHandler = Callable[[ProcessingJob, AsyncSession], Awaitable[None]]
+
+
+# ---------------------------------------------------------------------------
+# Job handlers (module-level so they can be tested independently)
+# ---------------------------------------------------------------------------
+
+
+async def _handle_bundle_import(job: ProcessingJob, session: AsyncSession) -> None:
+    """Ingest the FHIR Bundle located at job.payload_ref into the database.
+
+    Loads the JSON file at payload_ref, validates the bundle structure, then
+    calls ingest_fhir_bundle() which populates all relevant tables and writes
+    its own audit event. The session passed in is used by ingest_fhir_bundle
+    for its own commits.
+
+    Args:
+        job: The ProcessingJob being executed. payload_ref must point to a
+            valid FHIR Bundle JSON file on disk.
+        session: Async database session forwarded to ingest_fhir_bundle().
+
+    Raises:
+        ValueError: payload_ref is missing, or bundle fails validation.
+        FileNotFoundError: The file at payload_ref does not exist.
+        json.JSONDecodeError: The file at payload_ref is not valid JSON.
+    """
+    # Deferred import avoids circular dependency at module load
+    from app.services.fhir.ingestion import ingest_fhir_bundle
+    from app.services.fhir.validator import validate_fhir_bundle
+
+    if not job.payload_ref:
+        raise ValueError(
+            "bundle_import job is missing payload_ref — cannot locate FHIR Bundle"
+        )
+
+    bundle_path = Path(job.payload_ref)
+    if not bundle_path.exists():
+        raise FileNotFoundError(f"FHIR Bundle file not found: {bundle_path}")
+
+    bundle: dict = json.loads(bundle_path.read_text(encoding="utf-8"))
+
+    errors = validate_fhir_bundle(bundle)
+    if errors:
+        raise ValueError(
+            f"Invalid FHIR Bundle ({len(errors)} error(s)): {'; '.join(errors)}"
+        )
+
+    summary = await ingest_fhir_bundle(bundle, session)
+    logger.info("bundle_import completed: %s", summary)
+
+
+async def _handle_pattern_recompute(job: ProcessingJob, session: AsyncSession) -> None:
+    """Run Layer 1 pattern detectors and Layer 2 risk scorer for the patient.
+
+    Stub — wired up once all detectors in pattern_engine/ are built (Week 2).
+    See: backend/app/services/pattern_engine/
+
+    Execution order when implemented:
+      1. gap_detector.detect_gap(patient_id, session)
+      2. inertia_detector.detect_inertia(patient_id, session)
+      3. adherence_analyzer.analyze_adherence(patient_id, session)
+      4. deterioration_detector.detect_deterioration(patient_id, session)
+      5. risk_scorer.compute_risk_score(patient_id, session)  [Layer 2]
+
+    Args:
+        job: The ProcessingJob being executed. patient_id must be set.
+        session: Async database session.
+
+    Raises:
+        NotImplementedError: Always — stub not yet implemented.
+    """
+    # TODO(Week 2): replace this stub with real detector calls.
+    raise NotImplementedError(
+        "pattern_recompute handler not yet implemented — "
+        "build pattern_engine/ detectors first (Week 2)"
+    )
+
+
+async def _handle_briefing_generation(job: ProcessingJob, session: AsyncSession) -> None:
+    """Compose a deterministic briefing JSON and optional LLM summary.
+
+    Stub — wired up once briefing/ service is built (Week 3).
+    See: backend/app/services/briefing/
+
+    Layer execution order when implemented (STRICT — never reverse):
+      1. compose_briefing() — deterministic JSON from Layer 1 + Layer 2 outputs
+      2. Verify all 9 briefing fields are populated
+      3. summarize()        — optional LLM readable summary (Layer 3)
+
+    Args:
+        job: The ProcessingJob being executed. patient_id must be set.
+        session: Async database session.
+
+    Raises:
+        NotImplementedError: Always — stub not yet implemented.
+    """
+    # TODO(Week 3): replace this stub with real briefing calls.
+    raise NotImplementedError(
+        "briefing_generation handler not yet implemented — "
+        "build briefing/composer.py first (Week 3)"
+    )
+
+
+# Registry of all supported job_type values → handler functions.
+# Add new handlers here when new job types are introduced.
+_HANDLERS: dict[str, _JobHandler] = {
+    "bundle_import": _handle_bundle_import,
+    "pattern_recompute": _handle_pattern_recompute,
+    "briefing_generation": _handle_briefing_generation,
+}
+
+
+# ---------------------------------------------------------------------------
+# WorkerProcessor
+# ---------------------------------------------------------------------------
+
+
+class WorkerProcessor:
+    """Polls processing_jobs and dispatches queued jobs to their handlers.
+
+    The worker runs an infinite async loop, checking for queued jobs every
+    ``poll_interval`` seconds. When jobs are present it processes the whole
+    batch without sleeping so bursts drain quickly. Sleep only occurs when
+    the queue is empty.
+
+    Job lifecycle
+    -------------
+    queued  → running   : claimed via conditional UPDATE (rowcount guard)
+    running → succeeded : handler returned without raising
+    running → failed    : handler raised any exception
+
+    All transitions record started_at / finished_at. Failures record
+    error_message so the cause is visible in the processing_jobs table.
+
+    Args:
+        poll_interval: Seconds to wait between polls when the queue is empty.
+            Default is 30 seconds per the ARIA specification.
+        session_factory: SQLAlchemy async session factory. Defaults to the
+            application AsyncSessionLocal. Override in tests to inject mocks.
+    """
+
+    def __init__(
+        self,
+        poll_interval: int = _POLL_INTERVAL_SECONDS,
+        session_factory: async_sessionmaker[AsyncSession] | None = None,
+    ) -> None:
+        self._poll_interval = poll_interval
+        self._session_factory: async_sessionmaker[AsyncSession] = (
+            session_factory if session_factory is not None else AsyncSessionLocal
+        )
+        self._running = False
+
+    async def run(self) -> None:
+        """Start the polling loop. Runs until stop() is called or cancelled.
+
+        Handles asyncio.CancelledError (SIGINT / task cancellation) cleanly.
+        Unexpected exceptions in the loop body are logged and retried after
+        one poll interval to keep the worker alive through transient failures.
+        """
+        self._running = True
+        logger.info(
+            "WorkerProcessor started — batch_size=%d poll_interval=%ds",
+            _BATCH_SIZE,
+            self._poll_interval,
+        )
+
+        while self._running:
+            try:
+                processed = await self._process_batch()
+                if processed == 0:
+                    # Queue was empty — sleep before next poll
+                    await asyncio.sleep(self._poll_interval)
+            except asyncio.CancelledError:
+                logger.info("WorkerProcessor cancelled — shutting down cleanly")
+                self._running = False
+                break
+            except Exception as exc:
+                logger.error(
+                    "WorkerProcessor loop error (will retry after %ds): %s",
+                    self._poll_interval,
+                    exc,
+                )
+                await asyncio.sleep(self._poll_interval)
+
+        logger.info("WorkerProcessor stopped")
+
+    def stop(self) -> None:
+        """Signal the worker to stop after the current batch completes.
+
+        Does not cancel in-flight jobs — the current batch finishes first.
+        """
+        self._running = False
+        logger.info("WorkerProcessor stop requested")
+
+    async def _process_batch(self) -> int:
+        """Fetch up to _BATCH_SIZE queued jobs and dispatch each one.
+
+        Returns:
+            Number of jobs that were claimed and dispatched in this batch
+            (includes jobs that subsequently transitioned to 'failed').
+        """
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ProcessingJob)
+                .where(ProcessingJob.status == "queued")
+                .order_by(ProcessingJob.queued_at.asc())
+                .limit(_BATCH_SIZE)
+            )
+            jobs = list(result.scalars().all())
+
+        dispatched = 0
+        for job in jobs:
+            claimed = await self._process_one(job)
+            if claimed:
+                dispatched += 1
+
+        return dispatched
+
+    async def _process_one(self, job: ProcessingJob) -> bool:
+        """Claim and execute a single job.
+
+        The claim step is an UPDATE WHERE status='queued'. If rowcount is 0
+        another worker already claimed the job and we skip it — safe for
+        future multi-worker deployments without additional locking.
+
+        Args:
+            job: The ProcessingJob to attempt to claim and execute.
+
+        Returns:
+            True  — job was claimed and processed (success or failure).
+            False — job was already claimed by another worker; skipped.
+        """
+        # --- Claim atomically -------------------------------------------
+        async with self._session_factory() as session:
+            claim_result = await session.execute(
+                update(ProcessingJob)
+                .where(
+                    ProcessingJob.job_id == job.job_id,
+                    ProcessingJob.status == "queued",
+                )
+                .values(
+                    status="running",
+                    started_at=datetime.now(UTC),
+                )
+            )
+            await session.commit()
+
+        if claim_result.rowcount == 0:
+            logger.debug("Job %s already claimed by another worker — skipping", job.job_id)
+            return False
+
+        logger.info(
+            "Job %s [%s] claimed for patient=%s",
+            job.job_id,
+            job.job_type,
+            job.patient_id,
+        )
+
+        # --- Dispatch to handler ----------------------------------------
+        handler = _HANDLERS.get(job.job_type)
+        if handler is None:
+            error_msg = f"Unknown job_type {job.job_type!r} — no handler registered"
+            logger.error("Job %s: %s", job.job_id, error_msg)
+            await self._mark_failed(job.job_id, error_msg)
+            return True
+
+        try:
+            async with self._session_factory() as handler_session:
+                await handler(job, handler_session)
+            await self._mark_succeeded(job.job_id)
+            logger.info("Job %s [%s] succeeded", job.job_id, job.job_type)
+        except Exception as exc:
+            error_msg = str(exc)
+            logger.error("Job %s [%s] failed: %s", job.job_id, job.job_type, error_msg)
+            await self._mark_failed(job.job_id, error_msg)
+
+        return True
+
+    async def _mark_succeeded(self, job_id: str) -> None:
+        """Transition a job to succeeded and record finished_at.
+
+        Args:
+            job_id: UUID string of the ProcessingJob to update.
+        """
+        async with self._session_factory() as session:
+            await session.execute(
+                update(ProcessingJob)
+                .where(ProcessingJob.job_id == job_id)
+                .values(
+                    status="succeeded",
+                    finished_at=datetime.now(UTC),
+                )
+            )
+            await session.commit()
+
+    async def _mark_failed(self, job_id: str, error_message: str) -> None:
+        """Transition a job to failed and record error_message + finished_at.
+
+        Args:
+            job_id: UUID string of the ProcessingJob to update.
+            error_message: Human-readable cause of the failure. Do not include
+                PHI — this value is stored in processing_jobs.error_message.
+        """
+        async with self._session_factory() as session:
+            await session.execute(
+                update(ProcessingJob)
+                .where(ProcessingJob.job_id == job_id)
+                .values(
+                    status="failed",
+                    error_message=error_message,
+                    finished_at=datetime.now(UTC),
+                )
+            )
+            await session.commit()
