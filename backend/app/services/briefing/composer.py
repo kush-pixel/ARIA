@@ -1,0 +1,539 @@
+"""Deterministic Layer 1 briefing composer for ARIA.
+
+Queries the database to assemble the structured pre-visit briefing JSON for a
+patient's appointment day.  This module implements Layer 1 of the three-layer
+AI architecture — pure deterministic logic, no LLM.
+
+The Layer 3 LLM summariser (summarizer.py) may optionally be called AFTER this
+composer has produced and persisted a verified briefing.  Never call Layer 3
+before Layer 1 is complete.
+"""
+
+from __future__ import annotations
+
+import statistics
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
+
+from sqlalchemy import and_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.alert import Alert
+from app.models.audit_event import AuditEvent
+from app.models.briefing import Briefing
+from app.models.clinical_context import ClinicalContext
+from app.models.medication_confirmation import MedicationConfirmation
+from app.models.patient import Patient
+from app.models.reading import Reading
+from app.utils.logging_utils import get_logger
+
+logger = get_logger(__name__)
+
+# ── Clinical thresholds ────────────────────────────────────────────────────────
+_ELEVATED_SYSTOLIC: float = 140.0       # mmHg — ESH/AHA hypertension threshold
+_ADHERENCE_THRESHOLD: float = 80.0     # % — clinical low-adherence flag
+_INERTIA_DAYS: int = 7                  # days of elevation before inertia flag
+_TREND_MIN_READINGS: int = 7            # minimum readings needed for trend comparison
+
+
+# ── Internal helpers ───────────────────────────────────────────────────────────
+
+def _now_utc() -> datetime:
+    """Return current UTC-aware datetime."""
+    return datetime.now(tz=UTC)
+
+
+def _bp_category(systolic: float) -> str:
+    """Return a plain-English BP category label for a systolic value.
+
+    Args:
+        systolic: Mean systolic BP in mmHg.
+
+    Returns:
+        Human-readable category string.
+    """
+    if systolic < 120:
+        return "normal range"
+    if systolic < 130:
+        return "elevated range"
+    if systolic < 140:
+        return "Stage 1 hypertension range"
+    return "Stage 2 hypertension range"
+
+
+def _build_trend_summary(
+    readings: list[Reading],
+    last_clinic_systolic: int | None,
+    last_clinic_diastolic: int | None,
+    monitoring_active: bool,
+) -> str:
+    """Describe the 28-day home BP trend in plain clinical language.
+
+    Args:
+        readings: List of Reading rows from the last 28 days, sorted ascending.
+        last_clinic_systolic: Most recent in-clinic systolic from EHR.
+        last_clinic_diastolic: Most recent in-clinic diastolic from EHR.
+        monitoring_active: Whether the patient has home monitoring active.
+
+    Returns:
+        Trend summary string for the briefing payload.
+    """
+    if not monitoring_active:
+        if last_clinic_systolic and last_clinic_diastolic:
+            return (
+                f"No home monitoring. Last clinic reading: "
+                f"{last_clinic_systolic}/{last_clinic_diastolic} mmHg."
+            )
+        return "No home monitoring data available. EHR data only."
+
+    if not readings:
+        return "Home monitoring active but no readings received in the past 28 days."
+
+    systolics = [float(r.systolic_avg) for r in readings]
+    diastolics = [float(r.diastolic_avg) for r in readings]
+
+    avg_sys = statistics.mean(systolics)
+    avg_dia = statistics.mean(diastolics)
+    n = len(readings)
+    category = _bp_category(avg_sys)
+
+    # Trend direction — compare first 7 vs last 7 sessions
+    trend = ""
+    if n >= _TREND_MIN_READINGS:
+        early_mean = statistics.mean(systolics[:7])
+        late_mean = statistics.mean(systolics[-7:])
+        delta = late_mean - early_mean
+        if delta >= 5:
+            trend = " Readings show an upward trend over the period."
+        elif delta <= -5:
+            trend = " Readings show a downward trend over the period."
+        else:
+            trend = " Readings have been relatively stable."
+
+    return (
+        f"28-day home average: {avg_sys:.0f}/{avg_dia:.0f} mmHg "
+        f"({category}) based on {n} reading sessions.{trend}"
+    )
+
+
+def _build_medication_status(
+    current_medications: list[str] | None,
+    last_med_change: date | None,
+) -> str:
+    """Describe the current medication regimen and last recorded change date.
+
+    Args:
+        current_medications: List of medication name strings from clinical_context.
+        last_med_change: Date of most recent MedicationRequest change from EHR.
+
+    Returns:
+        Medication status string for the briefing payload.
+    """
+    if not current_medications:
+        return "No current medications recorded in EHR."
+
+    meds = ", ".join(current_medications)
+    if last_med_change:
+        days_since = (date.today() - last_med_change).days
+        return (
+            f"Current regimen: {meds}. "
+            f"Last recorded medication change: {last_med_change.isoformat()} "
+            f"({days_since} days ago)."
+        )
+    return f"Current regimen: {meds}. No medication change date recorded in EHR."
+
+
+def _compute_adherence(
+    confirmations: list[MedicationConfirmation],
+) -> dict[str, dict[str, Any]]:
+    """Compute per-medication adherence rates from confirmation records.
+
+    Args:
+        confirmations: All MedicationConfirmation rows for the period.
+
+    Returns:
+        Dict keyed by medication_name with keys: scheduled, confirmed, rate_pct.
+    """
+    by_med: dict[str, dict[str, int]] = {}
+    for conf in confirmations:
+        med = conf.medication_name
+        if med not in by_med:
+            by_med[med] = {"scheduled": 0, "confirmed": 0}
+        by_med[med]["scheduled"] += 1
+        if conf.confirmed_at is not None:
+            by_med[med]["confirmed"] += 1
+
+    result: dict[str, dict[str, Any]] = {}
+    for med, counts in by_med.items():
+        scheduled = counts["scheduled"]
+        confirmed = counts["confirmed"]
+        rate = (confirmed / scheduled * 100.0) if scheduled > 0 else 0.0
+        result[med] = {
+            "scheduled": scheduled,
+            "confirmed": confirmed,
+            "rate_pct": round(rate, 1),
+        }
+    return result
+
+
+def _build_adherence_summary(
+    confirmations: list[MedicationConfirmation],
+    readings: list[Reading],
+    monitoring_active: bool,
+) -> str:
+    """Describe per-medication adherence rates using clinical language.
+
+    Uses "possible adherence concern" not "non-adherent" per CLAUDE.md.
+
+    Args:
+        confirmations: Medication confirmation rows for the 28-day period.
+        readings: Reading rows for the 28-day period (used for pattern context).
+        monitoring_active: Whether home monitoring is active for this patient.
+
+    Returns:
+        Adherence summary string for the briefing payload.
+    """
+    if not monitoring_active:
+        return "Medication confirmation data not available (home monitoring not active)."
+
+    if not confirmations:
+        return "No medication confirmation data available for this period."
+
+    adherence = _compute_adherence(confirmations)
+    lines = [
+        f"{med}: {data['rate_pct']:.0f}% "
+        f"({data['confirmed']}/{data['scheduled']} doses confirmed)"
+        for med, data in adherence.items()
+    ]
+    overall_scheduled = sum(d["scheduled"] for d in adherence.values())
+    overall_confirmed = sum(d["confirmed"] for d in adherence.values())
+    overall_rate = (
+        (overall_confirmed / overall_scheduled * 100.0) if overall_scheduled > 0 else 0.0
+    )
+
+    summary = "; ".join(lines) + f". Overall confirmation rate: {overall_rate:.0f}%."
+
+    # Pattern interpretation — clinical language enforced
+    if readings:
+        avg_sys = statistics.mean(float(r.systolic_avg) for r in readings)
+        if overall_rate < _ADHERENCE_THRESHOLD and avg_sys >= _ELEVATED_SYSTOLIC:
+            summary += (
+                " Pattern suggests possible adherence concern alongside elevated readings."
+            )
+        elif overall_rate < _ADHERENCE_THRESHOLD and avg_sys < _ELEVATED_SYSTOLIC:
+            summary += " Low confirmation rate with controlled readings — contextual review."
+        elif overall_rate >= _ADHERENCE_THRESHOLD and avg_sys >= _ELEVATED_SYSTOLIC:
+            summary += (
+                " High confirmation rate with sustained elevated readings — "
+                "possible treatment review warranted."
+            )
+
+    return summary
+
+
+def _build_urgent_flags(alerts: list[Alert]) -> list[str]:
+    """Convert unacknowledged Alert rows into human-readable flag strings.
+
+    Args:
+        alerts: Unacknowledged Alert ORM instances for this patient.
+
+    Returns:
+        List of flag strings for the urgent_flags briefing field.
+    """
+    flags: list[str] = []
+    for alert in alerts:
+        if alert.alert_type == "gap_urgent":
+            days = alert.gap_days or "unknown number of"
+            flags.append(f"Reading gap: {days} days without home BP data (urgent threshold).")
+        elif alert.alert_type == "gap_briefing":
+            days = alert.gap_days or "unknown number of"
+            flags.append(f"Reading gap: {days} days without home BP data.")
+        elif alert.alert_type == "inertia":
+            sys_str = f"{alert.systolic_avg:.0f}" if alert.systolic_avg else "elevated"
+            flags.append(
+                f"Therapeutic inertia: sustained {sys_str} mmHg average systolic "
+                f"with no medication change recorded."
+            )
+        elif alert.alert_type == "deterioration":
+            flags.append(
+                "Deterioration flag: sustained worsening trend relative to personal baseline."
+            )
+    return flags
+
+
+def _build_visit_agenda(
+    urgent_flags: list[str],
+    readings: list[Reading],
+    confirmations: list[MedicationConfirmation],
+    active_problems: list[str] | None,
+    overdue_labs: list[str] | None,
+    last_med_change: date | None,
+    monitoring_active: bool,
+) -> list[str]:
+    """Build a prioritised visit agenda (up to 6 items).
+
+    Priority order per CLAUDE.md:
+    1. Urgent alerts
+    2. Inertia flag (elevated BP + no med change > 7 days)
+    3. Adherence concern
+    4. Overdue labs
+    5. Active problems review
+    6. Next appointment recommendation
+
+    Args:
+        urgent_flags: Pre-built urgent flag strings from _build_urgent_flags.
+        readings: 28-day reading rows.
+        confirmations: 28-day medication confirmation rows.
+        active_problems: Problem list from clinical context.
+        overdue_labs: Overdue lab list from clinical context.
+        last_med_change: Date of last medication change from clinical context.
+        monitoring_active: Whether home monitoring is active.
+
+    Returns:
+        Ordered list of visit agenda item strings (max 6).
+    """
+    agenda: list[str] = []
+
+    # 1. Urgent alerts
+    for flag in urgent_flags:
+        agenda.append(f"URGENT: {flag}")
+        if len(agenda) >= 6:
+            return agenda
+
+    # 2. Therapeutic inertia
+    if monitoring_active and readings:
+        avg_sys = statistics.mean(float(r.systolic_avg) for r in readings)
+        if avg_sys >= _ELEVATED_SYSTOLIC and last_med_change is not None:
+            days_since = (date.today() - last_med_change).days
+            if days_since > _INERTIA_DAYS:
+                agenda.append(
+                    f"Review treatment plan: 28-day average systolic {avg_sys:.0f} mmHg "
+                    f"with no recorded medication change in {days_since} days."
+                )
+        elif avg_sys >= _ELEVATED_SYSTOLIC and last_med_change is None:
+            agenda.append(
+                f"Review treatment plan: 28-day average systolic {avg_sys:.0f} mmHg "
+                f"with no medication change date recorded."
+            )
+
+    # 3. Adherence concern
+    if monitoring_active and confirmations:
+        adherence = _compute_adherence(confirmations)
+        overall_scheduled = sum(d["scheduled"] for d in adherence.values())
+        overall_confirmed = sum(d["confirmed"] for d in adherence.values())
+        overall_rate = (
+            (overall_confirmed / overall_scheduled * 100.0) if overall_scheduled > 0 else 0.0
+        )
+        if overall_rate < _ADHERENCE_THRESHOLD:
+            agenda.append(
+                f"Discuss possible adherence concern: {overall_rate:.0f}% overall "
+                f"confirmation rate across all medications in the past 28 days."
+            )
+
+    # 4. Overdue labs
+    if overdue_labs:
+        for lab in overdue_labs:
+            if len(agenda) >= 5:
+                break
+            agenda.append(f"Order overdue lab: {lab}.")
+
+    # 5. Active problems review
+    if active_problems and len(agenda) < 5:
+        problems_str = ", ".join(active_problems)
+        agenda.append(f"Review active conditions: {problems_str}.")
+
+    # 6. Next appointment recommendation
+    if len(agenda) < 6:
+        agenda.append("Confirm next monitoring review date with patient.")
+
+    return agenda[:6]
+
+
+def _build_data_limitations(
+    readings: list[Reading],
+    monitoring_active: bool,
+) -> str:
+    """Describe any data quality or availability limitations for this briefing.
+
+    Args:
+        readings: 28-day reading rows (may be empty).
+        monitoring_active: Whether home monitoring is active.
+
+    Returns:
+        Data limitations string for the briefing payload.
+    """
+    if not monitoring_active:
+        return "Patient is on EHR-only pathway. No home monitoring data available."
+    if not readings:
+        return "Home monitoring active but no readings received in past 28 days."
+    n = len(readings)
+    if n < 14:
+        return (
+            f"Limited home monitoring data: {n} sessions in past 28 days. "
+            f"Trend interpretation should be treated with caution."
+        )
+    return f"Home monitoring data available: {n} sessions over 28 days."
+
+
+# ── Public API ─────────────────────────────────────────────────────────────────
+
+async def compose_briefing(
+    session: AsyncSession,
+    patient_id: str,
+    appointment_date: date,
+) -> Briefing:
+    """Compose and persist a deterministic Layer 1 pre-visit briefing.
+
+    Queries the database for the patient's readings, alerts, medication
+    confirmations, and clinical context, then assembles the 9-field structured
+    briefing JSON and writes a Briefing row to the database.
+
+    This is a Layer 1 operation — pure deterministic logic, no LLM.
+    Layer 3 (summarizer.py) must NOT be called before this function completes.
+
+    Args:
+        session: Active async SQLAlchemy session.
+        patient_id: The patient's unique identifier.
+        appointment_date: The appointment date this briefing covers.
+
+    Returns:
+        The persisted Briefing ORM instance.
+
+    Raises:
+        ValueError: If the patient or clinical context row is not found.
+    """
+    logger.info(
+        "Composing Layer 1 briefing for patient=%s appointment=%s",
+        patient_id,
+        appointment_date,
+    )
+
+    # ── Fetch patient ──────────────────────────────────────────────────────────
+    patient_result = await session.execute(
+        select(Patient).where(Patient.patient_id == patient_id)
+    )
+    patient = patient_result.scalar_one_or_none()
+    if patient is None:
+        raise ValueError(f"Patient {patient_id!r} not found in database.")
+
+    # ── Fetch clinical context ─────────────────────────────────────────────────
+    ctx_result = await session.execute(
+        select(ClinicalContext).where(ClinicalContext.patient_id == patient_id)
+    )
+    ctx = ctx_result.scalar_one_or_none()
+    if ctx is None:
+        raise ValueError(f"Clinical context for patient {patient_id!r} not found.")
+
+    # ── Fetch last 28 days of readings (ascending by time) ────────────────────
+    since = _now_utc() - timedelta(days=28)
+    readings_result = await session.execute(
+        select(Reading)
+        .where(
+            and_(
+                Reading.patient_id == patient_id,
+                Reading.effective_datetime >= since,
+            )
+        )
+        .order_by(Reading.effective_datetime.asc())
+    )
+    readings = list(readings_result.scalars().all())
+
+    # ── Fetch unacknowledged alerts ───────────────────────────────────────────
+    alerts_result = await session.execute(
+        select(Alert)
+        .where(
+            and_(
+                Alert.patient_id == patient_id,
+                Alert.acknowledged_at.is_(None),
+            )
+        )
+        .order_by(Alert.triggered_at.desc())
+    )
+    alerts = list(alerts_result.scalars().all())
+
+    # ── Fetch 28-day medication confirmations ─────────────────────────────────
+    confs_result = await session.execute(
+        select(MedicationConfirmation)
+        .where(
+            and_(
+                MedicationConfirmation.patient_id == patient_id,
+                MedicationConfirmation.scheduled_time >= since,
+            )
+        )
+        .order_by(MedicationConfirmation.scheduled_time.asc())
+    )
+    confirmations = list(confs_result.scalars().all())
+
+    # ── Build all 9 briefing fields ───────────────────────────────────────────
+    trend_summary = _build_trend_summary(
+        readings=readings,
+        last_clinic_systolic=ctx.last_clinic_systolic,
+        last_clinic_diastolic=ctx.last_clinic_diastolic,
+        monitoring_active=patient.monitoring_active,
+    )
+    medication_status = _build_medication_status(
+        current_medications=ctx.current_medications,
+        last_med_change=ctx.last_med_change,
+    )
+    adherence_summary = _build_adherence_summary(
+        confirmations=confirmations,
+        readings=readings,
+        monitoring_active=patient.monitoring_active,
+    )
+    urgent_flags = _build_urgent_flags(alerts)
+    visit_agenda = _build_visit_agenda(
+        urgent_flags=urgent_flags,
+        readings=readings,
+        confirmations=confirmations,
+        active_problems=ctx.active_problems,
+        overdue_labs=ctx.overdue_labs,
+        last_med_change=ctx.last_med_change,
+        monitoring_active=patient.monitoring_active,
+    )
+    data_limitations = _build_data_limitations(
+        readings=readings,
+        monitoring_active=patient.monitoring_active,
+    )
+
+    payload: dict[str, Any] = {
+        "trend_summary": trend_summary,
+        "medication_status": medication_status,
+        "adherence_summary": adherence_summary,
+        "active_problems": ctx.active_problems or [],
+        "overdue_labs": ctx.overdue_labs or [],
+        "visit_agenda": visit_agenda,
+        "urgent_flags": urgent_flags,
+        "risk_score": float(patient.risk_score) if patient.risk_score is not None else None,
+        "data_limitations": data_limitations,
+    }
+
+    # ── Persist briefing row ──────────────────────────────────────────────────
+    briefing = Briefing(
+        patient_id=patient_id,
+        appointment_date=appointment_date,
+        llm_response=payload,
+    )
+    session.add(briefing)
+    await session.flush()  # populate briefing_id before writing audit row
+
+    # ── Write audit event ─────────────────────────────────────────────────────
+    audit = AuditEvent(
+        actor_type="system",
+        actor_id="briefing_composer",
+        patient_id=patient_id,
+        action="briefing_generation",
+        resource_type="Briefing",
+        resource_id=briefing.briefing_id,
+        outcome="success",
+        details=f"Layer 1 briefing composed for appointment {appointment_date.isoformat()}",
+    )
+    session.add(audit)
+    await session.commit()
+
+    logger.info(
+        "Briefing %s composed for patient=%s appointment=%s",
+        briefing.briefing_id,
+        patient_id,
+        appointment_date,
+    )
+    return briefing
