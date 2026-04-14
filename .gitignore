@@ -10,6 +10,8 @@ data/synthetic/*.json
 
 # AI hooks only (personal workflow)
 .claude/hooks/
+.codex/
+.codex*
 
 # Python
 __pycache__/

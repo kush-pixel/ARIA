@@ -299,12 +299,26 @@ async def test_stop_sets_running_false() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_handle_pattern_recompute_raises_not_implemented() -> None:
-    """_handle_pattern_recompute raises NotImplementedError (stub)."""
+async def test_handle_pattern_recompute_calls_risk_scorer() -> None:
+    """_handle_pattern_recompute calls the Layer 2 risk scorer."""
     job = _make_job(job_type="pattern_recompute")
     session = AsyncMock()
 
-    with pytest.raises(NotImplementedError, match="pattern_recompute"):
+    with patch(
+        "app.services.pattern_engine.risk_scorer.compute_risk_score",
+        AsyncMock(return_value=42.5),
+    ) as scorer:
+        await _handle_pattern_recompute(job, session)
+
+    scorer.assert_awaited_once_with("1091", session)
+
+
+async def test_handle_pattern_recompute_raises_without_patient_id() -> None:
+    """_handle_pattern_recompute raises ValueError when patient_id is absent."""
+    job = _make_job(job_type="pattern_recompute", patient_id=None)  # type: ignore[arg-type]
+    session = AsyncMock()
+
+    with pytest.raises(ValueError, match="missing patient_id"):
         await _handle_pattern_recompute(job, session)
 
 
