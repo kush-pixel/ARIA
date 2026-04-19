@@ -1,12 +1,12 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-13 by Yash
+Last updated: 2026-04-18 by Sahil Khalsa (processor.py fully wired — all stubs removed)
 
 ---
 
 ## Pipeline Status
 
 ```
-iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [NEXT] Synthetic readings → [PARTIAL] Pattern engine → [DONE] Briefing → [ ] Dashboard
+iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthetic readings → [DONE] Pattern engine → [DONE] Briefing → [ ] Dashboard
 ```
 
 ---
@@ -31,10 +31,10 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [NEXT] Synthet
 - backend/app/services/fhir/ingestion.py — ingest_fhir_bundle() populates patients, clinical_context, readings, audit_events; idempotent (patients ON CONFLICT DO NOTHING, clinical_context ON CONFLICT DO UPDATE, readings COUNT guard); 65 clinic readings inserted for patient 1091; risk_tier=high set via CHF override (I50.9 in problem codes); audit event always written in finally block; med_history extracted from _aria_med_history and written to clinical_context upsert
 - scripts/run_ingestion.py — CLI: reads FHIR Bundle, validates, ingests to PostgreSQL, prints summary; accepts --bundle flag (default: data/fhir/bundles/1091_bundle.json)
 - backend/tests/test_ingestion.py — 36 unit tests passing, 1 integration test (@pytest.mark.integration); covers success path, idempotency, CHF tier override, failure audit event, all summary fields
-- backend/app/services/worker/processor.py — WorkerProcessor async polling class; polls processing_jobs every 30s; status flow queued→running→succeeded|failed; atomic claim via conditional UPDATE (rowcount guard); finished_at always written; three handlers: bundle_import (fully implemented, calls ingest_fhir_bundle), pattern_recompute (implemented for Layer 2 risk scoring only; Layer 1 detector TODOs documented), briefing_generation (stub, Week 3); session_factory injectable for tests
+- backend/app/services/worker/processor.py — WorkerProcessor async polling class; polls processing_jobs every 30s; status flow queued→running→succeeded|failed; atomic claim via conditional UPDATE (rowcount guard); finished_at always written; three handlers fully wired: bundle_import (ingest_fhir_bundle), pattern_recompute (all 4 Layer 1 detectors in order then compute_risk_score), briefing_generation (compose_briefing + generate_llm_summary; Layer 3 failure caught and logged, job still succeeds); session_factory injectable for tests
 - backend/app/services/worker/scheduler.py — enqueue_briefing_jobs() finds monitoring_active patients with next_appointment::DATE = today and no existing briefing, inserts briefing_generation jobs; idempotent via ON CONFLICT DO NOTHING on idempotency_key ("briefing_generation:{patient_id}:{YYYY-MM-DD}"); mirrors spec Section 7.4 query exactly; callable from POST /api/admin/trigger-scheduler for demo mode
 - scripts/run_worker.py — CLI entry point; starts WorkerProcessor + APScheduler cron at 07:30Z daily; graceful Ctrl+C shutdown
-- backend/tests/test_worker.py — 20 unit tests passing, 1 integration test (@pytest.mark.integration, deselected in unit-only run); covers processor status transitions, claim guard, error handling, unknown job type, pattern_recompute risk scorer dispatch, briefing_generation stub, scheduler enqueue logic, idempotency key format
+- backend/tests/test_worker.py — 23 unit tests passing, 1 integration test (@pytest.mark.integration, deselected in unit-only run); covers processor status transitions, claim guard, error handling, unknown job type, pattern_recompute (all 4 detectors + scorer), briefing_generation (Layer 1+3 success, Layer 3 graceful failure, missing patient_id, bad date in key), scheduler enqueue logic, idempotency key format
 - backend/tests/test_ingestion.py — 37 unit tests passing, 1 integration test (@pytest.mark.integration); covers success path, idempotency, CHF tier override, failure audit event, all summary fields, med_history stored in upsert
 - backend/app/services/generator/reading_generator.py — Patient A 28-day scenario; 47 readings (14+13+4+6+10); all clinical rules pass; 14 unit tests + 1 integration test; ruff clean; WARNING: EVENING_OFFSET_HIGH=9.0 allows morning/evening diff up to 12 mmHg — spec max is 10 mmHg; fix: lower EVENING_OFFSET_HIGH to 7.0
 - backend/app/services/generator/confirmation_generator.py — synthetic medication confirmation events for all active medications over 28 days; 1092 scheduled doses for patient 1091; 977 confirmed (89.5%), 115 missed; weekday rate 0.95, weekend rate 0.78 (blended ~90% matches Patient A spec 91%); 20 unit tests passing; ruff clean
@@ -46,26 +46,20 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [NEXT] Synthet
 - prompts/briefing_summary_prompt.md — Layer 3 system prompt; enforces 3-sentence output, clinical language rules, no medication recommendations
 - backend/tests/test_briefing_composer.py — 61 unit tests (all passing); covers all helper functions, all 9 briefing fields, clinical language enforcement, async compose_briefing with mocked session, error handling, summarizer helpers
 
-- backend/app/services/pattern_engine/risk_scorer.py — Layer 2 compute_risk_score(patient_id, session); verifies patient exists, queries 28-day readings, clinical_context, medication_confirmations directly because Layer 1 detectors are not built yet; computes weighted 0.0–100.0 priority score from systolic-vs-baseline, medication inertia, inverted adherence, reading gap, and comorbidity count; handles missing data with neutral/default signals; rounds to 2 decimals and persists patients.risk_score; no audit_event required for this computation
+- backend/app/services/pattern_engine/risk_scorer.py — Layer 2 compute_risk_score(patient_id, session); verifies patient exists, queries 28-day readings, clinical_context, medication_confirmations directly; computes weighted 0.0–100.0 priority score from systolic-vs-baseline, medication inertia, inverted adherence, reading gap, and comorbidity count; handles missing data with neutral/default signals; rounds to 2 decimals and persists patients.risk_score; no audit_event required for this computation
 - backend/tests/test_risk_scorer.py — 14 unit tests passing with mocked AsyncSession; covers high/low risk scenarios, no readings, no confirmations, NULL last_med_change, clinic systolic fallback, patient not found, clamping, persistence, rounding/commit behavior, and per-signal weight verification
-- backend/app/services/briefing/composer.py — compose_briefing() async function; queries DB for 28-day readings, unacknowledged alerts, medication confirmations, clinical context; assembles all 9 deterministic briefing fields (trend_summary, medication_status, adherence_summary, active_problems, overdue_labs, visit_agenda, urgent_flags, risk_score, data_limitations); persists Briefing row + audit_event row; clinical language enforced at code level ("possible adherence concern", "treatment review warranted"); Layer 1 only — no LLM
-- backend/app/services/briefing/summarizer.py — generate_llm_summary() async function; loads prompt from prompts/briefing_summary_prompt.md; computes SHA-256 prompt_hash; calls claude-sonnet-4-20250514 for 3-sentence readable summary; writes readable_summary into llm_response JSONB; populates model_version, prompt_hash, generated_at on briefing row for audit; must only run after Layer 1 is verified
-- backend/app/services/briefing/__init__.py — exports compose_briefing, generate_llm_summary
-- prompts/briefing_summary_prompt.md — Layer 3 system prompt; enforces 3-sentence output, clinical language rules, no medication recommendations
-- backend/tests/test_briefing_composer.py — 61 unit tests (all passing); covers all helper functions, all 9 briefing fields, clinical language enforcement, async compose_briefing with mocked session, error handling, summarizer helpers
+
+- backend/app/services/pattern_engine/gap_detector.py — Layer 1 run_gap_detector(session, patient_id) → GapResult; tier-aware thresholds (high: flag≥1d/urgent≥3d, medium: flag≥3d/urgent≥5d, low: flag≥7d/urgent≥14d); returns gap_days, flagged, urgent booleans; no readings → gap_days=None, flagged=False
+- backend/app/services/pattern_engine/inertia_detector.py — Layer 1 run_inertia_detector(session, patient_id) → InertiaResult; all 4 conditions required simultaneously: avg systolic≥140, ≥5 elevated readings, elevated span >7 days, no med change on/after first elevated reading; fail-safe: any unmet condition → detected=False
+- backend/app/services/pattern_engine/adherence_analyzer.py — Layer 1 run_adherence_analyzer(session, patient_id) → AdherenceResult; 28-day adherence rate from confirmations vs avg systolic; Pattern A (elevated+low adherence)="possible adherence concern", Pattern B (elevated+high adherence)="treatment review warranted", Pattern C (normal+low adherence)="contextual review", none=no concern; clinical language enforced at code level
+- backend/app/services/pattern_engine/deterioration_detector.py — Layer 1 run_deterioration_detector(session, patient_id) → DeteriorationResult; dual-signal: least-squares positive slope over 14 days AND recent 3-day avg > days 4–10 baseline avg; both signals required to reduce false positives; <7 readings → detected=False; pure Python slope (no numpy)
+- backend/tests/test_pattern_engine.py — 39 unit tests (all passing); covers all 4 Layer 1 detectors and their edge cases (no readings, sparse data, borderline thresholds, all pattern types)
 
 ### IN PROGRESS
-- backend/app/services/pattern_engine/ — Task 6, Layer 1 + Layer 2 AI
-  - backend/app/services/pattern_engine/gap_detector.py
-  - backend/app/services/pattern_engine/inertia_detector.py
-  - backend/app/services/pattern_engine/adherence_analyzer.py
-  - backend/app/services/pattern_engine/deterioration_detector.py
-  - backend/app/services/pattern_engine/risk_scorer.py
+- backend/app/api/ (all routes) — Task 7
 
 ### NOT STARTED
-- backend/app/services/generator/ (reading_generator, confirmation_generator)
-- backend/app/services/pattern_engine/ Layer 1 detectors (gap_detector, inertia_detector, adherence_analyzer, deterioration_detector)
-- backend/app/api/ (all routes)
+- backend/app/api/ (patients, readings, briefings, alerts, ingest, admin routes)
 - All frontend components
 
 ---
@@ -78,7 +72,7 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [NEXT] Synthet
 ---
 
 ## Plan Changes
-- Layer 2 risk scorer is implemented before Layer 1 detectors. Until gap/inertia/adherence/deterioration detectors exist, risk_scorer.py runs its own direct DB queries and processor.py calls only compute_risk_score() for pattern_recompute jobs. Layer 2 must run after Layer 1 once detectors are added.
+- Layer 2 risk scorer was implemented before Layer 1 detectors. Now that all 4 Layer 1 detectors are complete, risk_scorer.py should be updated to consume Layer 1 outputs (GapResult, InertiaResult, AdherenceResult, DeteriorationResult) instead of running its own direct DB queries. processor.py pattern_recompute handler should call detectors in order before compute_risk_score().
 
 ---
 
