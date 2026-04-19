@@ -299,18 +299,30 @@ async def test_stop_sets_running_false() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_handle_pattern_recompute_calls_risk_scorer() -> None:
-    """_handle_pattern_recompute calls the Layer 2 risk scorer."""
+async def test_handle_pattern_recompute_calls_all_detectors_and_scorer() -> None:
+    """_handle_pattern_recompute calls all 4 Layer 1 detectors then Layer 2 scorer."""
     job = _make_job(job_type="pattern_recompute")
     session = AsyncMock()
 
-    with patch(
-        "app.services.pattern_engine.risk_scorer.compute_risk_score",
-        AsyncMock(return_value=42.5),
-    ) as scorer:
+    gap_result = {"gap_days": 2.0, "flagged": True, "urgent": False}
+    inertia_result = {"detected": True, "avg_systolic_28d": 152.0, "elevated_reading_count": 6, "elevated_span_days": 14.0, "last_med_change": None}
+    adherence_result = {"pattern": "B", "adherence_pct": 91.0, "avg_systolic_28d": 152.0, "total_doses": 84, "confirmed_doses": 77}
+    deterioration_result = {"detected": False, "slope": -0.5, "recent_avg": 148.0, "baseline_avg": 152.0, "reading_count": 10}
+
+    with (
+        patch("app.services.pattern_engine.gap_detector.run_gap_detector", AsyncMock(return_value=gap_result)) as gap_mock,
+        patch("app.services.pattern_engine.inertia_detector.run_inertia_detector", AsyncMock(return_value=inertia_result)) as inertia_mock,
+        patch("app.services.pattern_engine.adherence_analyzer.run_adherence_analyzer", AsyncMock(return_value=adherence_result)) as adherence_mock,
+        patch("app.services.pattern_engine.deterioration_detector.run_deterioration_detector", AsyncMock(return_value=deterioration_result)) as deterioration_mock,
+        patch("app.services.pattern_engine.risk_scorer.compute_risk_score", AsyncMock(return_value=42.5)) as scorer_mock,
+    ):
         await _handle_pattern_recompute(job, session)
 
-    scorer.assert_awaited_once_with("1091", session)
+    gap_mock.assert_awaited_once_with(session, "1091")
+    inertia_mock.assert_awaited_once_with(session, "1091")
+    adherence_mock.assert_awaited_once_with(session, "1091")
+    deterioration_mock.assert_awaited_once_with(session, "1091")
+    scorer_mock.assert_awaited_once_with("1091", session)
 
 
 async def test_handle_pattern_recompute_raises_without_patient_id() -> None:
@@ -322,12 +334,54 @@ async def test_handle_pattern_recompute_raises_without_patient_id() -> None:
         await _handle_pattern_recompute(job, session)
 
 
-async def test_handle_briefing_generation_raises_not_implemented() -> None:
-    """_handle_briefing_generation raises NotImplementedError (stub)."""
+async def test_handle_briefing_generation_calls_composer_and_summarizer() -> None:
+    """_handle_briefing_generation calls compose_briefing then generate_llm_summary."""
     job = _make_job(job_type="briefing_generation")
+    job.idempotency_key = "briefing_generation:1091:2026-04-18"
+    session = AsyncMock()
+    mock_briefing = MagicMock()
+
+    with (
+        patch("app.services.briefing.composer.compose_briefing", AsyncMock(return_value=mock_briefing)) as composer_mock,
+        patch("app.services.briefing.summarizer.generate_llm_summary", AsyncMock(return_value=mock_briefing)) as summarizer_mock,
+    ):
+        await _handle_briefing_generation(job, session)
+
+    composer_mock.assert_awaited_once_with(session, "1091", date(2026, 4, 18))
+    summarizer_mock.assert_awaited_once_with(mock_briefing, session)
+
+
+async def test_handle_briefing_generation_layer3_failure_does_not_fail_job() -> None:
+    """Layer 3 LLM failure is caught and logged — job still succeeds."""
+    job = _make_job(job_type="briefing_generation")
+    job.idempotency_key = "briefing_generation:1091:2026-04-18"
+    session = AsyncMock()
+    mock_briefing = MagicMock()
+
+    with (
+        patch("app.services.briefing.composer.compose_briefing", AsyncMock(return_value=mock_briefing)),
+        patch("app.services.briefing.summarizer.generate_llm_summary", AsyncMock(side_effect=RuntimeError("API down"))),
+    ):
+        # Should not raise — Layer 3 failure is handled gracefully
+        await _handle_briefing_generation(job, session)
+
+
+async def test_handle_briefing_generation_raises_without_patient_id() -> None:
+    """_handle_briefing_generation raises ValueError when patient_id is absent."""
+    job = _make_job(job_type="briefing_generation", patient_id=None)  # type: ignore[arg-type]
     session = AsyncMock()
 
-    with pytest.raises(NotImplementedError, match="briefing_generation"):
+    with pytest.raises(ValueError, match="missing patient_id"):
+        await _handle_briefing_generation(job, session)
+
+
+async def test_handle_briefing_generation_raises_on_bad_date_in_key() -> None:
+    """_handle_briefing_generation raises ValueError when idempotency_key date is invalid."""
+    job = _make_job(job_type="briefing_generation")
+    job.idempotency_key = "briefing_generation:1091:not-a-date"
+    session = AsyncMock()
+
+    with pytest.raises(ValueError, match="Cannot parse appointment date"):
         await _handle_briefing_generation(job, session)
 
 
