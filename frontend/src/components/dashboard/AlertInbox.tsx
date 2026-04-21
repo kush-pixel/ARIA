@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { getAlerts } from '@/lib/api'
+import { getAlerts, acknowledgeAlert } from '@/lib/api'
 import type { Alert } from '@/lib/types'
 import { CheckCircle, AlertTriangle } from 'lucide-react'
 
@@ -34,7 +34,7 @@ export default function AlertInbox() {
   }, [])
 
   function handleAcknowledge(alertId: string) {
-    // STUB: POST /api/alerts/:id/acknowledge when backend is ready
+    acknowledgeAlert(alertId).catch(() => {})
     setAlerts((prev) => prev.filter((a) => a.alert_id !== alertId))
   }
 

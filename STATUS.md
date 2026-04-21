@@ -1,5 +1,5 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-20 by Sahil Khalsa + Krishna
+Last updated: 2026-04-20 by Sahil Khalsa (API routes, tests, frontend wired)
 
 ---
 
@@ -56,15 +56,29 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - backend/tests/test_pattern_engine.py — 39 unit tests (all passing); covers all 4 Layer 1 detectors and their edge cases (no readings, sparse data, borderline thresholds, all pattern types)
 - frontend/src/ — dashboard shell with mock data (Krishna)
   - All 24 components and pages created (PatientList, BriefingCard, SparklineChart, AdherenceSummary, VisitAgenda, AlertInbox, RiskTierBadge, RiskScoreBar, Sidebar, ThemeToggle, Admin page)
-  - API stubs in place in src/lib/api.ts — mock data returns match real API response shape exactly
   - npm run build passing with 0 TypeScript errors, 0 lint errors
   - Dark mode, Inter font, teal/sage colour system, clinical language enforced
+- frontend/src/lib/api.ts — fully wired to real backend; shared apiFetch<T>() helper; mock stubs removed; getPatient/getBriefing return null on 404 gracefully
+- frontend/src/lib/mockData.ts — TODAY computed dynamically (new Date().toISOString().slice(0,10)); no longer hardcoded
+- frontend/src/components/dashboard/PatientList.tsx — lastReading() uses getMockReadings() lookup instead of hardcoded patient ID strings
+- frontend/src/components/dashboard/AlertInbox.tsx — acknowledge button calls acknowledgeAlert() in api.ts; no longer UI-only
+
+- backend/app/main.py — FastAPI app entry point; CORS (localhost:3000); all 7 routers registered; WorkerProcessor starts/stops on lifespan
+- backend/app/api/patients.py — GET /api/patients (sorted tier→score DESC), GET /api/patients/{id}
+- backend/app/api/briefings.py — GET /api/briefings/{patient_id}; marks read_at; writes audit event
+- backend/app/api/alerts.py — GET /api/alerts (unacknowledged only), POST /api/alerts/{id}/acknowledge + audit event
+- backend/app/api/readings.py — GET /api/readings?patient_id= (28-day window), POST /api/readings (manual entry + audit)
+- backend/app/api/ingest.py — POST /api/ingest; validates FHIR Bundle then calls ingest_fhir_bundle()
+- backend/app/api/admin.py — POST /api/admin/trigger-scheduler; guarded by DEMO_MODE=true
+- backend/app/api/adherence.py — GET /api/adherence/{patient_id}; per-medication adherence breakdown from medication_confirmations (28-day window); matches frontend AdherenceData type exactly
+- backend/tests/test_api.py — 24 unit tests (all passing); covers all 11 API routes; uses httpx.AsyncClient + mocked sessions; no live DB required
 
 ### IN PROGRESS
-- backend/app/api/ (all routes) — Task 7
+- None
 
 ### NOT STARTED
-- backend/app/api/ (patients, readings, briefings, alerts, ingest, admin routes)
+- scripts/run_shadow_mode.py — shadow mode validation (target ≥80% agreement vs physician notes)
+- scripts/run_scheduler.py — standalone manual scheduler trigger script
 
 ---
 
@@ -77,7 +91,7 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 
 ## Plan Changes
 - Layer 2 risk scorer was implemented before Layer 1 detectors. Now that all 4 Layer 1 detectors are complete, risk_scorer.py should be updated to consume Layer 1 outputs (GapResult, InertiaResult, AdherenceResult, DeteriorationResult) instead of running its own direct DB queries. processor.py pattern_recompute handler should call detectors in order before compute_risk_score().
-- Frontend built with mock data first. API wiring happens after Sahil completes routes. All mock shapes match expected API response format exactly.
+- Frontend built with mock data first (Krishna), then wired to real backend (Sahil). api.ts now hits real endpoints — mock data no longer used at runtime.
 
 ---
 
@@ -85,19 +99,24 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 
 | Endpoint | Status | Notes |
 |---|---|---|
-| POST /api/ingest | NOT STARTED | |
-| POST /api/readings | NOT STARTED | |
-| GET /api/patients | NOT STARTED | |
-| GET /api/briefings/{id} | NOT STARTED | |
-| GET /api/alerts | NOT STARTED | |
-| POST /api/admin/trigger-scheduler | NOT STARTED | |
+| GET /api/patients | DONE | |
+| GET /api/patients/{id} | DONE | |
+| GET /api/briefings/{patient_id} | DONE | marks read_at, writes audit |
+| GET /api/readings?patient_id= | DONE | 28-day window |
+| POST /api/readings | DONE | manual entry |
+| GET /api/alerts | DONE | unacknowledged only |
+| POST /api/alerts/{id}/acknowledge | DONE | writes audit |
+| GET /api/adherence/{patient_id} | DONE | per-medication breakdown |
+| POST /api/ingest | DONE | validates then ingests |
+| POST /api/admin/trigger-scheduler | DONE | DEMO_MODE guard |
+| GET /health | DONE | |
 
 ---
 
 ## Known Issues
 - Supabase project may be paused (free tier). Un-pause at supabase.com before running `python scripts/setup_db.py`. Last connection attempt: 2026-04-12, error: DNS resolution failure.
 - adapter.py `_age` extension key (`_age`) is non-standard FHIR. ingestion.py must read this same constant from adapter.py (`_PATIENT_AGE_EXT`) rather than hardcoding the string, to keep both files in sync. Current state: both files define `_PATIENT_AGE_EXT = "_age"` independently with matching values — silent divergence risk if adapter.py changes the key. Fix before Task 5: import the constant in ingestion.py rather than redefining it.
-- API routes not yet created — frontend uses mock data. Switch to real data: change one line in src/lib/api.ts per function when routes are ready.
+- ANTHROPIC_API_KEY in backend/.env is placeholder — Layer 3 LLM summary will be skipped until real key is set. Briefing still generates via Layer 1 without it.
 - Some iEMR medication entries have null MED_ACTIVITY (e.g. ASPIRIN 81, METOPROLOL in patient 1091's earliest visits). The activity field in med_history will be null for these entries. Acceptable for now — briefing composer should handle null activity gracefully.
 
 ---

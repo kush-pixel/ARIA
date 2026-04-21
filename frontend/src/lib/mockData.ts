@@ -1,8 +1,8 @@
 import type { Patient, ClinicalContext, Reading, Briefing, Alert, AdherenceData } from './types'
 
 // Today's date for appointment simulation
-const TODAY = '2026-04-18'
-const TODAY_APPT = '2026-04-18T09:30:00Z'
+const TODAY = new Date().toISOString().slice(0, 10)
+const TODAY_APPT = `${TODAY}T09:30:00Z`
 
 // ─── Patients ─────────────────────────────────────────────────────────────────
 

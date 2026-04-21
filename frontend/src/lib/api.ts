@@ -1,53 +1,63 @@
-// STUB: All functions return mock data now.
-// To wire to the real backend, replace the mock return in each function
-// with: const res = await fetch(`${API_BASE}<endpoint>`); return res.json()
-
 import type { Patient, Briefing, Reading, Alert, AdherenceData } from './types'
-import {
-  MOCK_PATIENTS,
-  getMockPatient,
-  getMockBriefing,
-  getMockReadings,
-  getMockAdherence,
-  MOCK_ALERTS,
-} from './mockData'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
-void API_BASE // referenced when real fetch is wired
+
+async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: { 'Content-Type': 'application/json' },
+    ...options,
+  })
+  if (!res.ok) {
+    const detail = await res.text()
+    throw new Error(`API ${res.status}: ${detail}`)
+  }
+  return res.json() as Promise<T>
+}
 
 // GET /api/patients
 export async function getPatients(): Promise<Patient[]> {
-  return Promise.resolve(MOCK_PATIENTS)
+  return apiFetch<Patient[]>('/api/patients')
 }
 
 // GET /api/patients/:id
 export async function getPatient(id: string): Promise<Patient | null> {
-  return Promise.resolve(getMockPatient(id) ?? null)
+  try {
+    return await apiFetch<Patient>(`/api/patients/${id}`)
+  } catch {
+    return null
+  }
 }
 
 // GET /api/briefings/:patientId
 export async function getBriefing(patientId: string): Promise<Briefing | null> {
-  return Promise.resolve(getMockBriefing(patientId) ?? null)
+  try {
+    return await apiFetch<Briefing>(`/api/briefings/${patientId}`)
+  } catch {
+    return null
+  }
 }
 
 // GET /api/readings?patient_id=:patientId
 export async function getReadings(patientId: string): Promise<Reading[]> {
-  return Promise.resolve(getMockReadings(patientId))
+  return apiFetch<Reading[]>(`/api/readings?patient_id=${patientId}`)
 }
 
 // GET /api/alerts
 export async function getAlerts(): Promise<Alert[]> {
-  return Promise.resolve(MOCK_ALERTS)
+  return apiFetch<Alert[]>('/api/alerts')
 }
 
 // GET /api/adherence/:patientId
 export async function getAdherence(patientId: string): Promise<AdherenceData[]> {
-  return Promise.resolve(getMockAdherence(patientId))
+  return apiFetch<AdherenceData[]>(`/api/adherence/${patientId}`)
+}
+
+// POST /api/alerts/:id/acknowledge
+export async function acknowledgeAlert(alertId: string): Promise<void> {
+  await apiFetch<unknown>(`/api/alerts/${alertId}/acknowledge`, { method: 'POST' })
 }
 
 // POST /api/admin/trigger-scheduler
 export async function triggerScheduler(): Promise<{ enqueued: number }> {
-  // Simulate a short network delay for the spinner to be visible
-  await new Promise((resolve) => setTimeout(resolve, 1200))
-  return { enqueued: 2 }
+  return apiFetch<{ enqueued: number }>('/api/admin/trigger-scheduler', { method: 'POST' })
 }

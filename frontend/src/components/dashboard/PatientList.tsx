@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { getPatients } from '@/lib/api'
-import { MOCK_READINGS_1091, MOCK_READINGS_1093 } from '@/lib/mockData'
+import { getMockReadings } from '@/lib/mockData'
 import type { Patient, Reading } from '@/lib/types'
 import RiskTierBadge from './RiskTierBadge'
 import RiskScoreBar from './RiskScoreBar'
@@ -20,7 +20,7 @@ function sortPatients(patients: Patient[]): Patient[] {
 }
 
 function lastReading(patientId: string): Reading | null {
-  const all = patientId === '1091' ? MOCK_READINGS_1091 : patientId === '1093' ? MOCK_READINGS_1093 : []
+  const all = getMockReadings(patientId)
   if (all.length === 0) return null
   return all.reduce((latest, r) =>
     new Date(r.effective_datetime) > new Date(latest.effective_datetime) ? r : latest
