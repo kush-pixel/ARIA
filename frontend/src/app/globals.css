@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --teal: #0F766E;
+  --teal-light: #14B8A6;
+  --warm-white: #FAFAF8;
+  --sage: #84A98C;
+  --aria-purple: #7C3AED;
+  --font-size-base: 16px;
+}
+
+@layer base {
+  html {
+    font-size: var(--font-size-base);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    @apply bg-warm-white text-slate-800 dark:bg-slate-900 dark:text-slate-100;
+    font-size: 1rem;
+    line-height: 1.6;
+  }
+
+  /* Clinical data values — larger, clearer */
+  .clinical-value {
+    font-size: 1.125rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Section headings in briefing */
+  .section-heading {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--teal);
+  }
+
+  /* Focus visible for keyboard navigation */
+  *:focus-visible {
+    @apply outline-none ring-2 ring-teal-700 ring-offset-2;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-100 dark:border-slate-700;
+  }
+
+  .btn-primary {
+    @apply bg-teal-700 hover:bg-teal-800 text-white font-semibold rounded-lg px-6 py-3
+           transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-teal-700
+           focus-visible:ring-offset-2 disabled:opacity-60 disabled:cursor-not-allowed;
+  }
+
+  .btn-secondary {
+    @apply bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600
+           text-slate-700 dark:text-slate-200 font-medium rounded-lg px-4 py-2
+           transition-colors duration-150;
+  }
+}

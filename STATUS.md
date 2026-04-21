@@ -1,12 +1,12 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-18 by Sahil Khalsa (processor.py fully wired — all stubs removed)
+Last updated: 2026-04-20 by Sahil Khalsa (API routes, tests, frontend wired)
 
 ---
 
 ## Pipeline Status
 
 ```
-iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthetic readings → [DONE] Pattern engine → [DONE] Briefing → [ ] Dashboard
+iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthetic readings → [DONE] Pattern engine → [DONE] Briefing → [DONE] Dashboard shell
 ```
 
 ---
@@ -36,7 +36,7 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - scripts/run_worker.py — CLI entry point; starts WorkerProcessor + APScheduler cron at 07:30Z daily; graceful Ctrl+C shutdown
 - backend/tests/test_worker.py — 23 unit tests passing, 1 integration test (@pytest.mark.integration, deselected in unit-only run); covers processor status transitions, claim guard, error handling, unknown job type, pattern_recompute (all 4 detectors + scorer), briefing_generation (Layer 1+3 success, Layer 3 graceful failure, missing patient_id, bad date in key), scheduler enqueue logic, idempotency key format
 - backend/tests/test_ingestion.py — 37 unit tests passing, 1 integration test (@pytest.mark.integration); covers success path, idempotency, CHF tier override, failure audit event, all summary fields, med_history stored in upsert
-- backend/app/services/generator/reading_generator.py — Patient A 28-day scenario; 47 readings (14+13+4+6+10); all clinical rules pass; 14 unit tests + 1 integration test; ruff clean; WARNING: EVENING_OFFSET_HIGH=9.0 allows morning/evening diff up to 12 mmHg — spec max is 10 mmHg; fix: lower EVENING_OFFSET_HIGH to 7.0
+- backend/app/services/generator/reading_generator.py — Patient A 28-day scenario; 47 readings (14+13+4+6+10); all clinical rules pass; 14 unit tests + 1 integration test; ruff clean
 - backend/app/services/generator/confirmation_generator.py — synthetic medication confirmation events for all active medications over 28 days; 1092 scheduled doses for patient 1091; 977 confirmed (89.5%), 115 missed; weekday rate 0.95, weekend rate 0.78 (blended ~90% matches Patient A spec 91%); 20 unit tests passing; ruff clean
 - scripts/run_generator.py — updated: independent idempotency checks for readings (source='generated') and confirmations (confidence='simulated'); both data types generated and reported in a single CLI run; prints adherence summary (total/confirmed/missed) when confirmations are inserted
 
@@ -54,13 +54,31 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - backend/app/services/pattern_engine/adherence_analyzer.py — Layer 1 run_adherence_analyzer(session, patient_id) → AdherenceResult; 28-day adherence rate from confirmations vs avg systolic; Pattern A (elevated+low adherence)="possible adherence concern", Pattern B (elevated+high adherence)="treatment review warranted", Pattern C (normal+low adherence)="contextual review", none=no concern; clinical language enforced at code level
 - backend/app/services/pattern_engine/deterioration_detector.py — Layer 1 run_deterioration_detector(session, patient_id) → DeteriorationResult; dual-signal: least-squares positive slope over 14 days AND recent 3-day avg > days 4–10 baseline avg; both signals required to reduce false positives; <7 readings → detected=False; pure Python slope (no numpy)
 - backend/tests/test_pattern_engine.py — 39 unit tests (all passing); covers all 4 Layer 1 detectors and their edge cases (no readings, sparse data, borderline thresholds, all pattern types)
+- frontend/src/ — dashboard shell with mock data (Krishna)
+  - All 24 components and pages created (PatientList, BriefingCard, SparklineChart, AdherenceSummary, VisitAgenda, AlertInbox, RiskTierBadge, RiskScoreBar, Sidebar, ThemeToggle, Admin page)
+  - npm run build passing with 0 TypeScript errors, 0 lint errors
+  - Dark mode, Inter font, teal/sage colour system, clinical language enforced
+- frontend/src/lib/api.ts — fully wired to real backend; shared apiFetch<T>() helper; mock stubs removed; getPatient/getBriefing return null on 404 gracefully
+- frontend/src/lib/mockData.ts — TODAY computed dynamically (new Date().toISOString().slice(0,10)); no longer hardcoded
+- frontend/src/components/dashboard/PatientList.tsx — lastReading() uses getMockReadings() lookup instead of hardcoded patient ID strings
+- frontend/src/components/dashboard/AlertInbox.tsx — acknowledge button calls acknowledgeAlert() in api.ts; no longer UI-only
+
+- backend/app/main.py — FastAPI app entry point; CORS (localhost:3000); all 7 routers registered; WorkerProcessor starts/stops on lifespan
+- backend/app/api/patients.py — GET /api/patients (sorted tier→score DESC), GET /api/patients/{id}
+- backend/app/api/briefings.py — GET /api/briefings/{patient_id}; marks read_at; writes audit event
+- backend/app/api/alerts.py — GET /api/alerts (unacknowledged only), POST /api/alerts/{id}/acknowledge + audit event
+- backend/app/api/readings.py — GET /api/readings?patient_id= (28-day window), POST /api/readings (manual entry + audit)
+- backend/app/api/ingest.py — POST /api/ingest; validates FHIR Bundle then calls ingest_fhir_bundle()
+- backend/app/api/admin.py — POST /api/admin/trigger-scheduler; guarded by DEMO_MODE=true
+- backend/app/api/adherence.py — GET /api/adherence/{patient_id}; per-medication adherence breakdown from medication_confirmations (28-day window); matches frontend AdherenceData type exactly
+- backend/tests/test_api.py — 24 unit tests (all passing); covers all 11 API routes; uses httpx.AsyncClient + mocked sessions; no live DB required
 
 ### IN PROGRESS
-- backend/app/api/ (all routes) — Task 7
+- None
 
 ### NOT STARTED
-- backend/app/api/ (patients, readings, briefings, alerts, ingest, admin routes)
-- All frontend components
+- scripts/run_shadow_mode.py — shadow mode validation (target ≥80% agreement vs physician notes)
+- scripts/run_scheduler.py — standalone manual scheduler trigger script
 
 ---
 
@@ -73,6 +91,7 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 
 ## Plan Changes
 - Layer 2 risk scorer was implemented before Layer 1 detectors. Now that all 4 Layer 1 detectors are complete, risk_scorer.py should be updated to consume Layer 1 outputs (GapResult, InertiaResult, AdherenceResult, DeteriorationResult) instead of running its own direct DB queries. processor.py pattern_recompute handler should call detectors in order before compute_risk_score().
+- Frontend built with mock data first (Krishna), then wired to real backend (Sahil). api.ts now hits real endpoints — mock data no longer used at runtime.
 
 ---
 
@@ -80,18 +99,24 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 
 | Endpoint | Status | Notes |
 |---|---|---|
-| POST /api/ingest | NOT STARTED | |
-| POST /api/readings | NOT STARTED | |
-| GET /api/patients | NOT STARTED | |
-| GET /api/briefings/{id} | NOT STARTED | |
-| GET /api/alerts | NOT STARTED | |
-| POST /api/admin/trigger-scheduler | NOT STARTED | |
+| GET /api/patients | DONE | |
+| GET /api/patients/{id} | DONE | |
+| GET /api/briefings/{patient_id} | DONE | marks read_at, writes audit |
+| GET /api/readings?patient_id= | DONE | 28-day window |
+| POST /api/readings | DONE | manual entry |
+| GET /api/alerts | DONE | unacknowledged only |
+| POST /api/alerts/{id}/acknowledge | DONE | writes audit |
+| GET /api/adherence/{patient_id} | DONE | per-medication breakdown |
+| POST /api/ingest | DONE | validates then ingests |
+| POST /api/admin/trigger-scheduler | DONE | DEMO_MODE guard |
+| GET /health | DONE | |
 
 ---
 
 ## Known Issues
 - Supabase project may be paused (free tier). Un-pause at supabase.com before running `python scripts/setup_db.py`. Last connection attempt: 2026-04-12, error: DNS resolution failure.
 - adapter.py `_age` extension key (`_age`) is non-standard FHIR. ingestion.py must read this same constant from adapter.py (`_PATIENT_AGE_EXT`) rather than hardcoding the string, to keep both files in sync. Current state: both files define `_PATIENT_AGE_EXT = "_age"` independently with matching values — silent divergence risk if adapter.py changes the key. Fix before Task 5: import the constant in ingestion.py rather than redefining it.
+- ANTHROPIC_API_KEY in backend/.env is placeholder — Layer 3 LLM summary will be skipped until real key is set. Briefing still generates via Layer 1 without it.
 - Some iEMR medication entries have null MED_ACTIVITY (e.g. ASPIRIN 81, METOPROLOL in patient 1091's earliest visits). The activity field in med_history will be null for these entries. Acceptable for now — briefing composer should handle null activity gracefully.
 
 ---
