@@ -7,7 +7,7 @@ low-risk patients.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Literal, TypedDict
 
 from sqlalchemy import func, select
@@ -57,7 +57,7 @@ async def run_gap_detector(session: AsyncSession, patient_id: str) -> GapResult:
         GapResult with gap_days, status ("none" | "flag" | "urgent"), and the
         tier-specific thresholds that were applied.
     """
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
 
     tier_row = await session.execute(
         select(Patient.risk_tier).where(Patient.patient_id == patient_id)

@@ -1,5 +1,5 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-20 by Sahil Khalsa (API routes, tests, frontend wired)
+Last updated: 2026-04-22 by Claude Code (pre-demo audit — 9 bugs fixed across backend + frontend)
 
 ---
 
@@ -24,8 +24,8 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - backend/app/models/ — all 8 ORM models (patients, clinical_context, readings, medication_confirmations, alerts, briefings, processing_jobs, audit_events)
 - scripts/setup_db.py — creates 8 tables + 11 indexes; safe to re-run (IF NOT EXISTS)
 - backend/app/utils/logging_utils.py — get_logger(name) returns a named stdlib Logger with ISO timestamp format; used by all backend modules
-- backend/app/services/fhir/adapter.py — iEMR JSON → FHIR R4 Bundle; 6 resource types (Patient, Condition, MedicationRequest, Observation, AllergyIntolerance, ServiceRequest); most-recent-wins deduplication keyed by iEMR code for all types except Observation; VITALS_DATETIME used for effectiveDateTime (never ADMIT_DATE); non-standard `_age` extension passes age to ingestion layer; _build_med_history() collects full medication timeline (104 events for patient 1091) deduplicated by (name, date, activity), passed as _aria_med_history metadata on bundle dict
-- backend/tests/test_fhir_adapter.py — 36 tests (35 unit + 1 integration); all passing; includes TestBuildMedHistory (7 cases) and test_bundle_contains_aria_med_history_key
+- backend/app/services/fhir/adapter.py — iEMR JSON → FHIR R4 Bundle; 6 resource types (Patient, Condition, MedicationRequest, Observation, AllergyIntolerance, ServiceRequest); most-recent-wins deduplication keyed by iEMR code for all types except Observation; VITALS_DATETIME used for effectiveDateTime (never ADMIT_DATE); non-standard `_age` extension passes age to ingestion layer; _build_med_history() collects full medication timeline (104 events for patient 1091) deduplicated by (name, date, activity), passed as _aria_med_history metadata on bundle dict. Data quality fixes applied 2026-04-21: (1) Z00.xx encounter-type codes filtered from Conditions, (2) discontinued medications excluded via sentinel tombstone + cross-MED_CODE name propagation, (3) supplies/tests/device scripts filtered from MedicationRequests via _NON_DRUG_MARKERS/_NON_DRUG_EXACT, (4) secondary name-level deduplication collapses same drug appearing under multiple MED_CODEs, (5) non-clinical PLAN items (physician names, redacted vendors, patient education) filtered from ServiceRequests. Patient 1091: medications reduced from 38 → 14 (all actual drugs); conditions reduced from 18 → 17 (PREVENTIVE CARE removed); follow-up items reduced from 10 → 6 (admin/education entries removed).
+- backend/tests/test_fhir_adapter.py — 42 tests (41 unit + 1 integration); all passing; includes TestBuildMedHistory (7 cases), test_bundle_contains_aria_med_history_key, and 6 new tests covering Z00.xx filtering, discontinued medication exclusion, cross-MED_CODE discontinue propagation, and non-clinical service request filtering
 - scripts/run_adapter.py — CLI: reads iEMR JSON, writes FHIR Bundle to data/fhir/bundles/<id>_bundle.json, prints per-type resource counts; accepts --patient (required) and --patient-id (optional, defaults to filename stem) for generalizability across patients
 - backend/app/services/fhir/validator.py — validate_fhir_bundle() returns list[str], never raises; checks resourceType, Patient presence, Patient.id non-empty
 - backend/app/services/fhir/ingestion.py — ingest_fhir_bundle() populates patients, clinical_context, readings, audit_events; idempotent (patients ON CONFLICT DO NOTHING, clinical_context ON CONFLICT DO UPDATE, readings COUNT guard); 65 clinic readings inserted for patient 1091; risk_tier=high set via CHF override (I50.9 in problem codes); audit event always written in finally block; med_history extracted from _aria_med_history and written to clinical_context upsert
@@ -40,7 +40,7 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - backend/app/services/generator/confirmation_generator.py — synthetic medication confirmation events for all active medications over 28 days; 1092 scheduled doses for patient 1091; 977 confirmed (89.5%), 115 missed; weekday rate 0.95, weekend rate 0.78 (blended ~90% matches Patient A spec 91%); 20 unit tests passing; ruff clean
 - scripts/run_generator.py — updated: independent idempotency checks for readings (source='generated') and confirmations (confidence='simulated'); both data types generated and reported in a single CLI run; prints adherence summary (total/confirmed/missed) when confirmations are inserted
 
-- backend/app/services/briefing/composer.py — compose_briefing() async function; queries DB for 28-day readings, unacknowledged alerts, medication confirmations, clinical context; assembles all 9 deterministic briefing fields (trend_summary, medication_status, adherence_summary, active_problems, overdue_labs, visit_agenda, urgent_flags, risk_score, data_limitations); persists Briefing row + audit_event row; clinical language enforced at code level ("possible adherence concern", "treatment review warranted"); Layer 1 only — no LLM
+- backend/app/services/briefing/composer.py — compose_briefing() async function; queries DB for 28-day readings, unacknowledged alerts, medication confirmations, clinical context; assembles all 9 deterministic briefing fields (trend_summary, medication_status, adherence_summary, active_problems, overdue_labs, visit_agenda, urgent_flags, risk_score, data_limitations); persists Briefing row + audit_event row; clinical language enforced at code level ("possible adherence concern", "treatment review warranted"); Layer 1 only — no LLM. Data quality fix 2026-04-21: visit agenda item prefix changed from "Order overdue lab:" to "Pending follow-up:" because the overdue_labs field contains a mix of actual lab orders and clinical referrals/protocols.
 - backend/app/services/briefing/summarizer.py — generate_llm_summary() async function; loads prompt from prompts/briefing_summary_prompt.md; computes SHA-256 prompt_hash; calls claude-sonnet-4-20250514 for 3-sentence readable summary; writes readable_summary into llm_response JSONB; populates model_version, prompt_hash, generated_at on briefing row for audit; must only run after Layer 1 is verified
 - backend/app/services/briefing/__init__.py — exports compose_briefing, generate_llm_summary
 - prompts/briefing_summary_prompt.md — Layer 3 system prompt; enforces 3-sentence output, clinical language rules, no medication recommendations
@@ -118,6 +118,120 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - adapter.py `_age` extension key (`_age`) is non-standard FHIR. ingestion.py must read this same constant from adapter.py (`_PATIENT_AGE_EXT`) rather than hardcoding the string, to keep both files in sync. Current state: both files define `_PATIENT_AGE_EXT = "_age"` independently with matching values — silent divergence risk if adapter.py changes the key. Fix before Task 5: import the constant in ingestion.py rather than redefining it.
 - ANTHROPIC_API_KEY in backend/.env is placeholder — Layer 3 LLM summary will be skipped until real key is set. Briefing still generates via Layer 1 without it.
 - Some iEMR medication entries have null MED_ACTIVITY (e.g. ASPIRIN 81, METOPROLOL in patient 1091's earliest visits). The activity field in med_history will be null for these entries. Acceptable for now — briefing composer should handle null activity gracefully.
+- risk_score for patient 1091 (69.48) was computed before the medication list was corrected. It should be recomputed via a pattern_recompute job after the next demo run. The score will shift slightly because the adherence denominator changed (420 confirmations vs the old 1092).
+
+---
+
+## Bugs Found and Fixed — 2026-04-22
+
+### Bug 7 — Worker reads wrong TypedDict keys from detector results
+**Date:** 2026-04-22
+**Issue:** `_handle_pattern_recompute` in `processor.py` read `gap["flagged"]`, `gap["urgent"]`, `inertia["detected"]`, `inertia.get("avg_systolic_28d")`, and `deterioration["detected"]` — none of which exist in the actual TypedDict definitions. Would cause `KeyError` at runtime on every pattern_recompute job.
+**File:** `backend/app/services/worker/processor.py` lines 130-151
+**Fix:** Updated 3 `logger.info` calls to use correct keys: `gap["status"]`, `inertia["inertia_detected"]`, `inertia.get("avg_systolic")`, `deterioration["deterioration"]`. No TypedDict changes.
+**Verified by:** `python -m pytest tests/test_worker.py -v` — 23 passed
+
+### Bug 14 — Frontend types declared risk_score as non-nullable number
+**Date:** 2026-04-22
+**Issue:** `Patient.risk_score` and `BriefingPayload.risk_score` typed as `number` in `types.ts`, but backend returns `null` when DB value is NULL. `RiskScoreBar` arithmetic on null would produce NaN and a broken bar.
+**Files:** `frontend/src/lib/types.ts`, `frontend/src/components/dashboard/RiskScoreBar.tsx`
+**Fix:** Changed both to `number | null`. In `RiskScoreBar`, introduced `safeScore = score ?? 0` used in all arithmetic and display.
+**Verified by:** `npm run build` — 0 TypeScript errors
+
+### Bug 15 — PatientList used getMockReadings() and non-null-safe risk_score sort
+**Date:** 2026-04-22
+**Issue:** `PatientList.tsx` imported `getMockReadings` from `mockData.ts` and called it in `lastReading()`. The "Last BP" and "Last Reading" columns showed fabricated data. Sort comparator `b.risk_score - a.risk_score` was not null-safe.
+**File:** `frontend/src/components/dashboard/PatientList.tsx`
+**Fix:** Removed `getMockReadings` import, `lastReading()`, `daysSince()` functions, and the two mock-data columns. Fixed sort to `(b.risk_score ?? 0) - (a.risk_score ?? 0)`.
+**Verified by:** `npm run build` — 0 TypeScript errors
+
+### Bug 13 — Pattern B interpretation missing clinical hedging language
+**Date:** 2026-04-22
+**Issue:** Pattern B in `adherence_analyzer.py` used `"treatment review warranted"` — assertive language that violates the ARIA clinical boundary rule requiring hedged language ("possible ...").
+**File:** `backend/app/services/pattern_engine/adherence_analyzer.py` line ~40
+**Fix:** Changed to `"possible treatment-review case — elevated BP with high adherence signal"`.
+**Verified by:** `python -m pytest tests/test_pattern_engine.py -v` — 39 passed
+
+### Bug 12 — Synthetic disclosure absent from data_limitations
+**Date:** 2026-04-22
+**Issue:** `data_limitations` field never disclosed that home BP readings are synthetic demo data derived from real iEMR baselines. A reviewer reading the briefing would have no indication the readings weren't real patient data.
+**File:** `backend/app/services/briefing/composer.py` `_build_data_limitations()`
+**Fix:** Appended mandatory synthetic disclosure sentence to all monitoring-active return paths (limited readings and sufficient readings). EHR-only path unchanged.
+**Verified by:** `python -m pytest tests/test_briefing_composer.py -v` — 61 passed
+
+### Bug 11 — CHF not prioritised first in active_problems
+**Date:** 2026-04-22
+**Issue:** `active_problems` in the briefing payload passed through unsorted. CHF (highest clinical priority) was not guaranteed to appear first — it appeared wherever it happened to be in the iEMR source.
+**File:** `backend/app/services/briefing/composer.py` line ~531
+**Fix:** Added `_PROBLEM_PRIORITY` ICD-10 prefix map and `_sort_problems()` helper. Applied to `active_problems` at payload assembly. CHF (I50) → 0, HTN (I10) → 1, T2DM (E11) → 2, CAD (I25) → 3, everything else alphabetical.
+**Verified by:** `python -m pytest tests/test_briefing_composer.py -v` — 61 passed
+
+### Bug 10 — Raw day counts in medication_status and visit_agenda
+**Date:** 2026-04-22
+**Issue:** `composer.py` output raw integers like "4590 days ago" in `medication_status` and the inertia visit_agenda item. Clinically unreadable for a GP.
+**File:** `backend/app/services/briefing/composer.py` lines 141, 311
+**Fix:** Added `_human_duration(days)` helper that converts to natural language ("about 12 years ago"). Replaced both raw day count format strings.
+**Verified by:** `python -m pytest tests/test_briefing_composer.py -v` — 61 passed
+
+### Bug 9 — 8 ruff violations across backend/app/
+**Date:** 2026-04-22
+**Issue:** 8 ruff violations: B904 (raise without `from exc`) in `ingest.py`; I001 (unsorted imports) and UP035 (deprecated `typing.AsyncGenerator`) in `main.py`; UP017 (`timezone.utc` → `UTC`) in all 4 pattern engine detectors.
+**Files:** `app/api/ingest.py`, `app/main.py`, `app/services/pattern_engine/{gap,adherence,deterioration,inertia}_detector.py`
+**Fix:** Fixed each manually — `raise ... from exc`, sorted imports, `from collections.abc import AsyncGenerator`, `from datetime import UTC` + replaced `timezone.utc`.
+**Verified by:** `ruff check app/` → "All checks passed!"
+
+### Bug 8 — Alert rows never written during pattern_recompute
+**Date:** 2026-04-22
+**Issue:** `_handle_pattern_recompute` ran all 4 detectors and logged results but never wrote any rows to the `alerts` table. Alerts page was always empty regardless of clinical findings.
+**File:** `backend/app/services/worker/processor.py`
+**Fix:** Added `_upsert_alert()` module-level helper and alert insertion block after all 4 detectors. Inserts `gap_urgent`, `gap_briefing`, `inertia`, and `deterioration` alerts as appropriate. Deduplicates by `(patient_id, alert_type, date(triggered_at))` to prevent duplicate rows on re-run.
+**Verified by:** `python -m pytest tests/test_worker.py -v` — 23 passed
+
+---
+
+## Bugs Found and Fixed — 2026-04-21
+
+Clinical data quality audit performed by tracing the live briefing for patient 1091 back through the database, FHIR bundle, and iEMR source data to root cause. Five distinct bugs found and fixed; all 274 unit tests passing after fixes.
+
+### Bug 1 — "PREVENTIVE CARE" in active_problems
+**Symptom:** The briefing's `active_problems` list included "PREVENTIVE CARE" (ICD-10 Z00.00) alongside CHF, HYPERTENSION, CAD.
+**Root cause:** `_build_conditions()` in `adapter.py` included all FHIR Condition resources built from iEMR PROBLEM entries without filtering administrative encounter codes. Z00.00 means "General adult medical examination" — it is a visit type, not a clinical problem.
+**Fix:** Added `if icd10 and icd10.startswith("Z00"): continue` in `_build_conditions()`. Z00.x covers all encounter-for-examination codes.
+**File:** `backend/app/services/fhir/adapter.py`
+
+### Bug 2 — Non-clinical items in overdue_labs (physician name, redacted vendor, patient education)
+**Symptom:** `overdue_labs` contained "Dr. Gary Rogers", "XXXXXXXXX's Medical Surgical Supply", "Hypoglycemia - General Advice on Treatment", "Instructions for Sliding Scale Fast Acting Insulin". The visit agenda said things like "Order overdue lab: Dr. Gary Rogers."
+**Root cause:** `_build_service_requests()` in `adapter.py` included every iEMR PLAN entry with `PLAN_NEEDS_FOLLOWUP=YES` regardless of type. The iEMR PLAN array stores a heterogeneous mix: actual lab orders, clinical referrals, patient education materials, and administrative contacts, all with the same flag.
+**Fix:** Added a filter in `_build_service_requests()` to skip entries whose text starts with "Dr." (physician names), contains "XXXXXXXXX" (redacted entities), starts with "Instructions for" (patient education), or contains "General Advice" (patient education). Follow-up items reduced from 10 → 6 for patient 1091.
+**File:** `backend/app/services/fhir/adapter.py`
+
+### Bug 3 — Discontinued medications appearing as current regimen
+**Symptom:** `current_medications` and the briefing's `medication_status` listed SIMVASTATIN 20, CRESTOR 2.5, HUMALOG INSULIN LISPRO, NOVOLIN 70/30, VOLTAREN, CLINDAMYCIN, BACTROBAN, and MECLIZINE as active. SIMVASTATIN and CRESTOR are both on the patient's allergy list — showing them as active prescriptions is a patient safety flag.
+**Root cause:** `_build_medication_requests()` did not read the `MED_ACTIVITY` field. The field value "Discontinue" was present on the most recent iEMR entry for each of these drugs but was silently ignored.
+**Additional sub-bug:** The original approach of `continue`-ing on Discontinue was wrong because the earlier active entry for the same `MED_CODE` key survived in the `seen` dict. Skipping the Discontinue entry left the previous active entry intact.
+**Fix:** Changed to a sentinel/tombstone pattern: when `MED_ACTIVITY='Discontinue'`, store `seen[key] = None` rather than `continue`. This overwrites any earlier active entry for the same key. At the secondary dedup step, `None` values are filtered out.
+**File:** `backend/app/services/fhir/adapter.py`
+
+### Bug 4 — Discontinued medications surviving under different MED_CODEs (BYETTA case)
+**Symptom:** BYETTA appeared in `current_medications` even after the sentinel fix. BYETTA is also on the allergy list. It was prescribed under one MED_CODE (26592850, no activity) and discontinued under a completely different MED_CODE (26604040, activity='Discontinue'). The sentinel tombstoned key 26604040 but left key 26592850 active.
+**Root cause:** iEMR assigns a new MED_CODE to each prescription instance. A drug discontinued as "code B" does not automatically tombstone its earlier prescription "code A". The existing MED_CODE-keyed deduplication has no way to link the two.
+**Fix:** Added a `discontinued_names` set that is populated whenever a Discontinue entry is processed (storing the normalised drug name alongside the sentinel). In the secondary name-based deduplication step, any active entry whose normalised name appears in `discontinued_names` is excluded — even if it has a different MED_CODE.
+**File:** `backend/app/services/fhir/adapter.py`
+
+### Bug 5 — Supplies, diagnostic tests, and device scripts in current_medications
+**Symptom:** `current_medications` listed SHARPS CONTAINER (×3 → ×1 after dedup), B-D 50 UNIT SYRINGES 29 ULTRAFINE NEEDLE (×2), PEN NEEDLES, HEARING TEST, VNG (×2), Rx for Compression Stockings, Rx for Vestibular Rehabilitation. The adherence summary reported things like "SHARPS CONTAINER: 80% adherence" and "HEARING TEST: 86% adherence".
+**Root cause:** iEMR stores all clinical orders — including injection supplies, diagnostic tests, and device prescriptions — in the same `MEDICATIONS` array as actual pharmaceuticals. `_build_medication_requests()` had no filter for these non-drug entries.
+**Fix:** Added `_NON_DRUG_MARKERS` (tuple of upper-cased substrings: "RX FOR ", "SYRINGE", "SHARPS", " CONTAINER", "PEN NEEDLE", " TEST") and `_NON_DRUG_EXACT` (frozenset: {"VNG"}) constants. Applied before building each MedicationRequest resource; matching entries are skipped with a debug log. Medications reduced from 38 → 14 for patient 1091 (all 14 are actual pharmaceuticals).
+**File:** `backend/app/services/fhir/adapter.py`
+
+### Bug 6 — "Order overdue lab:" prefix used for non-lab follow-up items
+**Symptom:** The visit agenda said "Order overdue lab: Humalog Sliding Scale." and "Order overdue lab: VESTIBULAR REHABILITATION." — an insulin dosing protocol and a physiotherapy referral were both described as lab orders.
+**Root cause:** `_build_visit_agenda()` in `composer.py` hard-coded the string "Order overdue lab:" for all `overdue_labs` items, but the field contains a mix of actual lab orders ("C-Peptide, Serum"), clinical protocols ("Humalog Sliding Scale"), and referrals ("Cardiology Consult").
+**Fix:** Changed prefix to "Pending follow-up:" — accurate for all item types in the field.
+**File:** `backend/app/services/briefing/composer.py`
+
+### Pipeline regenerated after fixes
+After all adapter fixes, the FHIR bundle was regenerated from the raw iEMR data, `clinical_context` was updated via re-ingestion, stale medication confirmations were cleared and regenerated against the corrected 14-medication list, and the briefing was recomposed. Confirmed clean output in the live database.
 
 ---
 

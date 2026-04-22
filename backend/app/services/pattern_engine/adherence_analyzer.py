@@ -15,7 +15,7 @@ Clinical language boundary (enforced at code level):
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Literal, TypedDict
 
 from sqlalchemy import func, select
@@ -37,7 +37,7 @@ _HIGH_BP_SYSTOLIC_THRESHOLD = 140     # avg systolic >= this = elevated
 
 _INTERPRETATIONS: dict[str, str] = {
     "A":    "possible adherence concern",
-    "B":    "treatment review warranted",
+    "B":    "possible treatment-review case — elevated BP with high adherence signal",
     "C":    "contextual review",
     "none": "no adherence concern identified",
 }
@@ -66,7 +66,7 @@ async def run_adherence_analyzer(session: AsyncSession, patient_id: str) -> Adhe
     Returns:
         AdherenceResult with adherence_pct, pattern label, and interpretation string.
     """
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     window_start = now - timedelta(days=_WINDOW_DAYS)
 
     conf_row = await session.execute(

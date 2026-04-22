@@ -18,7 +18,9 @@ class Settings(BaseSettings):
     database_url: str = Field(..., description="asyncpg-compatible PostgreSQL URL")
 
     # Anthropic / AI
-    anthropic_api_key: str = Field(..., description="Anthropic API key for Layer 3 LLM")
+    anthropic_api_key: str = Field("", description="Anthropic API key (unused)")
+    gemini_api_key: str = Field("", description="Google Gemini API key (unused)")
+    groq_api_key: str = Field("", description="Groq API key for Layer 3 LLM summary")
 
     # Application
     app_env: str = Field("development", description="development | staging | production")

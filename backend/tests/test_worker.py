@@ -304,10 +304,10 @@ async def test_handle_pattern_recompute_calls_all_detectors_and_scorer() -> None
     job = _make_job(job_type="pattern_recompute")
     session = AsyncMock()
 
-    gap_result = {"gap_days": 2.0, "flagged": True, "urgent": False}
-    inertia_result = {"detected": True, "avg_systolic_28d": 152.0, "elevated_reading_count": 6, "elevated_span_days": 14.0, "last_med_change": None}
-    adherence_result = {"pattern": "B", "adherence_pct": 91.0, "avg_systolic_28d": 152.0, "total_doses": 84, "confirmed_doses": 77}
-    deterioration_result = {"detected": False, "slope": -0.5, "recent_avg": 148.0, "baseline_avg": 152.0, "reading_count": 10}
+    gap_result = {"gap_days": 2.0, "status": "flag", "threshold_used": {"flag": 1, "urgent": 3}}
+    inertia_result = {"inertia_detected": True, "avg_systolic": 152.0, "elevated_count": 6, "duration_days": 14.0}
+    adherence_result = {"pattern": "B", "adherence_pct": 91.0, "interpretation": "possible treatment-review case — elevated BP with high adherence signal"}
+    deterioration_result = {"deterioration": False, "slope": -0.5, "recent_avg": 148.0, "baseline_avg": 152.0}
 
     with (
         patch("app.services.pattern_engine.gap_detector.run_gap_detector", AsyncMock(return_value=gap_result)) as gap_mock,

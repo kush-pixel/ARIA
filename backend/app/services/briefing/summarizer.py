@@ -1,7 +1,7 @@
 """Optional Layer 3 LLM briefing summariser for ARIA.
 
 Converts a deterministic Layer 1 briefing JSON payload into a 3-sentence
-readable summary using the Anthropic claude-sonnet-4-20250514 model.
+readable summary using Groq (llama-3.3-70b-versatile).
 
 IMPORTANT: This module must only be called AFTER compose_briefing() has
 produced and persisted a verified Layer 1 briefing.  Never run Layer 3
@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import anthropic
+from groq import AsyncGroq
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -27,7 +27,7 @@ from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
 
-_MODEL_VERSION = "claude-sonnet-4-20250514"
+_MODEL_VERSION = "llama-3.3-70b-versatile"
 
 # prompts/ lives at the project root — 4 levels above this file:
 # briefing/ -> services/ -> app/ -> backend/ -> ARIA root
@@ -117,14 +117,17 @@ async def generate_llm_summary(
 
     Raises:
         FileNotFoundError: If prompts/briefing_summary_prompt.md is missing.
-        anthropic.APIError: If the Anthropic API call fails.
-        ValueError: If the briefing has no llm_response payload.
+        ValueError: If the briefing has no llm_response payload or no Groq key.
+        groq.APIError: If the Groq API call fails.
     """
     if not briefing.llm_response:
         raise ValueError(
             f"Briefing {briefing.briefing_id} has no Layer 1 payload. "
             f"Run compose_briefing() before generate_llm_summary()."
         )
+
+    if not settings.groq_api_key:
+        raise ValueError("GROQ_API_KEY is not set — Layer 3 summary cannot run.")
 
     logger.info(
         "Generating Layer 3 LLM summary for briefing=%s patient=%s",
@@ -136,16 +139,19 @@ async def generate_llm_summary(
     prompt_hash = _compute_prompt_hash(system_prompt)
     user_message = _build_user_message(briefing.llm_response)
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    client = AsyncGroq(api_key=settings.groq_api_key)
 
-    message = client.messages.create(
+    response = await client.chat.completions.create(
         model=_MODEL_VERSION,
         max_tokens=256,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_message}],
+        temperature=0.3,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
     )
 
-    summary_text = message.content[0].text.strip()
+    summary_text = response.choices[0].message.content.strip()
 
     # Merge summary into existing payload
     updated_payload = dict(briefing.llm_response)

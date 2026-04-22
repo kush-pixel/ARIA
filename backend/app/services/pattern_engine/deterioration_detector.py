@@ -15,7 +15,7 @@ Missing days are normal (device outages) and are handled without interpolation.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TypedDict
 
 from sqlalchemy import select
@@ -93,7 +93,7 @@ async def run_deterioration_detector(
     Returns:
         DeteriorationResult with deterioration flag, slope, and window averages.
     """
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     window_start = now - timedelta(days=_WINDOW_DAYS)
 
     rows = await session.execute(
