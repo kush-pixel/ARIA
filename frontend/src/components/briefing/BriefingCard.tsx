@@ -6,7 +6,7 @@ import RiskScoreBar from '@/components/dashboard/RiskScoreBar'
 import SparklineChart from './SparklineChart'
 import AdherenceSummary from './AdherenceSummary'
 import VisitAgenda from './VisitAgenda'
-import { AlertTriangle, Info, FlaskConical, Pill, Activity, ClipboardList, Flag } from 'lucide-react'
+import { AlertTriangle, Info, FlaskConical, Pill, Activity, ClipboardList, Flag, Sparkles } from 'lucide-react'
 
 interface BriefingCardProps {
   patient: Patient
@@ -86,7 +86,20 @@ export default function BriefingCard({ patient, briefing, readings, adherence }:
         )}
       </div>
 
-      {/* 2. Data limitations banner */}
+      {/* 2. AI summary (Layer 3 — only shown when generated) */}
+      {payload?.readable_summary && (
+        <div className="px-8 py-5 bg-teal-50 dark:bg-teal-900/20 border-b border-teal-100 dark:border-teal-800">
+          <p className="flex items-center gap-2 text-[12px] font-semibold uppercase tracking-widest text-teal-600 dark:text-teal-400 mb-2">
+            <Sparkles size={14} strokeWidth={2} />
+            AI Summary
+          </p>
+          <p className="text-[16px] text-teal-900 dark:text-teal-100 leading-relaxed">
+            {payload.readable_summary}
+          </p>
+        </div>
+      )}
+
+      {/* 3. Data limitations banner */}
       {(!patient.monitoring_active || payload?.data_limitations) && (
         <div className={`px-8 py-4 flex items-start gap-3 text-[15px]
           ${!patient.monitoring_active

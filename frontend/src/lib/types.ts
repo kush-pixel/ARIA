@@ -6,7 +6,7 @@ export interface Patient {
   age: number
   risk_tier: RiskTier
   tier_override: string | null
-  risk_score: number
+  risk_score: number | null
   monitoring_active: boolean
   next_appointment: string | null
   enrolled_at: string
@@ -54,8 +54,9 @@ export interface BriefingPayload {
   overdue_labs: string[]
   visit_agenda: string[]
   urgent_flags: string[]
-  risk_score: number
+  risk_score: number | null
   data_limitations: string
+  readable_summary?: string
 }
 
 export interface Briefing {

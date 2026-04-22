@@ -50,6 +50,21 @@ _UCUM_MMHG = "mm[Hg]"
 # ingestion layer. Both files must use this same constant.
 _PATIENT_AGE_EXT = "_age"
 
+# Substrings (upper-cased) that identify iEMR MEDICATIONS entries that are
+# supplies, diagnostic tests, or device prescriptions — not pharmaceuticals.
+# Matched against the full upper-cased medication name string.
+_NON_DRUG_MARKERS: tuple[str, ...] = (
+    "RX FOR ",       # device/therapy scripts ("Rx for Compression Stockings")
+    "SYRINGE",       # injection supply containers
+    "SHARPS",        # sharps disposal bins
+    " CONTAINER",    # generic supply containers (space-prefixed to avoid "Retainer")
+    "PEN NEEDLE",    # insulin pen needle packs
+    " TEST",         # diagnostic tests ("HEARING TEST") — space-prefixed to avoid "Attest"
+)
+
+# Exact upper-cased names that are diagnostic tests not identifiable by substring.
+_NON_DRUG_EXACT: frozenset[str] = frozenset({"VNG"})
+
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
@@ -192,6 +207,7 @@ def _build_conditions(visits: list[dict[str, Any]]) -> list[dict[str, Any]]:
     - ``PROBLEM_ACTIVITY == "Active"``
     - ``PROBLEM_CLASSIFICATION != "PMH"``
     - ``PROBLEM_END_DATE`` absent, ``None``, or empty string
+    - ICD-10 code not in Z00.x range (encounter-type administrative codes)
 
     Later visits overwrite earlier ones (most-recent wins).
 
@@ -219,6 +235,12 @@ def _build_conditions(visits: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     problem.get("code_mappings"),
                     problem.get("PROBLEM_CODE"),
                 )
+
+                # Z00.x codes are encounter-type administrative codes
+                # (e.g. Z00.00 = "General adult medical examination") — not
+                # clinical problems and must not appear in the problem list.
+                if icd10 and icd10.startswith("Z00"):
+                    continue
 
                 resource: dict[str, Any] = {
                     "resourceType": "Condition",
@@ -250,7 +272,14 @@ def _build_conditions(visits: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _build_medication_requests(visits: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Build deduplicated FHIR MedicationRequest resources from iEMR MEDICATIONS.
 
-    Later visits overwrite earlier ones (most-recent wins).
+    Filters:
+    - ``MED_ACTIVITY == "Discontinue"`` entries are excluded; the most-recent
+      state for that MED_CODE is a discontinuation, so the drug is not active.
+
+    Deduplication:
+    - Primary: by ``MED_CODE`` (most-recent visit wins), same as all other types.
+    - Secondary: by normalised medication name (upper-cased), because the same
+      drug can appear under multiple distinct MED_CODEs across visits.
 
     Args:
         visits: All VISIT dicts for this patient.
@@ -258,15 +287,42 @@ def _build_medication_requests(visits: list[dict[str, Any]]) -> list[dict[str, A
     Returns:
         List of FHIR MedicationRequest resource dicts.
     """
-    seen: dict[str, dict[str, Any]] = {}
+    # None sentinel: MED_CODE is in a discontinued state.
+    # discontinued_names: upper-cased drug names that have been discontinued
+    # under ANY MED_CODE — used to propagate discontinuations across the multiple
+    # prescription codes iEMR assigns to refills of the same drug.
+    seen: dict[str, dict[str, Any] | None] = {}
+    discontinued_names: set[str] = set()
 
     for visit in visits:
         for med in visit.get("MEDICATIONS", []):
             try:
                 key = str(med.get("MED_CODE", med.get("code", "")))
+
+                # Tombstone this MED_CODE and record the drug name as discontinued.
+                # Any active entry under a different MED_CODE for the same drug
+                # name will be filtered out in the secondary dedup step below.
+                if med.get("MED_ACTIVITY") == "Discontinue":
+                    seen[key] = None
+                    disc_name = (
+                        f"{med.get('MED_NAME', '')} {med.get('MED_DOSE', '')}".strip().upper()
+                    )
+                    if disc_name:
+                        discontinued_names.add(disc_name)
+                    continue
+
                 med_name = med.get("MED_NAME", "")
                 med_dose = med.get("MED_DOSE", "")
                 med_text = f"{med_name} {med_dose}".strip()
+
+                # Skip supplies, diagnostic tests, and device scripts that iEMR
+                # stores in its MEDICATIONS array alongside actual pharmaceuticals.
+                med_upper = med_text.upper()
+                if med_upper in _NON_DRUG_EXACT or any(
+                    marker in med_upper for marker in _NON_DRUG_MARKERS
+                ):
+                    logger.debug("Skipping non-drug MEDICATIONS entry: %r", med_text)
+                    continue
 
                 medication_concept: dict[str, Any] = {"text": med_text}
                 rxnorm = _extract_rxnorm(med.get("code_mappings"))
@@ -292,7 +348,26 @@ def _build_medication_requests(visits: list[dict[str, Any]]) -> list[dict[str, A
             except (KeyError, TypeError) as exc:
                 logger.warning("Skipping malformed MEDICATIONS entry: %s", exc)
 
-    return list(seen.values())
+    # Secondary deduplication by normalised name.
+    # A single drug can appear under multiple MED_CODEs across visits (e.g.
+    # three refill prescriptions each assigned a new code).
+    # Two exclusion rules:
+    #   1. None sentinels (discontinued MED_CODE tombstones).
+    #   2. Drug names in discontinued_names — catches the case where the
+    #      Discontinue activity was recorded under a DIFFERENT MED_CODE than
+    #      the active entry (common when EHR re-codes a refill as a new Rx).
+    name_seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for resource in seen.values():
+        if resource is None:
+            continue  # tombstoned by MED_CODE
+        name_key = resource["medicationCodeableConcept"]["text"].upper().strip()
+        if name_key in discontinued_names:
+            continue  # discontinued under a different MED_CODE for the same drug
+        if name_key not in name_seen:
+            name_seen.add(name_key)
+            deduped.append(resource)
+    return deduped
 
 
 def _build_med_history(visits: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -474,6 +549,12 @@ def _build_service_requests(visits: list[dict[str, Any]]) -> list[dict[str, Any]
     """Build deduplicated FHIR ServiceRequest resources from iEMR PLAN arrays.
 
     Only PLAN entries with ``PLAN_NEEDS_FOLLOWUP == "YES"`` are included.
+    Additionally, items that are clearly not clinical orders are excluded:
+    - Physician names (text starts with ``"Dr."``)
+    - Redacted vendor records (text contains ``"XXXXXXXXX"``)
+    - Patient education items (text starts with ``"Instructions for"``
+      or contains ``"General Advice"``)
+
     Later visits overwrite earlier ones (most-recent wins).
 
     Args:
@@ -493,6 +574,16 @@ def _build_service_requests(visits: list[dict[str, Any]]) -> list[dict[str, Any]
 
                 key = str(plan.get("PLAN_CODE", plan.get("code", "")))
                 plan_text = plan.get("value") or plan.get("PLAN_TITLE") or plan.get("PLAN_DESCRIPTION", "")
+
+                # Skip non-clinical entries that iEMR stores alongside real orders.
+                if (
+                    plan_text.startswith("Dr.")
+                    or "XXXXXXXXX" in plan_text
+                    or plan_text.startswith("Instructions for")
+                    or "General Advice" in plan_text
+                ):
+                    logger.debug("Skipping non-clinical PLAN entry: %r", plan_text)
+                    continue
 
                 resource: dict[str, Any] = {
                     "resourceType": "ServiceRequest",

@@ -12,7 +12,7 @@ Fail-safe: sparse data, missing context, or any unmet condition → False.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import TypedDict
 
 from sqlalchemy import select
@@ -77,7 +77,7 @@ async def run_inertia_detector(session: AsyncSession, patient_id: str) -> Inerti
     Returns:
         InertiaResult with inertia_detected flag and supporting evidence values.
     """
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     window_start = now - timedelta(days=_WINDOW_DAYS)
 
     rows = await session.execute(
@@ -141,7 +141,7 @@ async def run_inertia_detector(session: AsyncSession, patient_id: str) -> Inerti
             last_med_change.year,
             last_med_change.month,
             last_med_change.day,
-            tzinfo=timezone.utc,
+            tzinfo=UTC,
         )
         if last_med_dt >= first_elevated_dt:
             logger.debug(

@@ -40,6 +40,6 @@ async def ingest_bundle(
         summary = await ingest_fhir_bundle(bundle, session)
     except Exception as exc:
         logger.exception("Bundle ingestion failed: %s", exc)
-        raise HTTPException(status_code=500, detail="Ingestion failed — see server logs")
+        raise HTTPException(status_code=500, detail="Ingestion failed — see server logs") from exc
 
     return summary

@@ -462,9 +462,144 @@ def test_service_request_followup_filter() -> None:
     assert requests[0]["intent"] == "order"
 
 
+def test_service_request_filters_physician_names() -> None:
+    """PLAN entries that are physician names (starting 'Dr.') must be excluded."""
+    visit = _make_visit(
+        plans=[
+            _plan(plan_code="PL001", value="C-Peptide, Serum", needs_followup="YES"),
+            _plan(plan_code="PL002", value="Dr. Gary Rogers", needs_followup="YES"),
+        ]
+    )
+    data = _make_iemr([visit])
+    bundle = convert_iemr_to_fhir(data)
+    requests = [
+        e["resource"]
+        for e in bundle["entry"]
+        if e["resource"]["resourceType"] == "ServiceRequest"
+    ]
+    texts = [r["code"]["text"] for r in requests]
+    assert "C-Peptide, Serum" in texts
+    assert "Dr. Gary Rogers" not in texts
+
+
+def test_service_request_filters_redacted_vendors() -> None:
+    """PLAN entries containing 'XXXXXXXXX' (redacted vendors) must be excluded."""
+    visit = _make_visit(
+        plans=[
+            _plan(plan_code="PL001", value="Cardiology Consult", needs_followup="YES"),
+            _plan(plan_code="PL002", value="XXXXXXXXX's Medical Surgical Supply", needs_followup="YES"),
+        ]
+    )
+    data = _make_iemr([visit])
+    bundle = convert_iemr_to_fhir(data)
+    requests = [
+        e["resource"]
+        for e in bundle["entry"]
+        if e["resource"]["resourceType"] == "ServiceRequest"
+    ]
+    texts = [r["code"]["text"] for r in requests]
+    assert "Cardiology Consult" in texts
+    assert "XXXXXXXXX's Medical Surgical Supply" not in texts
+
+
+def test_service_request_filters_patient_education() -> None:
+    """PLAN entries that are patient education items must be excluded."""
+    visit = _make_visit(
+        plans=[
+            _plan(plan_code="PL001", value="GLYCOHEMOGLOBIN (Pending)", needs_followup="YES"),
+            _plan(plan_code="PL002", value="Instructions for Sliding Scale Fast Acting Insulin", needs_followup="YES"),
+            _plan(plan_code="PL003", value="Hypoglycemia - General Advice on Treatment", needs_followup="YES"),
+        ]
+    )
+    data = _make_iemr([visit])
+    bundle = convert_iemr_to_fhir(data)
+    requests = [
+        e["resource"]
+        for e in bundle["entry"]
+        if e["resource"]["resourceType"] == "ServiceRequest"
+    ]
+    texts = [r["code"]["text"] for r in requests]
+    assert "GLYCOHEMOGLOBIN (Pending)" in texts
+    assert "Instructions for Sliding Scale Fast Acting Insulin" not in texts
+    assert "Hypoglycemia - General Advice on Treatment" not in texts
+
+
 # ---------------------------------------------------------------------------
 # Deduplication (most-recent-wins)
 # ---------------------------------------------------------------------------
+
+
+def test_condition_filters_z00_encounter_codes() -> None:
+    """Problems with Z00.x ICD-10 codes (encounter types) must be excluded."""
+    visit = _make_visit(
+        problems=[
+            _active_problem(code="Z001", value="PREVENTIVE CARE", icd10="Z00.00"),
+            _active_problem(code="I10", value="Hypertension", icd10="I10"),
+        ]
+    )
+    data = _make_iemr([visit])
+    bundle = convert_iemr_to_fhir(data)
+    conditions = [
+        e["resource"]
+        for e in bundle["entry"]
+        if e["resource"]["resourceType"] == "Condition"
+    ]
+    assert len(conditions) == 1
+    assert conditions[0]["code"]["text"] == "Hypertension"
+
+
+def test_medication_discontinued_excluded() -> None:
+    """Medications with MED_ACTIVITY='Discontinue' must not appear in the bundle."""
+    med_active = {**_medication(med_code="M001", name="Lisinopril", dose="10 mg"), "MED_ACTIVITY": "Refill"}
+    med_stopped = {**_medication(med_code="M002", name="Simvastatin", dose="20 mg"), "MED_ACTIVITY": "Discontinue"}
+    visit = _make_visit(medications=[med_active, med_stopped])
+    data = _make_iemr([visit])
+    bundle = convert_iemr_to_fhir(data)
+    meds = [
+        e["resource"]
+        for e in bundle["entry"]
+        if e["resource"]["resourceType"] == "MedicationRequest"
+    ]
+    names = [m["medicationCodeableConcept"]["text"] for m in meds]
+    assert any("Lisinopril" in n for n in names)
+    assert not any("Simvastatin" in n for n in names)
+
+
+def test_medication_discontinued_propagates_across_med_codes() -> None:
+    """A Discontinue on one MED_CODE must exclude the same drug name from a different active MED_CODE."""
+    # Same drug prescribed under two different MED_CODEs across two visits;
+    # the second visit records a Discontinue under a new code.
+    med_visit1 = {**_medication(med_code="M001", name="Byetta", dose=""), "MED_ACTIVITY": ""}
+    med_visit2 = {**_medication(med_code="M002", name="Byetta", dose=""), "MED_ACTIVITY": "Discontinue"}
+    data = _make_iemr([
+        _make_visit(medications=[med_visit1]),
+        _make_visit(medications=[med_visit2]),
+    ])
+    bundle = convert_iemr_to_fhir(data)
+    meds = [
+        e["resource"]
+        for e in bundle["entry"]
+        if e["resource"]["resourceType"] == "MedicationRequest"
+    ]
+    names = [m["medicationCodeableConcept"]["text"] for m in meds]
+    assert not any("Byetta" in n for n in names), (
+        "Byetta should be excluded: a later visit discontinued it under a different MED_CODE"
+    )
+
+
+def test_medication_name_deduplication_across_med_codes() -> None:
+    """Same drug under two different MED_CODEs must produce only one MedicationRequest."""
+    med_a = _medication(med_code="M001", name="Namenda", dose="")
+    med_b = _medication(med_code="M002", name="Namenda", dose="")  # distinct MED_CODE, same name
+    visit = _make_visit(medications=[med_a, med_b])
+    data = _make_iemr([visit])
+    bundle = convert_iemr_to_fhir(data)
+    meds = [
+        e["resource"]
+        for e in bundle["entry"]
+        if e["resource"]["resourceType"] == "MedicationRequest"
+    ]
+    assert len(meds) == 1
 
 
 def test_deduplication_condition_keeps_last() -> None:

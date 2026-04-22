@@ -116,6 +116,61 @@ def _build_trend_summary(
     )
 
 
+_PROBLEM_PRIORITY: dict[str, int] = {
+    "I50": 0,  # CHF — highest clinical priority
+    "I10": 1,  # Hypertension
+    "E11": 2,  # Type 2 Diabetes
+    "I25": 3,  # CAD
+}
+
+
+def _sort_problems(problems: list[str], codes: list[str]) -> list[str]:
+    """Sort active problems by clinical priority, then alphabetically.
+
+    Args:
+        problems: Human-readable problem names from clinical_context.active_problems.
+        codes: Parallel ICD-10/SNOMED codes from clinical_context.problem_codes.
+
+    Returns:
+        Problem names reordered so high-priority conditions appear first.
+    """
+    paired = list(zip(problems, codes, strict=False))
+
+    def _key(pair: tuple[str, str]) -> tuple[int, str]:
+        _, code = pair
+        prefix = code[:3] if code else ""
+        return (_PROBLEM_PRIORITY.get(prefix, 99), pair[0])
+
+    return [p for p, _ in sorted(paired, key=_key)]
+
+
+def _human_duration(days: int) -> str:
+    """Convert a day count into a human-readable duration string.
+
+    Args:
+        days: Number of days elapsed.
+
+    Returns:
+        Natural language string such as "about 3 months ago".
+    """
+    if days < 1:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    if days < 30:
+        return f"{days} days ago"
+    if days < 60:
+        return "about a month ago"
+    if days < 365:
+        months = days // 30
+        return f"about {months} months ago"
+    years = days // 365
+    months = (days % 365) // 30
+    if months > 0:
+        return f"about {years} year{'s' if years > 1 else ''} and {months} month{'s' if months > 1 else ''} ago"
+    return f"about {years} year{'s' if years > 1 else ''} ago"
+
+
 def _build_medication_status(
     current_medications: list[str] | None,
     last_med_change: date | None,
@@ -138,7 +193,7 @@ def _build_medication_status(
         return (
             f"Current regimen: {meds}. "
             f"Last recorded medication change: {last_med_change.isoformat()} "
-            f"({days_since} days ago)."
+            f"({_human_duration(days_since)})."
         )
     return f"Current regimen: {meds}. No medication change date recorded in EHR."
 
@@ -308,7 +363,7 @@ def _build_visit_agenda(
             if days_since > _INERTIA_DAYS:
                 agenda.append(
                     f"Review treatment plan: 28-day average systolic {avg_sys:.0f} mmHg "
-                    f"with no recorded medication change in {days_since} days."
+                    f"with no recorded medication change ({_human_duration(days_since)})."
                 )
         elif avg_sys >= _ELEVATED_SYSTOLIC and last_med_change is None:
             agenda.append(
@@ -330,12 +385,14 @@ def _build_visit_agenda(
                 f"confirmation rate across all medications in the past 28 days."
             )
 
-    # 4. Overdue labs
+    # 4. Overdue labs / pending clinical follow-ups
+    # This list includes actual lab orders and other clinical follow-up items
+    # (referrals, protocols) — use neutral language that covers both.
     if overdue_labs:
         for lab in overdue_labs:
             if len(agenda) >= 5:
                 break
-            agenda.append(f"Order overdue lab: {lab}.")
+            agenda.append(f"Pending follow-up: {lab}.")
 
     # 5. Active problems review
     if active_problems and len(agenda) < 5:
@@ -367,12 +424,16 @@ def _build_data_limitations(
     if not readings:
         return "Home monitoring active but no readings received in past 28 days."
     n = len(readings)
+    _synthetic_notice = (
+        " Home BP readings are synthetic, generated for demonstration purposes "
+        "from real iEMR baseline data."
+    )
     if n < 14:
         return (
             f"Limited home monitoring data: {n} sessions in past 28 days. "
-            f"Trend interpretation should be treated with caution."
+            f"Trend interpretation should be treated with caution.{_synthetic_notice}"
         )
-    return f"Home monitoring data available: {n} sessions over 28 days."
+    return f"Home monitoring data available: {n} sessions over 28 days.{_synthetic_notice}"
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
@@ -499,7 +560,7 @@ async def compose_briefing(
         "trend_summary": trend_summary,
         "medication_status": medication_status,
         "adherence_summary": adherence_summary,
-        "active_problems": ctx.active_problems or [],
+        "active_problems": _sort_problems(ctx.active_problems or [], ctx.problem_codes or []),
         "overdue_labs": ctx.overdue_labs or [],
         "visit_agenda": visit_agenda,
         "urgent_flags": urgent_flags,

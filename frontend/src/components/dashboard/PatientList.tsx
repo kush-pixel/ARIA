@@ -3,8 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { getPatients } from '@/lib/api'
-import { getMockReadings } from '@/lib/mockData'
-import type { Patient, Reading } from '@/lib/types'
+import type { Patient } from '@/lib/types'
 import RiskTierBadge from './RiskTierBadge'
 import RiskScoreBar from './RiskScoreBar'
 import { FileText, Clock } from 'lucide-react'
@@ -15,20 +14,8 @@ function sortPatients(patients: Patient[]): Patient[] {
   return [...patients].sort((a, b) => {
     const tierDiff = (TIER_ORDER[a.risk_tier] ?? 9) - (TIER_ORDER[b.risk_tier] ?? 9)
     if (tierDiff !== 0) return tierDiff
-    return b.risk_score - a.risk_score
+    return (b.risk_score ?? 0) - (a.risk_score ?? 0)
   })
-}
-
-function lastReading(patientId: string): Reading | null {
-  const all = getMockReadings(patientId)
-  if (all.length === 0) return null
-  return all.reduce((latest, r) =>
-    new Date(r.effective_datetime) > new Date(latest.effective_datetime) ? r : latest
-  )
-}
-
-function daysSince(isoTimestamp: string): number {
-  return Math.floor((Date.now() - new Date(isoTimestamp).getTime()) / 86_400_000)
 }
 
 function formatApptTime(iso: string): string {
@@ -67,22 +54,18 @@ export default function PatientList() {
   return (
     <div className="card overflow-hidden">
       {/* Header row */}
-      <div className="grid grid-cols-[1fr_160px_180px_120px_110px_100px_60px] gap-4
+      <div className="grid grid-cols-[1fr_160px_180px_100px_60px] gap-4
                       px-6 py-3 bg-slate-50 dark:bg-slate-800/60 border-b border-slate-100 dark:border-slate-700
                       text-[13px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide">
         <span>Patient</span>
         <span>Risk Tier</span>
         <span>Priority Score</span>
-        <span>Last BP</span>
-        <span>Last Reading</span>
         <span>Appointment</span>
         <span>Briefing</span>
       </div>
 
       {/* Patient rows */}
       {patients.map((patient, idx) => {
-        const reading = lastReading(patient.patient_id)
-        const daysAgo = reading ? daysSince(reading.effective_datetime) : null
         const apptToday = patient.next_appointment && isToday(patient.next_appointment)
 
         return (
@@ -90,7 +73,7 @@ export default function PatientList() {
             key={patient.patient_id}
             onClick={() => router.push(`/patients/${patient.patient_id}`)}
             aria-label={`View briefing for patient ${patient.patient_id}`}
-            className={`w-full text-left grid grid-cols-[1fr_160px_180px_120px_110px_100px_60px] gap-4
+            className={`w-full text-left grid grid-cols-[1fr_160px_180px_100px_60px] gap-4
                         px-6 py-5 items-center
                         hover:bg-teal-50/60 dark:hover:bg-teal-900/20
                         focus-visible:bg-teal-50 dark:focus-visible:bg-teal-900/20
@@ -120,29 +103,6 @@ export default function PatientList() {
             {/* Risk score bar */}
             <div>
               <RiskScoreBar score={patient.risk_score} tier={patient.risk_tier} />
-            </div>
-
-            {/* Last BP */}
-            <div>
-              {reading ? (
-                <span className="text-clinical font-semibold text-slate-800 dark:text-slate-100 tabular-nums">
-                  {reading.systolic_avg.toFixed(0)}/{reading.diastolic_avg.toFixed(0)}
-                  <span className="text-[13px] font-normal text-slate-400 ml-1">mmHg</span>
-                </span>
-              ) : (
-                <span className="text-[15px] text-slate-400 italic">No data</span>
-              )}
-            </div>
-
-            {/* Days since last reading */}
-            <div>
-              {daysAgo !== null ? (
-                <span className={`text-[15px] font-medium ${daysAgo >= 3 ? 'text-amber-600 dark:text-amber-400' : 'text-slate-500 dark:text-slate-400'}`}>
-                  {daysAgo === 0 ? 'Today' : `${daysAgo}d ago`}
-                </span>
-              ) : (
-                <span className="text-[15px] text-slate-300 dark:text-slate-600">—</span>
-              )}
             </div>
 
             {/* Appointment */}

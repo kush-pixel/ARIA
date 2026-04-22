@@ -268,7 +268,7 @@ async def test_adherence_pattern_b_high_bp_high_adherence() -> None:
     session = _session(_one(20, 20), _scalar(155.0))   # 100% adherence
     result = await run_adherence_analyzer(session, "1091")
     assert result["pattern"] == "B"
-    assert result["interpretation"] == "treatment review warranted"
+    assert result["interpretation"] == "possible treatment-review case — elevated BP with high adherence signal"
 
 
 async def test_adherence_pattern_c_normal_bp_low_adherence() -> None:

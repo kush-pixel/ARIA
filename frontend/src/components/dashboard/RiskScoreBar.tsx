@@ -3,7 +3,7 @@
 import * as Tooltip from '@radix-ui/react-tooltip'
 
 interface RiskScoreBarProps {
-  score: number
+  score: number | null
   tier: string
 }
 
@@ -14,8 +14,9 @@ function barColor(score: number): string {
 }
 
 export default function RiskScoreBar({ score, tier: _tier }: RiskScoreBarProps) {
-  const pct = Math.min(100, Math.max(0, score))
-  const color = barColor(score)
+  const safeScore = score ?? 0
+  const pct = Math.min(100, Math.max(0, safeScore))
+  const color = barColor(safeScore)
 
   return (
     <Tooltip.Provider delayDuration={200}>
@@ -24,9 +25,9 @@ export default function RiskScoreBar({ score, tier: _tier }: RiskScoreBarProps) 
           <div className="flex items-center gap-3 cursor-default min-w-0">
             <span
               className="text-clinical font-semibold tabular-nums text-slate-800 dark:text-slate-100 w-10 flex-shrink-0"
-              aria-label={`Risk score ${score.toFixed(1)}`}
+              aria-label={`Risk score ${safeScore.toFixed(1)}`}
             >
-              {score.toFixed(1)}
+              {safeScore.toFixed(1)}
             </span>
             <div
               className="flex-1 h-3 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden min-w-[60px]"
@@ -34,7 +35,7 @@ export default function RiskScoreBar({ score, tier: _tier }: RiskScoreBarProps) 
               aria-valuenow={pct}
               aria-valuemin={0}
               aria-valuemax={100}
-              aria-label={`Priority score ${score.toFixed(1)} out of 100`}
+              aria-label={`Priority score ${safeScore.toFixed(1)} out of 100`}
             >
               <div
                 className={`h-full rounded-full transition-all duration-300 ${color}`}

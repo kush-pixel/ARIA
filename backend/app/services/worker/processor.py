@@ -31,10 +31,11 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.base import AsyncSessionLocal
+from app.models.alert import Alert
 from app.models.processing_job import ProcessingJob
 from app.utils.logging_utils import get_logger
 
@@ -46,6 +47,49 @@ _BATCH_SIZE: int = 10
 
 # Type alias for async job handler functions
 _JobHandler = Callable[[ProcessingJob, AsyncSession], Awaitable[None]]
+
+
+# ---------------------------------------------------------------------------
+# Alert helper
+# ---------------------------------------------------------------------------
+
+
+async def _upsert_alert(
+    session: AsyncSession,
+    patient_id: str,
+    alert_type: str,
+    gap_days: int | None = None,
+) -> None:
+    """Insert an alert row for today if one does not already exist.
+
+    Deduplicates by (patient_id, alert_type, date(triggered_at)) so
+    re-running pattern_recompute on the same day does not create duplicates.
+
+    Args:
+        session: Active async SQLAlchemy session.
+        patient_id: Patient to alert on.
+        alert_type: gap_urgent | gap_briefing | inertia | deterioration
+        gap_days: Only set for gap_urgent and gap_briefing alert types.
+    """
+    today = datetime.now(UTC).date()
+    existing = await session.execute(
+        select(Alert)
+        .where(
+            Alert.patient_id == patient_id,
+            Alert.alert_type == alert_type,
+            func.date(Alert.triggered_at) == today,
+        )
+        .limit(1)
+    )
+    if existing.scalar_one_or_none() is None:
+        session.add(
+            Alert(
+                patient_id=patient_id,
+                alert_type=alert_type,
+                gap_days=gap_days,
+                triggered_at=datetime.now(UTC),
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -128,14 +172,14 @@ async def _handle_pattern_recompute(job: ProcessingJob, session: AsyncSession) -
 
     gap = await run_gap_detector(session, pid)
     logger.info(
-        "gap_detector: patient=%s gap_days=%s flagged=%s urgent=%s",
-        pid, gap["gap_days"], gap["flagged"], gap["urgent"],
+        "gap_detector: patient=%s gap_days=%s status=%s",
+        pid, gap["gap_days"], gap["status"],
     )
 
     inertia = await run_inertia_detector(session, pid)
     logger.info(
         "inertia_detector: patient=%s detected=%s avg_systolic=%s",
-        pid, inertia["detected"], inertia.get("avg_systolic_28d"),
+        pid, inertia["inertia_detected"], inertia.get("avg_systolic"),
     )
 
     adherence = await run_adherence_analyzer(session, pid)
@@ -147,8 +191,19 @@ async def _handle_pattern_recompute(job: ProcessingJob, session: AsyncSession) -
     deterioration = await run_deterioration_detector(session, pid)
     logger.info(
         "deterioration_detector: patient=%s detected=%s slope=%s",
-        pid, deterioration["detected"], deterioration.get("slope"),
+        pid, deterioration["deterioration"], deterioration.get("slope"),
     )
+
+    # Write alert rows for triggered conditions (deduplicated by date)
+    if gap["status"] in ("flag", "urgent"):
+        alert_type = "gap_urgent" if gap["status"] == "urgent" else "gap_briefing"
+        await _upsert_alert(session, pid, alert_type, gap_days=int(gap["gap_days"]))
+    if inertia["inertia_detected"]:
+        await _upsert_alert(session, pid, "inertia")
+    if deterioration["deterioration"]:
+        await _upsert_alert(session, pid, "deterioration")
+    await session.flush()
+    logger.info("Alert rows written for patient=%s", pid)
 
     score = await compute_risk_score(pid, session)
     logger.info(

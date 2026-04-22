@@ -10,18 +10,17 @@ Run from backend/ directory:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api import adherence, admin, alerts, briefings, ingest, patients, readings
 from app.config import settings
 from app.db.base import AsyncSessionLocal
 from app.services.worker.processor import WorkerProcessor
 from app.utils.logging_utils import get_logger
-
-from app.api import patients, readings, briefings, alerts, ingest, admin, adherence
 
 logger = get_logger(__name__)
 
