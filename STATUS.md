@@ -1,5 +1,5 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-22 by Claude Code (pre-demo audit — 9 bugs fixed across backend + frontend)
+Last updated: 2026-04-22 by Claude Code (shadow mode implementation + system audit — see AUDIT.md)
 
 ---
 
@@ -72,12 +72,14 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - backend/app/api/admin.py — POST /api/admin/trigger-scheduler; guarded by DEMO_MODE=true
 - backend/app/api/adherence.py — GET /api/adherence/{patient_id}; per-medication adherence breakdown from medication_confirmations (28-day window); matches frontend AdherenceData type exactly
 - backend/tests/test_api.py — 24 unit tests (all passing); covers all 11 API routes; uses httpx.AsyncClient + mocked sessions; no live DB required
+- backend/app/api/shadow_mode.py — GET /api/shadow-mode/results; serves pre-computed shadow mode results from data/shadow_mode_results.json; no DB dependency; returns 404 if results not yet generated
+- scripts/run_shadow_mode.py — shadow mode validation script; **COMPLETE, PASSING at 91.4%** (see Shadow Mode section below)
+- frontend/src/app/shadow-mode/page.tsx — shadow mode results page; shows visit-by-visit ARIA vs physician comparison, between-visit alert timeline, detector breakdowns, agreement metrics
 
 ### IN PROGRESS
 - None
 
 ### NOT STARTED
-- scripts/run_shadow_mode.py — shadow mode validation (target ≥80% agreement vs physician notes)
 - scripts/run_scheduler.py — standalone manual scheduler trigger script
 
 ---
@@ -109,6 +111,7 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 | GET /api/adherence/{patient_id} | DONE | per-medication breakdown |
 | POST /api/ingest | DONE | validates then ingests |
 | POST /api/admin/trigger-scheduler | DONE | DEMO_MODE guard |
+| GET /api/shadow-mode/results | DONE | serves pre-computed JSON results file |
 | GET /health | DONE | |
 
 ---
@@ -119,6 +122,103 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - ANTHROPIC_API_KEY in backend/.env is placeholder — Layer 3 LLM summary will be skipped until real key is set. Briefing still generates via Layer 1 without it.
 - Some iEMR medication entries have null MED_ACTIVITY (e.g. ASPIRIN 81, METOPROLOL in patient 1091's earliest visits). The activity field in med_history will be null for these entries. Acceptable for now — briefing composer should handle null activity gracefully.
 - risk_score for patient 1091 (69.48) was computed before the medication list was corrected. It should be recomputed via a pattern_recompute job after the next demo run. The score will shift slightly because the adherence denominator changed (420 confirmations vs the old 1092).
+
+---
+
+## Shadow Mode Development — 2026-04-22
+
+### Overview
+Shadow mode replays all 124 iEMR clinic visits in chronological order and asks: if ARIA had been running during this patient's care, would it have fired (or not fired) at the same moments the physician was concerned? Ground truth comes from iEMR `PROBLEM_STATUS2_FLAG` (flag 1 or 2 = physician concerned, flag 3 = stable). Visits without an HTN flag are excluded from agreement scoring.
+
+**Final result: 91.4% agreement (32/35 labelled), PASSED ✓** (target was ≥80%)  
+`random.seed(1)` is set in the script for reproducible results.
+
+### What the script does (`scripts/run_shadow_mode.py`)
+
+**Step 1 — Clinic BP extraction (53 visits)**  
+Loads all clinic BP readings from the Supabase DB (`source='clinic'`). Deduplicates by date keeping the chronologically last reading per day (settled post-assessment BP, not white-coat spike). Applies physician label from iEMR `PROBLEM_STATUS2_FLAG` via a label map.
+
+**Step 2 — Synthetic home reading generation (28-day windows)**  
+For each BP visit, generates a 28-day window of synthetic home readings using the same `ReadingGenerator` rules as production (SD 8–12 mmHg, morning/evening split, device outage episodes, white-coat dip before visit, post-appointment return). Minimum 4 readings in window required — visits with fewer are skipped.
+
+**Step 3 — Patient-adaptive threshold**  
+Computes a personal BP threshold from prior clinic visits only: `max(130, stable_baseline_mean + 1.5×SD)` capped at 145 mmHg. Falls back to population threshold of 140 mmHg if fewer than 3 stable readings exist. This is more accurate than the production hard-coded 140 mmHg for all patients.
+
+**Step 4 — Continuous monitoring (between-visit alerts)**  
+Scans every 7 days through each inter-visit gap using a rolling 28-day synthetic window. Fires all four detectors at each check point. Keeps only the earliest alert per gap (avoids double-counting). Alert format includes `alert_type` (pipe-separated codes), `days_before_visit`, plain-English `message`, and a `reasons[]` list with one entry per fired detector.
+
+**Step 5 — Four Layer 1 detectors (shadow versions)**  
+All four detectors are re-implemented locally (no DB calls) operating on the in-memory synthetic window:
+- **GAP** — ≥3 consecutive days absent while window mean ≥ threshold
+- **INE (Therapeutic Inertia)** — window mean ≥ threshold + no medication change since `last_med_change`
+- **DET (Deterioration)** — positive least-squares slope across the 28-day window
+- **ADH (Adherence)** — synthetic adherence rate computed per-visit; Pattern A (low adherence + high BP) and Pattern B (high adherence + high BP = possible treatment-review case)
+
+**Step 6 — Scoring and agreement**  
+`aria_fired = gap_urgent OR inertia OR deterioration OR adherence`.  
+`result` = agree | false_negative | false_positive | no_ground_truth.  
+Only visits with ground truth (flag 1/2 or 3) contribute to agreement %.
+
+**Step 7 — Best demo window identification**  
+Finds the contiguous run of visits with the highest density of `agree` results — used by the frontend to highlight the recommended demo window.
+
+**Step 8 — Output**  
+Results written to `data/shadow_mode_results.json`. Per-visit summary printed to console with label, window mean, threshold, fired detectors, and result. Between-visit alerts printed per gap.
+
+### Other active problems display
+Each visit in the results includes `other_active_problems` — a list of non-HTN physician assessments from that visit (name, PROBLEM_STATUS2_FLAG, PROBLEM_STATUS2 text, assessment text). These are displayed on the shadow mode frontend to give clinical context for false positive/negative cases.
+
+### Result breakdown (patient 1091)
+```
+Total evaluation points:  53
+Skipped (< 4 readings):    1
+Clinic BP points:          52
+With ground truth:         35
+  Concerned (flag 1/2):    27
+  Stable (flag 3):          8
+No ground truth:           17 (excluded from scoring)
+
+Agreements:   32
+False negatives: 1  (ARIA silent, physician concerned)
+False positives: 2  (ARIA fired, physician stable)
+Agreement rate: 32/35 = 91.4%  PASSED ✓
+
+Between-visit alerts generated: 9 (across all inter-visit gaps)
+```
+
+### Frontend — shadow mode page (`frontend/src/app/shadow-mode/`)
+New route `/shadow-mode` added to the app. Features:
+- **Summary banner** — agreement %, pass/fail badge, evaluation point counts
+- **Best demo window** — highlighted date range with summary
+- **Visit timeline** — expandable cards for each of 52 evaluation points
+  - Shows: visit date, source (clinic BP vs no-vitals), physician label badge, ARIA fired/silent badge, result (AGREE / FALSE NEG / FALSE POS / NO GT)
+  - Expanded view: synthetic reading sparkline, detector breakdown (GAP / INE / DET / ADH), `other_active_problems`, and "First alert ARIA would have sent" section
+- **Between-visit alerts** — per-gap alert strip with days-before-visit, color-coded `AlertTypeBadge` components (Reading Gap / Therapeutic Inertia / BP Deterioration / Treatment Review), and bullet-point plain-English reasons per detector
+- **No ground truth** visits shown with neutral badge (excluded from scoring)
+- Null BP handled gracefully (displays "—" instead of crashing)
+
+### Alert clarity improvements (2026-04-22)
+Between-visit alerts previously showed raw acronyms ("GAP|INE") and a single concatenated message string. Updated to:
+- **`AlertTypeBadge` component** — maps GAP→"Reading Gap" (red), INE→"Therapeutic Inertia" (orange), DET→"BP Deterioration" (red), ADH→"Treatment Review" (amber) with full-name labels and color-coded pills
+- **`reasons[]` list on each alert** — one plain-English sentence per fired detector, stored in JSON and displayed as bullet points in the UI
+- Example reasons:
+  - "No readings received for 5 consecutive days while BP was elevated (avg 148 mmHg)"
+  - "High BP (avg 148 mmHg) despite good medication adherence (85%) — possible treatment review warranted"
+  - "Sustained elevated BP (avg 163 mmHg, threshold 140 mmHg) with no medication change in the past 42 days — possible therapeutic inertia"
+
+### Types updated (`frontend/src/lib/types.ts`)
+Added `reasons?: string[]` to `BetweenVisitAlert` interface to carry per-detector reasons from script output to frontend.
+
+### New API endpoint
+`GET /api/shadow-mode/results` — serves `data/shadow_mode_results.json` directly. No DB dependency. 404 if file not present (run `python scripts/run_shadow_mode.py` first). Route registered in `backend/app/main.py`.
+
+### System audit (AUDIT.md)
+A full 25-item system audit was conducted comparing production ARIA against shadow mode validated behaviour. Key findings documented in `AUDIT.md` at the project root. Three investigation sections cover:
+1. **Non-HTN visit handling** — physician assessments for non-HTN conditions (PROBLEM_STATUS2_FLAG, PROBLEM_ASSESSMENT_TEXT) are never captured by production detectors; detectors are BP-only
+2. **Conversion fidelity** — iEMR fields silently discarded during adapter.py conversion: PULSE (all 51 visits), WEIGHT (12-lb loss over 14 months), TEMPERATURE, PULSEOXYGEN (includes 84% SpO2 for CHF patient Nov 2011), EXAM_TEXT, ROS_TEXT, PROBLEM_STATUS2_FLAG, PROBLEM_ASSESSMENT_TEXT, ALLERGY_REACTION; `social_context` DB column exists but is never populated
+3. **Hardcoded patient references** — `PATIENT_ID = "1091"` in run_shadow_mode.py, default bundle in run_ingestion.py, `_DEMO_PATIENT_ID` in reset_demo.py — none of these are acceptable for multi-patient operation
+
+The 25 audit items are categorised as Critical (5), High (8), Medium (7), Low (5). These are findings only — no code was changed as part of the audit.
 
 ---
 

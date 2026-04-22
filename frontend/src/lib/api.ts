@@ -1,4 +1,4 @@
-import type { Patient, Briefing, Reading, Alert, AdherenceData } from './types'
+import type { Patient, Briefing, Reading, Alert, AdherenceData, ShadowModeResults } from './types'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 
@@ -60,4 +60,13 @@ export async function acknowledgeAlert(alertId: string): Promise<void> {
 // POST /api/admin/trigger-scheduler
 export async function triggerScheduler(): Promise<{ enqueued: number }> {
   return apiFetch<{ enqueued: number }>('/api/admin/trigger-scheduler', { method: 'POST' })
+}
+
+// GET /api/shadow-mode/results
+export async function getShadowModeResults(): Promise<ShadowModeResults | null> {
+  try {
+    return await apiFetch<ShadowModeResults>('/api/shadow-mode/results')
+  } catch {
+    return null
+  }
 }

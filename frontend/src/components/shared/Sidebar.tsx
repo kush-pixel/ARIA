@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { Users, BellRing, Settings, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Users, BellRing, Settings, GitBranch, ChevronLeft, ChevronRight } from 'lucide-react'
 import { useState } from 'react'
 import ThemeToggle from './ThemeToggle'
 
@@ -15,6 +15,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { label: 'Patients', href: '/patients', icon: <Users size={20} strokeWidth={2} /> },
   { label: 'Alerts', href: '/alerts', icon: <BellRing size={20} strokeWidth={2} /> },
+  { label: 'Shadow Mode', href: '/shadow-mode', icon: <GitBranch size={20} strokeWidth={2} /> },
   { label: 'Admin', href: '/admin', icon: <Settings size={20} strokeWidth={2} /> },
 ]
 

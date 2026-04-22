@@ -87,3 +87,91 @@ export interface AdherenceData {
   total_doses: number
   confirmed_doses: number
 }
+
+export interface ShadowModeDetectors {
+  gap: { fired: boolean; gap_days: number; urgent: boolean }
+  inertia: { fired: boolean; avg_systolic: number; no_med_change: boolean }
+  adherence: { fired: boolean; pattern: string; overall_pct: number; interpretation: string }
+  deterioration: { fired: boolean; slope: number | null }
+}
+
+export interface ActiveProblem {
+  name: string
+  flag: string | null
+  status: string
+  assessment: string
+}
+
+export interface ShadowModeWithoutAria {
+  last_clinic_systolic: number | null
+  last_clinic_date: string | null
+  days_since_last_visit: number
+  medications: string[]
+  known_problems: string[]
+  other_active_problems: ActiveProblem[]
+  pending_followups: string[]
+}
+
+export interface ShadowModeWithAria {
+  fired: boolean
+  detectors: ShadowModeDetectors
+  visit_agenda: string[]
+  urgent_flags: string[]
+  adherence_pct: number
+}
+
+export interface BetweenVisitAlert {
+  alert_date: string
+  alert_type: string
+  days_before_visit: number
+  message: string
+  reasons?: string[]
+}
+
+export interface ShadowModeVisit {
+  visit_index: number
+  visit_date: string
+  systolic: number
+  diastolic: number
+  physician_label: 'concerned' | 'stable' | 'no_ground_truth'
+  source: 'clinic_bp' | 'no_vitals_assessment'
+  days_since_prior_visit: number
+  without_aria: ShadowModeWithoutAria
+  with_aria: ShadowModeWithAria
+  synthetic_readings: Array<{
+    day: number
+    date: string
+    systolic_avg: number
+    diastolic_avg: number
+    session: string
+  }>
+  result: 'agree' | 'false_negative' | 'false_positive' | 'no_ground_truth'
+  between_visit_alerts: BetweenVisitAlert[]
+}
+
+export interface ShadowModeBestWindow {
+  visit_indices: number[]
+  date_from: string
+  date_to: string
+  summary: string
+}
+
+export interface ShadowModeResults {
+  generated_at: string
+  patient_id: string
+  total_eval_points: number
+  skipped: number
+  clinic_bp_points: number
+  no_vitals_points: number
+  with_ground_truth: number
+  concerned_flag1_or_2: number
+  stable_flag3: number
+  no_ground_truth: number
+  agreements: number
+  false_negatives: number
+  false_positives: number
+  agreement_pct: number
+  passed: boolean
+  best_demo_window: ShadowModeBestWindow | null
+  visits: ShadowModeVisit[]
+}
