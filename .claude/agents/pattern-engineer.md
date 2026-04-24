@@ -16,19 +16,25 @@ Inertia (ALL 5 conditions simultaneously):
   systolic_avg >= patient_threshold (NOT hardcoded 140)
     patient_threshold = max(130, stable_baseline_mean + 1.5×SD) capped at 145
     derived from historic_bp_systolic filtered to stable-labeled visits; fallback 140
-    comorbidity adjustment: -7 mmHg (floor 130) when cardio + metabolic both elevated
+    comorbidity adjustment: -7 mmHg (floor 130) when EITHER
+      (a) cardio + metabolic both in elevated concern state, OR
+      (b) any severe-weight comorbidity (CHF/Stroke/TIA) in elevated concern state
+    full mode uses problem_assessments status flags; degraded mode (pre-Fix 7) uses
+      active_problems presence — log threshold_adjustment_mode accordingly
     use threshold_utils.classify_comorbidity_concern() + apply_comorbidity_adjustment()
   COUNT >= 5 elevated readings
   Duration > 7 days
-  Most recent med change in med_history JSONB < MIN(effective_datetime) OR NULL
+  Most recent med change in med_history JSONB (activity=add|modify within 42d) < MIN(effective_datetime) OR NULL
     NOT clinical_context.last_med_change — that is a stale single-date snapshot
-    dose increase in med_history = physician responding → do NOT fire
+    use the activity field (already populated at ingestion) — do not parse MED_DOSE free-text
+    dose-direction parsing deferred to a dedicated dose_parser.py module (nice-to-have)
   Slope direction: 7-day recent avg >= patient_threshold (do NOT fire when BP declining)
 
 Adherence — Pattern A/B/C with Pattern B suppression:
   Pattern A: elevated BP + low adherence (< 80%) → "possible adherence concern" → write alert row
   Pattern B: elevated BP + high adherence → "treatment review warranted"
-    suppress Pattern B if: slope < -0.3 AND 7d recent < threshold AND med_change <= 14d
+    suppress Pattern B if: slope < -0.3 AND 7d recent < threshold AND med_change <= 42d
+    42-day gate aligned with Fix 34 titration window (physiologic response window for most antihypertensives)
   Pattern C: normal BP + low adherence → "contextual review"
   Language: ALWAYS hedged — possible adherence concern not non-adherent
 
@@ -41,13 +47,18 @@ Deterioration — three gates required:
 threshold_utils.py is a new shared module — create it, do not duplicate threshold logic across detectors.
 
 Adaptive detection window — all 4 detectors (Fix 28):
-  window_days = min(90, max(14, (next_appointment - last_visit_date).days))
-  Pass this into every detector in place of hardcoded _WINDOW_DAYS = 28.
-  Prerequisite: Fix 15 (full timeline readings) must be complete for longer lookback windows.
+  if next_appointment is None or last_visit_date is None or (next_appointment - last_visit_date).days <= 0:
+    window_days = 28 (fallback default)
+  else:
+    window_days = min(90, max(14, (next_appointment - last_visit_date).days))
+  Log window_days_source ("adaptive" vs "fallback_default") per detector result.
+  Conservative behaviour when full-timeline data absent: log window_truncated_to_available and use available range.
 
 White-coat exclusion — inertia + deterioration only (Fix 27):
   After querying readings, filter out rows where:
-    effective_datetime >= (next_appointment - timedelta(days=3))
+    effective_datetime >= (next_appointment - timedelta(days=5))
+  5-day window aligns with synthetic dip rule (3-5 days before appointment).
+  When next_appointment is None, no exclusion applied.
   Pass next_appointment into both detectors. Excluded readings remain in DB and briefing trend.
 
 Layer 2 risk_scorer.py:

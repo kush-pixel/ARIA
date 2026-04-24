@@ -542,37 +542,63 @@ FROM readings WHERE patient_id = $1;
 Thresholds: High tier flag>=1 urgent>=3 | Medium flag>=3 urgent>=5 | Low flag>=7 urgent>=14
 
 ### Therapeutic inertia (ALL conditions required)
-AVG(systolic_avg) >= patient_threshold over last 28 days
+AVG(systolic_avg) >= patient_threshold over the adaptive window (see below)
   patient_threshold = max(130, stable_baseline_mean + 1.5×SD) capped at 145 mmHg
   derived from historic_bp_systolic filtered to physician-labeled stable visits
   falls back to 140 if fewer than 3 stable-labeled readings exist
-  comorbidity adjustment: threshold lowered by 7 mmHg (floor 130) when both
-    cardiovascular AND metabolic comorbidities are simultaneously in elevated concern state
+  comorbidity adjustment: threshold lowered by 7 mmHg (floor 130) when EITHER
+    (a) cardiovascular AND metabolic comorbidities both in elevated concern state, OR
+    (b) any severe-weight comorbidity (CHF/Stroke/TIA) in elevated concern state
+  full mode uses clinical_context.problem_assessments status flags (post Fix 7)
+  degraded mode (pre Fix 7) uses clinical_context.active_problems presence
+  log threshold_adjustment_mode per computation
 Slope direction check: if 7-day recent avg < patient_threshold, do NOT fire (BP declining)
 COUNT(*) >= 5 readings with systolic_avg >= patient_threshold
 NOW() - MIN(effective_datetime) > 7 days
 Most recent med change date from clinical_context.med_history JSONB < MIN(effective_datetime) OR NULL
   (NOT clinical_context.last_med_change — that is a single stale ingestion-time snapshot)
   reads max({date}) across all med_history entries where date <= first_elevated_reading_date
+  uses the activity field (add|modify|remove) — dose direction parsing (increase/decrease)
+  deferred to a dedicated dose_parser.py module
+
+### Deterioration (three gates required)
+Positive linear slope across the adaptive window
+Recent 3-day avg > baseline days 4-10 avg
+recent_avg >= patient_threshold (absolute gate — prevents firing on 115→119 rise)
+Step-change sub-detector: if (7-day recent mean) - (7-day mean three weeks ago) >= 15 mmHg,
+  flag deterioration regardless of overall linear slope
+patient_threshold derived identically to the inertia detector (including comorbidity adjustment)
 
 ### Adherence-BP correlation
 Join readings and medication_confirmations on same date.
 adherence_pct = COUNT(confirmed_at) / COUNT(*) * 100
 Clinical threshold: < 80% flags non-adherence
-Pattern A: high systolic + low adherence -> "possible adherence concern"
+Pattern A: high systolic + low adherence -> "possible adherence concern" -> write alert row
 Pattern B: high systolic + high adherence -> "possible treatment-review case"
+  Suppress Pattern B to "none" when ALL of: slope < -0.3 AND recent_7day_avg < patient_threshold
+    AND days_since_med_change <= 42 (aligned with titration window — see medication_status below)
+  Without the 42-day med-change gate, a noise-driven negative slope on a persistently-elevated
+  patient incorrectly suppresses a real treatment-review signal.
 Pattern C: normal systolic + low adherence -> "contextual review"
 
 ### Adaptive detection window (all four detectors)
-window_days = min(90, max(14, (next_appointment - last_visit_date).days))
+if next_appointment IS NULL or last_visit_date IS NULL or interval <= 0:
+  window_days = 28 (fallback default)
+else:
+  window_days = min(90, max(14, (next_appointment - last_visit_date).days))
 Replaces hardcoded _WINDOW_DAYS = 28 in gap, inertia, adherence, and deterioration queries.
 Floor 14: prevents degenerate short windows. Cap 90: bounds computation.
-Prerequisite: Fix 15 (full timeline readings) must be complete for longer lookback windows.
+Log window_days_source ("adaptive" vs "fallback_default").
+When available readings < window_days, log window_truncated_to_available and use available range
+  (conservative behaviour; benefits silently once Fix 15 full-timeline readings land).
 
 ### White-coat exclusion (inertia + deterioration only)
-After querying readings, filter out rows where effective_datetime >= (next_appointment - 3 days)
-before any threshold comparison. Excluded readings remain in the DB and are visible in the
-briefing trend — they are only excluded from detector threshold computations.
+After querying readings, filter out rows where effective_datetime >= (next_appointment - 5 days)
+before any threshold comparison. 5-day window aligns with the synthetic generator's dip rule
+(10-15 mmHg drop 3-5 days before appointment) — a 3-day window leaks dip-influenced days 4-5
+into threshold computation. When next_appointment IS NULL, no exclusion is applied.
+Excluded readings remain in the DB and are visible in the briefing trend — they are only
+excluded from detector threshold computations.
 
 ---
 
@@ -687,9 +713,12 @@ Midnight UTC scheduler (APScheduler): enqueues pattern_recompute for ALL active 
   Ensures gap counters, risk scores, and inertia flags stay current for non-appointment-day patients
 
 Cold-start suppression (in pattern_recompute handler):
-  If enrolled_at > now - 14 days: skip inertia, deterioration, adherence detectors
-  Set data_limitations = "Patient enrolled N days ago — minimum 14-day monitoring period required"
+  If (now - enrolled_at).days < 21: skip inertia, deterioration, adherence detectors
+  Set data_limitations = "Patient enrolled N days ago — minimum 21-day monitoring period required"
   Gap detector still runs — zero readings in first week is itself a gap signal
+  21-day (not 14) avoids a cliff-edge with the adaptive window floor of 14 days — guarantees
+  at least 7 days of home readings exist before any detector first runs, even on weekly-visit
+  patients where the adaptive window floors to 14
 
 ---
 

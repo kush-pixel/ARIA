@@ -94,7 +94,7 @@ Fires on any positive slope regardless of absolute BP level. A patient rising fr
 
 A patient whose BP is actively falling from 170 to 135 triggers Pattern B ("possible treatment review warranted") because the 28-day window mean is above 140. This fires on exactly the patients whose treatment is succeeding.
 
-**Fix:** After pattern classification, add a suppression block for Pattern B. Compute the slope over the 28-day window and the 7-day recent average. If `slope < -0.3 AND recent_7day_avg < patient_threshold AND days_since_med_change <= 14`: suppress Pattern B to `"none"` with interpretation "treatment appears effective — monitoring." The 14-day medication change gate is critical — suppression must not apply when no recent change occurred (root cause of the eliminated false negative in shadow mode). Do Fix 3 before Fix 11 (writing adherence alerts) so suppression is in place before alerts start writing.
+**Fix:** After pattern classification, add a suppression block for Pattern B. Compute the slope over the adaptive window (Fix 28) and the 7-day recent average. If `slope < -0.3 AND recent_7day_avg < patient_threshold AND days_since_med_change <= 42`: suppress Pattern B to `"none"` with interpretation "treatment appears effective — monitoring." The 42-day medication change gate is aligned with Fix 34's titration window (physiologic response to most antihypertensive changes is established within 4–6 weeks) — a shorter 14-day gate fires false positives on patients still titrating. Suppression must not apply when no recent change occurred (root cause of the eliminated false negative in shadow mode: a persistently-elevated slightly-negative-slope patient with no recent change is NOT a succeeding treatment). Do Fix 3 before Fix 11 (writing adherence alerts) so suppression is in place before alerts start writing.
 
 ---
 
@@ -104,7 +104,9 @@ A patient whose BP is actively falling from 170 to 135 triggers Pattern B ("poss
 
 `clinical_context.last_med_change` is the most recent `authoredOn` across all `MedicationRequest` resources at ingestion time. Phone refill calls and in-person visits that changed medications between clinic dates — all captured in `clinical_context.med_history` JSONB — are invisible to the inertia detector. A patient who had a diuretic refill via phone call 5 days ago would still trigger inertia.
 
-**Fix:** Replace the `last_med_change` query with a query that reads `ClinicalContext.med_history` JSONB and finds the most recent `date` field across all entries where `date <= first_elevated_reading_date`. Mirrors `_get_last_med_change_at(timeline, cutoff_date)` from shadow mode. Additionally, parse the type of change (dose increase, dose decrease, drug addition, drug swap, drug removal) from `med_history` entries — a dose increase means the physician is responding, inertia should not fire; a dose decrease in the context of elevated BP warrants surfacing in the visit agenda. Implement together with Fix 1 since both touch `inertia_detector.py`.
+**Fix (core — required):** Replace the `last_med_change` query with a query that reads `ClinicalContext.med_history` JSONB and finds the most recent `date` field across all entries where `date <= first_elevated_reading_date`. Mirrors `_get_last_med_change_at(timeline, cutoff_date)` from shadow mode. The `activity` field already distinguishes add/remove/modify at ingestion time — use `activity` in the gate (any add or modify within the last 42 days counts as a recent change; remove is treated as no recent change unless paired with an add).
+
+**Fix (nice-to-have — deferred):** Parsing dose direction (increase vs decrease) from the `MED_DOSE` free-text field requires a structured dose parser (the strings are inconsistent — "25 MG", "25MG DAILY", "25mg bid", "TITRATE 12.5→25"). Defer to a later phase behind a dedicated `dose_parser.py` module. Do not gate core inertia logic on this. Implement the core fix together with Fix 1 since both touch `inertia_detector.py`.
 
 ---
 
@@ -114,7 +116,13 @@ A patient whose BP is actively falling from 170 to 135 triggers Pattern B ("poss
 
 Shadow mode validated at 94.3% agreement (33/35, 0 false negatives, 2 false positives) that when cardiovascular and metabolic comorbidities are simultaneously in elevated concern state, lowering the BP threshold by 7 mmHg (floor 130 mmHg) improves clinical agreement. This logic lives only in `scripts/run_shadow_mode.py`. The production detectors use a static threshold regardless of comorbidity state.
 
-**Fix:** Create `backend/app/services/pattern_engine/threshold_utils.py` containing `classify_comorbidity_concern(active_problems)` and `apply_comorbidity_adjustment(base_threshold, cardio_concern, metabolic_concern)` ported from shadow mode. Each detector calls these functions and uses the adjusted threshold. Comorbidity state is derived from `clinical_context.active_problems`, which is already populated. Phase 1 physician assessment capture (Fix 7) improves the signal quality but Fix 5 can be applied using existing problem codes in the interim.
+**Fix:** Create `backend/app/services/pattern_engine/threshold_utils.py` containing `classify_comorbidity_concern(active_problems, problem_assessments)` and `apply_comorbidity_adjustment(base_threshold, cardio_concern, metabolic_concern)` ported from shadow mode. Each detector calls these functions and uses the adjusted threshold.
+
+Two modes, explicitly labeled:
+- **Full mode (post Fix 7):** `concern_state` derives from the most recent `PROBLEM_STATUS2_FLAG` per problem in `clinical_context.problem_assessments`. Red/Yellow → elevated concern; Green → stable. This is what shadow mode validated at 94.3%.
+- **Degraded mode (pre Fix 7, Phase 2 interim):** `concern_state` falls back to "presence implies elevated concern" using `clinical_context.active_problems` codes alone. Log `threshold_adjustment_mode = "degraded_no_assessments"` on every adjusted threshold computation so downstream reports can distinguish the two modes. Shadow mode agreement is expected to be lower than 94.3% in degraded mode; re-run shadow mode after Fix 7 lands and confirm full-mode agreement recovers.
+
+Also broaden the adjustment trigger: lower the threshold by 7 mmHg when either (a) cardio AND metabolic both in elevated concern (original rule), or (b) any single comorbidity with SEVERE weight in Fix 25 (CHF/Stroke/TIA) is in elevated concern. Rule (b) covers CHF-only and stroke-only patients whom the original rule missed. Floor remains 130 mmHg.
 
 ---
 
@@ -231,7 +239,9 @@ Both generators must be called together from `run_generator.py` and produce reco
 
 When a patient is first enrolled, there are zero home readings. The inertia, deterioration, and adherence detectors produce null or misleading output. `data_limitations` is populated generically rather than flagging insufficient enrollment age.
 
-**Fix:** At the start of `_handle_pattern_recompute`, if `enrolled_at < now - 14 days`: skip inertia, deterioration, and adherence detectors; log suppression reason; set `data_limitations` to "Patient enrolled N days ago — minimum 14-day monitoring period required before pattern analysis. Briefing based on EHR data only." Gap detector still runs — zero readings in the first week is itself a gap signal.
+**Fix:** At the start of `_handle_pattern_recompute`, if `(now - enrolled_at).days < 21`: skip inertia, deterioration, and adherence detectors; log suppression reason; set `data_limitations` to "Patient enrolled N days ago — minimum 21-day monitoring period required before pattern analysis. Briefing based on EHR data only." Gap detector still runs — zero readings in the first week is itself a gap signal.
+
+The 21-day threshold (not 14) avoids a cliff-edge interaction with Fix 28's adaptive window, whose floor is 14 days. A 14-day cold-start would lift exactly when the adaptive window is at its minimum — giving one overlap day between "no data" and "enough data." 21 days ensures at least 7 days of home readings exist before any detector first runs, even on a weekly-visit patient where the adaptive window floors to 14. Phrased as `days_since_enrollment` rather than `enrolled_at > now - 14 days` for readability.
 
 ---
 
@@ -306,17 +316,23 @@ With multiple patients, this becomes a firehose with no way to scope to one pati
 
 Every complex patient scores 100 on this signal, making it useless for differentiation within the high-risk cohort.
 
-**Fix:** Replace linear count with a severity-weighted model. CHF (I50), Stroke (I63/I64), TIA (G45) each contribute 25 points; Diabetes (E11), CKD (N18), CAD (I25) each contribute 15 points; any other coded problem contributes 5 points. Total clamped to 100. This gives CHF + Diabetes a score of 40/100 on this signal, vs. CHF + Stroke at 50/100 — meaningful clinical differentiation rather than a count cap.
+**Fix:** Replace linear count with a severity-weighted model loosely grounded in the Charlson Comorbidity Index weighting (which assigns CHF and stroke sequelae weight 2, diabetes and CKD weight 1–2, "any other" weight 1). The ARIA mapping is scaled so the dashboard signal differentiates within the high-risk cohort:
+
+- CHF (I50), Stroke (I63/I64), TIA (G45): 25 points each (Charlson weight ≈2 / severe hemodynamic or neurologic risk)
+- Diabetes (E11), CKD (N18), CAD (I25): 15 points each (Charlson weight ≈1–2 / moderate end-organ risk)
+- Any other coded problem: 5 points each (Charlson weight ≈1 / routine chronicity)
+
+Total clamped to 100. This gives CHF + Diabetes a score of 40/100 on this signal, vs. CHF + Stroke at 50/100 — meaningful clinical differentiation rather than a count cap. Weights are documented as ARIA-specific (not a Charlson score) and subject to clinician calibration via Fix 42 Layer 2 once feedback data accumulates.
 
 ---
 
-### 26. Pattern B suppression missing 14-day medication change condition
+### 26. Pattern B suppression missing medication-change condition
 **File:** `backend/app/services/pattern_engine/adherence_analyzer.py`
 **Status:** NEW — not in original audit.
 
-Shadow mode suppresses Pattern B only when a medication change occurred within the last 14 days. Without this gate, a patient with persistently elevated BP and a slightly negative slope (due to noise) incorrectly suppresses Pattern B — this was the root cause of the false negative in shadow mode before it was fixed.
+Without a medication-change gate, a patient with persistently elevated BP and a slightly negative slope (due to noise) incorrectly suppresses Pattern B — this was the root cause of the false negative in shadow mode before it was fixed. The gate must tie suppression to "a recent change the physician made that is plausibly still taking effect."
 
-**Fix:** In the Pattern B suppression block (part of Fix 3), add `AND days_since_med_change <= 14` as a required condition. The adherence analyzer reads `clinical_context.med_history` to find the most recent medication date (consistent with Fix 4). If no medication change exists or the change is older than 14 days, suppression does not apply.
+**Fix:** In the Pattern B suppression block (part of Fix 3), add `AND days_since_med_change <= 42` as a required condition. The 42-day window aligns with Fix 34's titration window (the physiologic response to most antihypertensive changes is established within 4–6 weeks) — using a shorter 14-day window would fire false positives on patients who had a change 20–40 days ago and are now succeeding. The adherence analyzer reads `clinical_context.med_history` to find the most recent medication date (consistent with Fix 4). If no medication change exists or the change is older than 42 days, suppression does not apply.
 
 ---
 
@@ -326,7 +342,7 @@ Shadow mode suppresses Pattern B only when a medication change occurred within t
 
 Readings within 3 days of `patients.next_appointment` are known to be suppressed (the synthetic generator explicitly models a white-coat dip). These readings are included in window computations, pulling the mean downward and potentially suppressing a legitimate flag.
 
-**Fix:** After querying readings in both detectors, filter out readings where `effective_datetime >= (next_appointment - timedelta(days=3))`. Pass `next_appointment` into the detectors. Excluded readings remain in the DB and visible in the briefing trend — they are only excluded from threshold comparison computation.
+**Fix:** After querying readings in both detectors, filter out readings where `effective_datetime >= (next_appointment - timedelta(days=5))`. Pass `next_appointment` into the detectors. The 5-day exclusion window aligns with CLAUDE.md's synthetic generator rule (dip spans 3–5 days before appointment) — a 3-day window leaks dip-influenced days 4–5 into threshold computation. When `next_appointment` is None, no exclusion is applied. Excluded readings remain in the DB and visible in the briefing trend — they are only excluded from threshold comparison computation.
 
 ---
 
@@ -335,7 +351,20 @@ Readings within 3 days of `patients.next_appointment` are known to be suppressed
 
 All four detectors use a fixed 28-day window regardless of whether the patient is seen monthly, quarterly, or weekly. For a patient seen every 90 days, ARIA analyzes only the last third of the inter-visit period. Shadow mode demonstrated this clearly: the Nov 2008 – Feb 2009 pneumonia gap spanned 99 days, and any fixed 28-day window misses the clinical picture the physician was responding to.
 
-**Fix:** Compute `window_days = min(90, max(14, (next_appointment - last_visit_date).days))` and use this in place of the hard-coded `_WINDOW_DAYS = 28` in all four detector queries. Cap at 90 to bound computation and generator data requirements. Floor at 14 so short inter-visit intervals don't degenerate. All four detectors receive the same window value for consistency. **Prerequisite:** Fix 15 (full timeline readings) must be complete so generated data exists for longer lookback windows.
+**Fix:** Compute `window_days` with explicit null-handling:
+
+```
+if next_appointment is None or last_visit_date is None:
+    window_days = 28   # fallback default — preserves legacy behavior
+else:
+    interval = (next_appointment - last_visit_date).days
+    if interval <= 0:         # appointment already passed or same-day — unreliable
+        window_days = 28
+    else:
+        window_days = min(90, max(14, interval))
+```
+
+Use this in place of the hard-coded `_WINDOW_DAYS = 28` in all four detector queries. Cap at 90 to bound computation and generator data requirements. Floor at 14 so short inter-visit intervals don't degenerate. All four detectors receive the same window value for consistency. Log `window_days_source` ("adaptive" vs "fallback_default") alongside each detector result for observability. **Prerequisite:** Fix 15 (full timeline readings) must be complete so generated data exists for longer lookback windows on patients with large inter-visit intervals.
 
 ---
 
@@ -409,7 +438,7 @@ The raw iEMR `MED_REC_NO` (`1091`) is used as `patient_id` throughout the DB and
 ---
 
 ### 38. Audit enforcement is application-level only
-**Fix:** Add a PostgreSQL trigger on the `readings` table that inserts an `audit_events` row on every INSERT. A direct DB write or an application bug then still produces an audit record. One trigger definition — no application code change.
+**Fix:** Add a PostgreSQL trigger on the `readings` table that inserts an `audit_events` row on every INSERT so a direct DB write or an application bug still produces an audit record. A naive trigger cannot replicate the structured fields the application-level audit populates (`actor_id`, `request_id`, `details`) — these must be threaded through via PostgreSQL `SET LOCAL` session variables set by the application at the start of each request (`SET LOCAL aria.actor_id = '...'`; `SET LOCAL aria.request_id = '...'`). The trigger reads them via `current_setting('aria.actor_id', true)` and defaults to `system` / NULL when unset (e.g., direct DB writes). This requires a small application-layer helper that sets the session variables inside each DB transaction — not "no application code change" as originally stated. Document the trigger behaviour as a safety net with reduced fidelity for non-application writes.
 
 ---
 
@@ -481,7 +510,7 @@ No dependencies. Fix wrong output on current data. No re-ingestion required. Sta
 |---|---|---|---|
 | 2 | Add threshold gate to deterioration detector | deterioration_detector.py | 1 line |
 | 3 | Pattern B treatment-working suppression | adherence_analyzer.py | ~15 lines |
-| 26 | Add 14-day med change condition to suppression | adherence_analyzer.py | 2 lines |
+| 26 | Add 42-day med change condition to Pattern B suppression | adherence_analyzer.py | 2 lines |
 | 11 | Write adherence alert row in processor | processor.py | 3 lines |
 | 30 | Set `delivered_at` on alert insert | processor.py | 1 line |
 | 20 | Read appointment date from patient record | processor.py | 5 lines |
@@ -507,15 +536,16 @@ After Phase 1: `python scripts/run_adapter.py` → `python scripts/run_ingestion
 ---
 
 ### Phase 2 — Detector and briefing fixes
-Apply after Phase 1 data is in the DB. Fixes 1 and 4 must be applied together in the same file.
+Apply after Phase 1 data is in the DB. Fixes 1, 4, 5, 27, and 28 all touch the same two detector files (`inertia_detector.py`, `deterioration_detector.py`) and should be applied together to avoid four-touch churn. Fix 28 is included here with a conservative fallback so the code can ship before Fix 15's full-timeline data exists: when the requested window exceeds available readings, the detector logs `window_truncated_to_available` and uses the available range. Once Fix 15 lands in Phase 3, the adaptive window silently starts benefiting from the longer lookback — no further code change needed.
 
 | # | Fix | Files |
 |---|---|---|
 | 1, 4 | Patient-adaptive threshold + `med_history` in inertia detector | inertia_detector.py |
 | 18 | Remove duplicate inertia from briefing composer | composer.py |
-| 5 | Apply comorbidity-adjusted threshold to production detectors | threshold_utils.py (new), all 4 detectors |
+| 5 | Apply comorbidity-adjusted threshold to production detectors (degraded mode until Fix 7 full mode) | threshold_utils.py (new), all 4 detectors |
 | 2 (ext) | Add step-change sub-detector to deterioration | deterioration_detector.py |
-| 27 | Exclude white-coat pre-visit window | inertia_detector.py, deterioration_detector.py |
+| 27 | Exclude white-coat pre-visit window (5 days) | inertia_detector.py, deterioration_detector.py |
+| 28 | Adaptive window with conservative fallback when full-timeline data absent | all 4 detectors |
 | 29 | Surface social context in briefing | composer.py |
 | 34 | Surface medication titration timing in briefing | composer.py |
 
@@ -531,10 +561,9 @@ Fix 22 (per-observation idempotency) is the gate for all generator work.
 | 22 | Per-observation idempotency (prerequisite) | ingestion.py |
 | 19 | Parametric baseline from patient clinic BPs | reading_generator.py |
 | 15 | Full care timeline synthetic readings | reading_generator.py, run_generator.py |
-| 17 | Cold start detection (< 14 days → suppress detectors) | processor.py |
-| 28 | Adaptive window based on inter-visit interval | all 4 detectors |
+| 17 | Cold start detection (< 21 days → suppress detectors) | processor.py |
 
-After Phase 3: `python scripts/run_generator.py` for all patients. Verify readings table has full-timeline generated readings spanning the patient's entire care history.
+After Phase 3: `python scripts/run_generator.py` for all patients. Verify readings table has full-timeline generated readings spanning the patient's entire care history. Fix 28's adaptive window (already in Phase 2) silently starts using the longer lookback once full-timeline data exists.
 
 ---
 
@@ -631,9 +660,9 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 | 23 | Medium | Briefing icon today-only | PatientList.tsx | 6 |
 | 24 | Medium | Alert API no patient_id filter | alerts.py | 5 |
 | 25 | Medium | Comorbidity score saturates at 5 problems | risk_scorer.py | 0 |
-| 26 | Medium | Pattern B suppression missing 14-day med change condition | adherence_analyzer.py | 0 |
+| 26 | Medium | Pattern B suppression missing 42-day med change condition | adherence_analyzer.py | 0 |
 | 27 | Medium | White-coat window not excluded from threshold comparisons | detectors | 2 |
-| 28 | Medium | 28-day window does not adapt to visit interval | all detectors | 3 |
+| 28 | Medium | 28-day window does not adapt to visit interval | all detectors | 2 |
 | 29 | Low | social_context never in briefing | composer.py | 2 |
 | 30 | Low | delivered_at never set on alerts | processor.py | 0 |
 | 31 | Low | Duplicate sort backend + frontend | PatientList.tsx | 6 |

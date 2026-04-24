@@ -3,7 +3,7 @@ Working on briefing composer or LLM summarizer.
 
 Order — STRICT:
 1. composer.py produces complete deterministic briefing JSON (no LLM)
-2. Verify all 9 fields populated and clinically correct
+2. Verify all 10 fields populated and clinically correct
 3. summarizer.py optionally adds Layer 3 LLM readable text
 
 All 10 briefing JSON fields required:

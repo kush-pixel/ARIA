@@ -23,9 +23,10 @@ Appointment date in briefing_generation: from patients.next_appointment.date()
   NOT parsed from idempotency_key[-10:] — that records wrong date when admin trigger fires
 
 Cold-start suppression in pattern_recompute:
-  if enrolled_at > now - 14 days: skip inertia, deterioration, adherence detectors
-  set data_limitations = "Patient enrolled N days ago — minimum 14-day monitoring period required"
+  if (now - enrolled_at).days < 21: skip inertia, deterioration, adherence detectors
+  set data_limitations = "Patient enrolled N days ago — minimum 21-day monitoring period required"
   gap detector still runs
+  21-day (not 14) avoids cliff-edge with Fix 28 adaptive window floor of 14 days
 
 Layer 3 failure in briefing_generation: log WARNING, do NOT fail the job.
 

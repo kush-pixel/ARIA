@@ -25,11 +25,16 @@ Pattern engine:
   [ ] Runs async via worker not in HTTP path
   [ ] Inertia requires ALL 5 conditions simultaneously (includes slope check)
   [ ] Inertia uses patient-adaptive threshold from threshold_utils.py (not hardcoded 140)
-  [ ] Inertia reads med_history JSONB for last med change (not last_med_change column)
+  [ ] Inertia reads med_history JSONB activity field (not last_med_change column)
+  [ ] Comorbidity threshold adjustment covers severe-single (CHF/Stroke/TIA) + cardio+metabolic cases
+  [ ] threshold_adjustment_mode logged (full vs degraded depending on Fix 7 status)
   [ ] Deterioration has absolute threshold gate (recent_avg >= patient_threshold)
   [ ] Deterioration has step-change sub-detector (7d rolling mean delta >= 15 mmHg)
   [ ] Adherence pattern A/B/C distinction made; Pattern B suppression applied
+  [ ] Pattern B suppression uses med_change <= 42d gate (aligned with Fix 34 titration window)
   [ ] Pattern A writes alert row with alert_type="adherence"
+  [ ] Adaptive window null-safe: falls back to 28d when next_appointment or last_visit_date is None
+  [ ] White-coat exclusion uses 5-day window (matches synthetic 3-5d dip rule)
 
 Briefing:
   [ ] Deterministic JSON complete before LLM layer
@@ -60,7 +65,8 @@ Database:
 Worker:
   [ ] Midnight pattern_recompute sweep for all monitoring_active patients
   [ ] Appointment date from patients.next_appointment (not idempotency_key parsing)
-  [ ] Cold-start suppression: skip inertia/deterioration/adherence if enrolled < 14 days
+  [ ] Cold-start suppression: skip inertia/deterioration/adherence if enrolled < 21 days
+  [ ] delivered_at set on alert insert (not left NULL)
 
 Code:
   [ ] SQLAlchemy 2.0 async syntax throughout

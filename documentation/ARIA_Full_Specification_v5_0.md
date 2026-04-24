@@ -68,14 +68,25 @@ The threshold utility is extracted to `backend/app/services/pattern_engine/thres
 
 #### Comorbidity-Adjusted Threshold **(ROADMAP — Phase 2)**
 
-Shadow mode validation at 94.3% agreement (33/35, 0 false negatives, 2 false positives) confirmed that when cardiovascular and metabolic comorbidities are simultaneously in elevated concern state, lowering the patient threshold by 7 mmHg (floor 130 mmHg) improves clinical agreement. This adjustment is applied after computing the patient-adaptive threshold:
+Shadow mode validation at 94.3% agreement (33/35, 0 false negatives, 2 false positives) confirmed that lowering the patient threshold by 7 mmHg (floor 130 mmHg) improves clinical agreement. The adjustment applies when EITHER of the following is true:
 
-```
+```python
+# Condition (a) — original rule
 if cardiovascular_concern and metabolic_concern:
+    effective_threshold = max(130, patient_threshold - 7)
+
+# Condition (b) — added to cover CHF-only, Stroke-only, TIA-only patients
+if any_severe_single_comorbidity_in_elevated_concern:  # CHF / Stroke / TIA
     effective_threshold = max(130, patient_threshold - 7)
 ```
 
-Comorbidity concern state is derived from `clinical_context.active_problems` using `classify_comorbidity_concern()` in `threshold_utils.py`.
+The original "cardio AND metabolic" rule missed patients whose primary risk is CHF alone or stroke history alone. Condition (b) closes that gap.
+
+Comorbidity concern state has two modes:
+- **Full mode (post Fix 7):** `concern_state` derived from the most recent `PROBLEM_STATUS2_FLAG` per problem in `clinical_context.problem_assessments`. Red/Yellow → elevated; Green → stable. This is what shadow mode validated at 94.3%.
+- **Degraded mode (interim, pre Fix 7):** Falls back to "presence implies elevated concern" using `clinical_context.active_problems` codes alone. Log `threshold_adjustment_mode = "degraded_no_assessments"` per computation so downstream reports can distinguish modes. Shadow mode agreement expected to be lower in degraded mode; re-run shadow mode after Fix 7 lands to confirm full-mode agreement recovers.
+
+Implemented in `classify_comorbidity_concern(active_problems, problem_assessments)` and `apply_comorbidity_adjustment()` in `threshold_utils.py`.
 
 #### Therapeutic Inertia Detection
 
@@ -112,23 +123,31 @@ Comorbidity concern state is derived from `clinical_context.active_problems` usi
 
 **Known defect (Audit item 3):** Pattern B fires when a patient's BP is actively declining (e.g. falling from 170 to 135) because the 28-day window mean is still above 140. This fires on exactly the patients whose treatment is succeeding.
 
-**Phase 0 fix (immediate):** Add Pattern B suppression block. If `slope < -0.3 AND recent_7day_avg < patient_threshold AND days_since_med_change <= 14`: suppress Pattern B to `"none"` with interpretation "treatment appears effective — monitoring." The 14-day medication change gate is critical — suppression must not apply when no recent medication change occurred.
+**Phase 0 fix (immediate):** Add Pattern B suppression block. If `slope < -0.3 AND recent_7day_avg < patient_threshold AND days_since_med_change <= 42`: suppress Pattern B to `"none"` with interpretation "treatment appears effective — monitoring." The 42-day medication change gate aligns with Fix 34's titration window — most antihypertensive adjustments take 4–6 weeks to produce a full response. A shorter 14-day gate fires false positives on patients 20–40 days into a successful titration. Suppression must not apply when no recent change occurred (a noise-driven slightly-negative slope on a persistently elevated patient with no change is NOT a succeeding treatment — this was the root cause of the shadow mode false negative before it was resolved).
 
 **Phase 0 fix (immediate):** Write adherence Pattern A alerts to the `alerts` table (`alert_type = "adherence"`). Currently, adherence is the only Layer 1 detector that does not produce an alert row, making it invisible in the urgent_flags briefing section.
 
 #### White-Coat Window Exclusion **(ROADMAP — Phase 2)**
 
-Readings within 3 days of `patients.next_appointment` are suppressed by the synthetic generator (white-coat dip). Including these in window computations pulls the mean downward and can suppress legitimate flags. Both the inertia and deterioration detectors will exclude readings where `effective_datetime >= (next_appointment - timedelta(days=3))`. Excluded readings remain in the DB and visible in the briefing trend chart.
+Readings within 5 days of `patients.next_appointment` are affected by the white-coat dip modelled by the synthetic generator (10–15 mmHg drop across 3–5 days before appointment). Including these in window computations pulls the mean downward and can suppress legitimate flags. Both the inertia and deterioration detectors will exclude readings where `effective_datetime >= (next_appointment - timedelta(days=5))`. The 5-day window is aligned to the full 3–5 day dip range in the synthetic data spec — a 3-day window leaks dip-influenced days 4–5 into threshold computation. When `next_appointment` is None, no exclusion is applied. Excluded readings remain in the DB and visible in the briefing trend chart.
 
-#### Adaptive Analysis Window **(ROADMAP — Phase 3)**
+#### Adaptive Analysis Window **(ROADMAP — Phase 2)**
 
-All four detectors currently use a fixed 28-day window regardless of visit interval. For patients seen quarterly, ARIA analyses only the last third of the inter-visit period. The v5.0 target:
+All four detectors currently use a fixed 28-day window regardless of visit interval. For patients seen quarterly, ARIA analyses only the last third of the inter-visit period. The v5.0 target includes explicit null-handling:
 
+```python
+if next_appointment is None or last_visit_date is None:
+    window_days = 28  # fallback — preserves legacy behaviour
+elif (next_appointment - last_visit_date).days <= 0:
+    window_days = 28  # appointment already passed or same-day — unreliable
+else:
+    interval = (next_appointment - last_visit_date).days
+    window_days = min(90, max(14, interval))
 ```
-window_days = min(90, max(14, (next_appointment - last_visit_date).days))
-```
 
-Cap at 90 to bound computation requirements; floor at 14 so short intervals do not degenerate. All four detectors receive the same window value for consistency. **Prerequisite:** full care timeline readings (Phase 3).
+Cap at 90 to bound computation requirements; floor at 14 so short intervals do not degenerate. Log `window_days_source` ("adaptive" vs "fallback_default") alongside each detector result. When available readings cover fewer days than `window_days`, log `window_truncated_to_available` and use the available range. This allows the Phase 2 code to ship before Phase 3 full-timeline data exists and silently benefit from longer lookback once that data lands — no further code change required.
+
+Fix 28 is included in **Phase 2** (not Phase 3 as originally planned) to avoid splitting inertia and deterioration detector edits across two phases. The conservative fallback means Phase 2 code is safe to deploy against the current 28-day reading set.
 
 ### 2.2 Layer 2 — Weighted Risk Scoring **(CURRENT + fix required)**
 
@@ -655,8 +674,9 @@ HAVING COUNT(*) >= 5
 async def run_inertia_detector(session, patient_id, patient_threshold):
     # 1. Query readings with adaptive window
     readings = await get_readings_in_window(session, patient_id, window_days)
-    # 2. Exclude white-coat pre-visit window
-    readings = [r for r in readings if r.effective_datetime < (next_appt - 3 days)]
+    # 2. Exclude white-coat pre-visit window (5 days — matches synthetic 3-5d dip range)
+    if next_appt:
+        readings = [r for r in readings if r.effective_datetime < (next_appt - timedelta(days=5))]
     # 3. Check average vs patient_threshold (not hard-coded 140)
     elevated = [r for r in readings if r.systolic_avg >= patient_threshold]
     # 4. Check last_med_change from med_history JSONB (not last_med_change column)
@@ -700,7 +720,7 @@ ORDER BY r.effective_datetime ASC;
 
 -- Pattern A: high systolic + low adherence_pct → possible adherence concern
 -- Pattern B: high systolic + high adherence_pct → possible treatment-review case
---            (suppressed if slope < -0.3 AND recent_7day < threshold AND days_since_med_change <= 14)
+--            (suppressed if slope < -0.3 AND recent_7day < threshold AND days_since_med_change <= 42)
 -- Pattern C: normal systolic + low adherence_pct → contextual review
 ```
 
@@ -813,11 +833,18 @@ When a patient is first enrolled, there are zero home readings. Inertia, deterio
 
 **Fix:** At the start of `_handle_pattern_recompute`, check enrollment age:
 ```python
-if (now - patient.enrolled_at).days < 14:
+days_since_enrollment = (now - patient.enrolled_at).days
+if days_since_enrollment < 21:
     # Skip inertia, deterioration, adherence
-    data_limitations = f"Patient enrolled {days} days ago — minimum 14-day monitoring period required. Briefing based on EHR data only."
+    data_limitations = (
+        f"Patient enrolled {days_since_enrollment} days ago — "
+        "minimum 21-day monitoring period required before pattern analysis. "
+        "Briefing based on EHR data only."
+    )
 # Gap detector still runs — zero readings in week 1 is itself a gap signal
 ```
+
+The threshold is 21 days (not 14) to avoid a cliff-edge interaction with the adaptive window floor of 14 days. A 14-day cold-start would lift the day the adaptive window is still at its minimum, leaving only one overlap day between "no data" and "enough data." 21 days guarantees at least 7 days of home readings exist before any detector first runs, even on a weekly-visit patient where the adaptive window floors to 14.
 
 ---
 
@@ -830,7 +857,7 @@ Phases are ordered so that no fix depends on an incomplete prerequisite. Fixes w
 | # | Fix | File | Size |
 |---|---|---|---|
 | 2 | Add threshold gate to deterioration detector | deterioration_detector.py | 1 line |
-| 3 + 26 | Pattern B suppression + 14-day med change gate | adherence_analyzer.py | ~17 lines |
+| 3 + 26 | Pattern B suppression + 42-day med change gate | adherence_analyzer.py | ~17 lines |
 | 11 | Write adherence alert row in processor | processor.py | 3 lines |
 | 30 | Set `delivered_at` on alert insert | processor.py | 1 line |
 | 20 | Read appointment date from patient record | processor.py | 5 lines |
@@ -852,15 +879,18 @@ Apply all changes to `adapter.py` and `ingestion.py` together. Re-ingest once af
 
 ### Phase 2 — Detector and Briefing Fixes (After Phase 1 Data in DB)
 
+Fixes 1, 4, 5, 27, and 28 all touch the same two detector files (`inertia_detector.py`, `deterioration_detector.py`) — apply them together in one branch to avoid four-touch churn. Fix 28 is included here with a conservative fallback (uses available readings when window exceeds data) so the code can ship before Phase 3 full-timeline data exists.
+
 | # | Fix | Files |
 |---|---|---|
 | 1 + 4 | Patient-adaptive threshold + med_history in inertia detector | inertia_detector.py |
 | 18 | Remove duplicate inertia from briefing composer | composer.py |
-| 5 | Comorbidity-adjusted threshold in all four detectors | threshold_utils.py (new), all 4 detectors |
-| 27 | Exclude white-coat pre-visit window | inertia_detector.py, deterioration_detector.py |
+| 5 | Comorbidity-adjusted threshold (full + degraded modes) | threshold_utils.py (new), all 4 detectors |
+| 27 | Exclude white-coat pre-visit window (5 days) | inertia_detector.py, deterioration_detector.py |
+| 28 | Adaptive window with null-safe fallback | all 4 detectors |
 | 29 + 34 | Surface social context + titration timing in briefing | composer.py |
 
-After Phase 2: run shadow mode. Agreement rate should be ≥ 94.3%.
+After Phase 2: run shadow mode. Agreement rate should be ≥ 94.3% in full mode (post Fix 7), or document degraded-mode baseline.
 
 ### Phase 3 — Generator Expansion
 
@@ -869,8 +899,7 @@ After Phase 2: run shadow mode. Agreement rate should be ≥ 94.3%.
 | 22 | Per-observation idempotency **(gate for all generator work)** | ingestion.py |
 | 19 | Parametric baseline from patient clinic BPs | reading_generator.py |
 | 15 | Full care timeline synthetic readings | reading_generator.py, run_generator.py |
-| 17 | Cold start detection | processor.py |
-| 28 | Adaptive window based on inter-visit interval | all 4 detectors |
+| 17 | Cold start detection (21-day threshold) | processor.py |
 
 ### Phase 4 — Scheduler and Worker
 
@@ -936,7 +965,7 @@ ARIA pre-visit briefing: sustained elevated BP avg 163/101 over 21 days without 
 Source: patient 1091 iEMR, `monitoring_active=FALSE`. No home readings. ARIA uses EHR data alone. Briefing surfaces: overdue lab flag, drug interaction flag (Voltaren NSAID alongside antihypertensives), unresolved complaint from last visit note. Demonstrates ARIA is useful without CuffLink.
 
 **Patient C — New Patient Cold Start**
-No prior iEMR history. Age 58, smoker, family history of hypertension. 10 days of morning-only readings averaging 154/95, rising trend. Briefing: QRISK3 score, 10-day trend chart, NSAID flag, smoking flag, six-item visit agenda. Cold start detection ensures no misleading inertia or deterioration flags before the 14-day minimum.
+No prior iEMR history. Age 58, smoker, family history of hypertension. 10 days of morning-only readings averaging 154/95, rising trend. Briefing: QRISK3 score, 10-day trend chart, NSAID flag, smoking flag, six-item visit agenda. Cold start detection ensures no misleading inertia or deterioration flags before the 21-day minimum monitoring period.
 
 ### 11.2 Demo Timing
 
@@ -962,7 +991,7 @@ Named user accounts, basic clinician/admin role checks, TLS in transit, environm
 |---|---|
 | JWT expiry | Confirm ≤ 1 hour. A leaked 7-day token gives 168× larger exposure window. |
 | API rate limiting | `slowapi` middleware: POST /api/readings 60/min, POST /api/ingest 5/min, GET /api/alerts 30/min |
-| DB-level audit trigger | PostgreSQL trigger on readings table — ensures audit record even on direct DB write or app bug |
+| DB-level audit trigger | PostgreSQL trigger on readings table — ensures audit record even on direct DB write or app bug. Requires a small application helper that sets `SET LOCAL aria.actor_id = '...'` and `SET LOCAL aria.request_id = '...'` at the start of each DB transaction so the trigger can read them via `current_setting()`. Direct DB writes produce a reduced-fidelity record defaulting actor to 'system'. |
 | MFA | TOTP via Supabase Auth — no backend code change, configuration only |
 | Research ID pseudonymization | Verify `patient_id` = 1091 is not the actual hospital MED_REC_NO cross-referenceable with hospital systems. Replace with `ARIA-001` at adapter level if needed. |
 

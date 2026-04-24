@@ -59,11 +59,12 @@ Computes days since last reading. Applies risk-tier thresholds:
 **AUDIT ITEM 1:** Uses hard-coded 140 mmHg threshold. Should use patient-adaptive threshold.
 **AUDIT ITEM 4:** Reads only `clinical_context.last_med_change` (ingestion-time snapshot). Ignores `clinical_context.med_history` JSONB which contains phone refill calls and in-person medication changes.
 
-All four conditions must be simultaneously true:
-1. Average systolic ≥ 140 mmHg over 28 days *(should be patient-adaptive)*
+All five conditions must be simultaneously true:
+1. Average systolic ≥ 140 mmHg over the adaptive window *(should be patient-adaptive — Phase 2)*
 2. ≥ 5 elevated readings
 3. Elevated condition spans > 7 days
-4. No medication change on/after first elevated reading *(should use med_history JSONB)*
+4. No medication change on/after first elevated reading *(should use med_history JSONB — Phase 2)*
+5. 7-day recent average ≥ threshold — do not fire when BP is actively declining *(slope check — Phase 2 addition)*
 
 #### Deterioration Detector *(one known defect — Phase 0 immediate fix)*
 **AUDIT ITEM 2:** Fires on any positive slope regardless of absolute BP. A patient rising from 115 to 119 triggers a deterioration alert. The 14-day window is also shorter than the 28-day window used by other detectors.
@@ -82,7 +83,7 @@ Pattern classifications:
 - Pattern B: high BP + high adherence → "possible treatment-review case" *(suppression missing)*
 - Pattern C: normal BP + low adherence → contextual review
 
-**Phase 0 fix for Pattern B suppression:** When `slope < -0.3 AND recent_7day_avg < threshold AND days_since_med_change ≤ 14`, suppress Pattern B to `"none"` with note "treatment appears effective — monitoring." The 14-day gate is critical — suppression must not apply when no recent medication change occurred.
+**Phase 0 fix for Pattern B suppression:** When `slope < -0.3 AND recent_7day_avg < threshold AND days_since_med_change ≤ 42`, suppress Pattern B to `"none"` with note "treatment appears effective — monitoring." The 42-day gate aligns with the medication titration window (Fix 34) — most antihypertensive adjustments take 4–6 weeks to produce a full response. Using a 14-day gate would fire false positives on patients 20–40 days into a successful titration. Suppression must not apply when no recent medication change occurred.
 
 ### 2.2 Layer 2 Risk Scoring Formula
 
@@ -123,10 +124,21 @@ patient_threshold = max(130, stable_baseline_mean + 1.5 * stable_baseline_sd)
 # falls back to 140 if fewer than 3 stable readings exist
 ```
 
-For CHF/cardiovascular + metabolic comorbidity patients:
+Comorbidity-adjusted threshold — applies when EITHER condition is true:
+
 ```python
-effective_threshold = max(130, patient_threshold - 7)
+# (a) Original rule — cardiovascular + metabolic both elevated
+if cardio_concern and metabolic_concern:
+    effective_threshold = max(130, patient_threshold - 7)
+
+# (b) Extended rule — any single severe comorbidity in elevated concern (CHF / Stroke / TIA)
+if severe_single_comorbidity_elevated:
+    effective_threshold = max(130, patient_threshold - 7)
 ```
+
+Two operating modes for concern state:
+- **Full mode (post Fix 7):** uses `problem_assessments` JSONB for physician-labeled concern state per problem
+- **Degraded mode (pre Fix 7):** presence of the ICD-10 code implies elevated concern. Log `threshold_adjustment_mode` so degraded-mode runs are identifiable in retrospect.
 
 This logic is extracted to `backend/app/services/pattern_engine/threshold_utils.py`.
 
@@ -359,9 +371,9 @@ baseline_sd = statistics.stdev(clinical_context.historic_bp_systolic)
 Currently the generator produces 28 days before the most recent appointment. Phase 3 adds `generate_full_timeline_readings(clinic_readings)` that generates synthetic readings **between all consecutive clinic BP pairs** spanning the patient's entire 11-year care history.
 
 This is a prerequisite for:
-- Adaptive analysis window (28 → 90 days based on visit interval)
+- Longer adaptive analysis windows benefiting from full history (adaptive window code ships Phase 2 with a conservative fallback; full benefit arrives Phase 3)
 - Long-term trend layer in briefing
-- Patient-adaptive threshold (needs stable reading history)
+- Patient-adaptive threshold needing a full stable reading history
 
 **Prerequisite:** Per-observation idempotency must be in place first (Phase 3 gate).
 
@@ -400,7 +412,7 @@ ruff check app/
 git add backend/app/services/pattern_engine/adherence_analyzer.py
 
 # 8. Commit
-git commit -m "fix(pattern): add Pattern B treatment-working suppression with 14-day gate"
+git commit -m "fix(pattern): add Pattern B treatment-working suppression with 42-day titration gate"
 
 # 9. Push branch
 git push origin feat/your-feature-name
@@ -548,7 +560,7 @@ python -m pytest --cov=app tests/ -m "not integration"
 | `test_fhir_adapter.py` | iEMR JSON → FHIR Bundle. All resource types including `_aria_med_history`. 28 tests passing. |
 | `test_ingestion.py` | FHIR Bundle ingestion, idempotency, risk tier overrides (I50/I63/G45), med_history population, audit events |
 | `test_reading_generator.py` | Synthetic data SD (8–12 mmHg), morning/evening differential, no round numbers, device outage gaps, white-coat dip |
-| `test_pattern_engine.py` | Gap thresholds, inertia all 4 conditions, **Pattern B suppression with 14-day gate**, adherence alert write *(tests updated for Phase 0 fixes)* |
+| `test_pattern_engine.py` | Gap thresholds, inertia all 4 conditions, **Pattern B suppression with 42-day gate**, adherence alert write *(tests updated for Phase 0 fixes)* |
 | `test_risk_scorer.py` | Layer 2 weighted formula, 0.0–100.0 range, **severity-weighted comorbidity model** *(updated Phase 0)* |
 | `test_briefing_composer.py` | All briefing fields present, visit agenda priority order, **no duplicate inertia logic** *(updated Phase 2)* |
 | `test_api.py` | API endpoint status codes, response schema, audit events created, **alert patient_id filter** *(Phase 5)* |
@@ -584,7 +596,7 @@ Before reporting Phase 0 complete, verify:
 ```bash
 # 1. Trigger pattern_recompute and check:
 #    - deterioration alert NOT firing for patients below 140 systolic
-#    - Pattern B suppressed when med change < 14 days AND slope < -0.3
+#    - Pattern B suppressed when med change < 42 days AND slope < -0.3
 #    - Pattern A writes an alert row (alert_type='adherence')
 #    - alerts.delivered_at is set (not NULL)
 #    - briefings.appointment_date matches patient.next_appointment (not idempotency_key)
@@ -614,7 +626,7 @@ INTERIM_THRESHOLD = 140.0  # replaced with patient_threshold in Phase 2
 deterioration = slope > 0.0 and recent_avg > baseline_avg and recent_avg >= INTERIM_THRESHOLD
 ```
 
-### 10.2 Fix: Pattern B Suppression + 14-Day Gate
+### 10.2 Fix: Pattern B Suppression + 42-Day Gate
 
 **File:** `backend/app/services/pattern_engine/adherence_analyzer.py`
 
@@ -629,10 +641,12 @@ if pattern == "B":
     if (slope < -0.3
             and recent_7d_avg < THRESHOLD  # patient_threshold in Phase 2
             and days_since_med_change is not None
-            and days_since_med_change <= 14):
+            and days_since_med_change <= 42):  # aligns with 42-day titration window (Fix 34)
         pattern = "none"
         interpretation = "treatment appears effective — monitoring"
 ```
+
+The 42-day gate covers the physiologic response window for most antihypertensives (4–6 weeks). A 14-day gate would suppress Pattern B during a titration window where the physician is still waiting for the full response — the opposite of what the suppression is meant to do.
 
 ### 10.3 Fix: Write Adherence Alert Row
 
@@ -799,7 +813,7 @@ python scripts/run_shadow_mode.py
 | `med_history column not found on clinical_context` | Run `setup_db.py` again — med_history JSONB is added via ALTER TABLE migration |
 | `asyncpg error with DATE[] arrays` | `historic_bp_dates` must be `TEXT[]` not `DATE[]`. Store as ISO strings e.g. `2024-01-15`. |
 | `Inertia firing on declining BP` | Phase 2 fix not yet applied — slope direction check missing in v4.3 |
-| `Pattern B firing on improving patients` | Phase 0 fix not yet applied — Pattern B suppression missing in v4.3 |
+| `Pattern B firing on improving patients` | Phase 0 fix not yet applied — Pattern B suppression (42-day gate) missing in v4.3 |
 | `Adherence concern not visible in urgent_flags` | Phase 0 fix not yet applied — Pattern A does not write alert row in v4.3 |
 | `Comorbidity score identical for all complex patients` | Phase 0 fix not yet applied — linear count saturates at 5 in v4.3 |
 | `Deterioration alert firing at 115 mmHg systolic` | Phase 0 fix not yet applied — threshold gate missing in v4.3 |
@@ -816,7 +830,7 @@ Track Phase 0 fixes as they are completed. Update STATUS.md when each item is re
 | Audit Item | Description | Phase | Status |
 |---|---|---|---|
 | 2 | Deterioration: add threshold gate | 0 | `[ ]` |
-| 3 + 26 | Pattern B suppression + 14-day gate | 0 | `[ ]` |
+| 3 + 26 | Pattern B suppression + 42-day titration gate | 0 | `[ ]` |
 | 11 | Write adherence alert row | 0 | `[ ]` |
 | 30 | Set delivered_at on alert insert | 0 | `[ ]` |
 | 20 | Appointment date from patient record | 0 | `[ ]` |
@@ -828,59 +842,174 @@ Track Phase 0 fixes as they are completed. Update STATUS.md when each item is re
 | 6 | Capture PULSE/WEIGHT/SpO2 | 1 | `[ ]` |
 | 1 + 4 | Adaptive threshold + med_history inertia | 2 | `[ ]` |
 | 18 | Remove duplicate inertia in composer | 2 | `[ ]` |
-| 5 | Comorbidity-adjusted threshold (threshold_utils) | 2 | `[ ]` |
-| 27 | Exclude white-coat window | 2 | `[ ]` |
+| 5 | Comorbidity-adjusted threshold, full + degraded modes | 2 | `[ ]` |
+| 27 | Exclude white-coat window (5 days) | 2 | `[ ]` |
+| 28 | Adaptive window (14–90 days) with null-safe fallback | 2 | `[ ]` |
+| 29 + 34 | Surface social context + titration timing in briefing | 2 | `[ ]` |
 | 22 | Per-observation idempotency **(Phase 3 gate)** | 3 | `[ ]` |
 | 19 | Parametric baseline generator | 3 | `[ ]` |
 | 15 | Full care timeline readings | 3 | `[ ]` |
-| 17 | Cold start detection | 3 | `[ ]` |
-| 28 | Adaptive window (14–90 days) | 3 | `[ ]` |
+| 17 | Cold start detection (21-day threshold) | 3 | `[ ]` |
 | 10 | Daily pattern_recompute sweep | 4 | `[ ]` |
+| 21 | next_appointment update endpoint | 4 | `[ ]` |
+| 47 | Long-term trend layer in briefing | 4 | `[ ]` |
+| 24 | Alert patient_id filter | 5 | `[ ]` |
+| 42 L1 | Alert disposition on acknowledge | 5 | `[ ]` |
+| 13 | Shadow mode CLI argument | 5 | `[ ]` |
+| 23 | Briefing icon condition (any briefing, not just today) | 6 | `[ ]` |
+| 31 | Remove duplicate frontend sort | 6 | `[ ]` |
+| 35 | Verify patient research ID pseudonymization | 8 | `[ ]` |
+| 36 | Confirm JWT expiry ≤ 1 hour | 8 | `[ ]` |
+| 37 | Add API rate limiting (slowapi) | 8 | `[ ]` |
+| 38 | DB-level audit trigger (with SET LOCAL session vars) | 8 | `[ ]` |
+| 39 | Enable TOTP MFA in Supabase Auth | 8 | `[ ]` |
+| 16 | Lab values ingestion — creatinine, K+, HbA1c, eGFR | 8 | `[ ]` |
 
 ---
 
 ## 14. Team Assignments
 
-### Week 1 — Foundation
+Original ownership from the build sprint is preserved across all phases. Each teammate owns the same service layer they built. Fixes are distributed accordingly.
 
-| Who | What | Files |
+### Original Build Ownership
+
+| Who | Built | Service Layer |
 |---|---|---|
 | Kush | PostgreSQL schema, FHIR adapter, FHIR ingestion, setup_db.py | models/, services/fhir/, scripts/ |
-| Krishna | Synthetic reading generator, medication confirmation generator | services/generator/ |
-| Prakriti | Pattern engine Layer 1 (all 4 detectors) | services/pattern_engine/ |
-
-### Week 2 — Intelligence
-
-| Who | What | Files |
-|---|---|---|
+| Krishna | Synthetic reading generator, medication confirmation generator, frontend dashboard (shared) | services/generator/, frontend/src/ |
+| Prakriti | Pattern engine Layer 1 — all 4 detectors | services/pattern_engine/ (detectors) |
 | Yash | Layer 2 risk scorer | services/pattern_engine/risk_scorer.py |
-| Sahil | Briefing composer (deterministic JSON), LLM summarizer | services/briefing/ |
+| Sahil | Briefing composer, LLM summarizer, all FastAPI API routes | services/briefing/, app/api/ |
 | Nesh | Background worker processor and scheduler | services/worker/ |
-| Sahil | All FastAPI API routes | app/api/ |
+| Krishna + Kush | Frontend dashboard | frontend/src/ |
 
-### Week 3 — Dashboard
+---
 
-| Who | What | Files |
+### Phase 0 — Standalone Correctness (No Dependencies — Start Now)
+
+| Item | Who | File | Size |
+|---|---|---|---|
+| Deterioration: add absolute threshold gate | **Prakriti** | deterioration_detector.py | 1 line |
+| Pattern B suppression + 42-day titration gate | **Prakriti** | adherence_analyzer.py | ~17 lines |
+| Write adherence alert row (Pattern A) | **Nesh** | processor.py | 3 lines |
+| Set `delivered_at` on alert insert | **Nesh** | processor.py | 1 line |
+| Appointment date from patient record | **Nesh** | processor.py | 5 lines |
+| Severity-weighted comorbidity score | **Yash** | risk_scorer.py | ~20 lines |
+
+After Phase 0: trigger `pattern_recompute` via `POST /api/admin/trigger-scheduler` and verify alerts/scores updated.
+
+---
+
+### Phase 1 — Ingestion Data Fixes (Apply Together, Re-Ingest Once)
+
+All changes land in `adapter.py` and `ingestion.py` — apply in one branch, re-ingest after.
+
+| Item | Who | Files |
 |---|---|---|
-| Krishna + Kush | Full frontend dashboard | frontend/src/ |
-| All | Shadow mode validation, demo prep, end-to-end testing | scripts/run_shadow_mode.py |
+| Capture all 124 visit dates for `last_visit_date` (`_aria_visit_dates`) | **Kush** | adapter.py, ingestion.py |
+| Populate `social_context` from SOCIAL_HX | **Kush** | adapter.py, ingestion.py |
+| Allergy reactions + active-status filter | **Kush** | adapter.py, ingestion.py |
+| Capture physician problem assessments (`_aria_problem_assessments`) | **Kush** | adapter.py, ingestion.py, clinical_context model |
+| Capture PULSE/WEIGHT/SpO2/TEMPERATURE + DB migration | **Kush** | adapter.py, ingestion.py, setup_db.py |
 
-### Phase 0 Remediation (Immediate)
+---
 
-| Item | Who | Estimated Size |
+### Phase 2 — Detector and Briefing Fixes (After Phase 1 Data in DB)
+
+Fixes 1, 4, 5, 27, and 28 all touch the same two detector files — apply together in one branch.
+
+| Item | Who | Files |
 |---|---|---|
-| Deterioration threshold gate | Prakriti | 1 line |
-| Pattern B suppression + 14-day gate | Prakriti | ~17 lines |
-| Write adherence alert row | Nesh | 3 lines |
-| Set delivered_at on alert insert | Nesh | 1 line |
-| Appointment date from patient record | Nesh | 5 lines |
-| Severity-weighted comorbidity score | Yash | ~20 lines |
+| Patient-adaptive threshold (Fix 1) + med_history JSONB gate (Fix 4) | **Prakriti** | inertia_detector.py |
+| Comorbidity-adjusted threshold — full + degraded modes (Fix 5) | **Prakriti** | threshold_utils.py (new), all 4 detectors |
+| Step-change sub-detector for deterioration (Fix 2 ext) | **Prakriti** | deterioration_detector.py |
+| White-coat pre-visit exclusion — 5-day window (Fix 27) | **Prakriti** | inertia_detector.py, deterioration_detector.py |
+| Adaptive detection window — null-safe fallback (Fix 28) | **Prakriti** | all 4 detectors |
+| Remove duplicate inertia logic in briefing composer (Fix 18) | **Sahil** | composer.py |
+| Surface social context in briefing (Fix 29) | **Sahil** | composer.py |
+| Surface medication titration timing in briefing (Fix 34) | **Sahil** | composer.py |
+
+After Phase 2: run shadow mode — `python scripts/run_shadow_mode.py`. Agreement rate ≥ 94.3% expected in full mode.
+
+---
+
+### Phase 3 — Generator Expansion
+
+Fix 22 (per-observation idempotency) is the gate — nothing else in this phase starts until it is merged.
+
+| Item | Who | Files |
+|---|---|---|
+| Per-observation idempotency — UNIQUE index + ON CONFLICT (Fix 22, gate) | **Kush** | ingestion.py, setup_db.py |
+| Parametric baseline from patient clinic BPs (Fix 19) | **Krishna** | reading_generator.py |
+| Full care timeline synthetic readings (Fix 15) | **Krishna** | reading_generator.py, run_generator.py |
+| Full care timeline medication confirmations (Fix 15 extension) | **Krishna** | confirmation_generator.py, run_generator.py |
+| Cold start detection — 21-day threshold (Fix 17) | **Nesh** | processor.py |
+
+---
+
+### Phase 4 — Scheduler and Worker
+
+| Item | Who | Files |
+|---|---|---|
+| Daily `pattern_recompute` sweep — midnight UTC (Fix 10) | **Nesh** | scheduler.py |
+| `next_appointment` update endpoint (Fix 21) | **Sahil** | patients.py |
+| Long-term trend layer in briefing — 90-day trajectory (Fix 47) | **Sahil** | composer.py |
+| Mini-briefing for between-visit urgent alerts (Fix 46) | **Nesh + Sahil** | processor.py, composer.py |
+| Dead-letter queue — 3 retries, exponential backoff (Fix 40) | **Nesh** | processor.py |
+
+---
+
+### Phase 5 — API and Alert Improvements
+
+| Item | Who | Files |
+|---|---|---|
+| Alert `?patient_id=` filter (Fix 24) | **Sahil** | alerts.py |
+| Alert disposition on acknowledge — `alert_feedback` table (Fix 42 L1) | **Sahil** | alerts.py, new table |
+| Shadow mode CLI arguments `--patient --iemr` (Fix 13) | **Kush** | run_shadow_mode.py |
+| Shadow mode window-overlap reporting (Fix 33) | **Kush** | run_shadow_mode.py |
+| Add second + third patient to pipeline (Fix 14) | **All** | scripts/run_pipeline_tests.py |
+
+---
+
+### Phase 6 — Frontend
+
+| Item | Who | Files |
+|---|---|---|
+| Briefing icon for any briefing, not just today (Fix 23) | **Krishna** | PatientList.tsx |
+| Remove duplicate frontend sort — backend order is authoritative (Fix 31) | **Krishna** | PatientList.tsx |
+| Multi-patient pagination and tier filter (Fix 14) | **Krishna + Kush** | dashboard components |
+
+---
+
+### Phase 7 — New Clinical Features
+
+| Item | Who |
+|---|---|
+| Patient-facing reading submission + symptom flags (Fix 43) | **Krishna** (frontend) + **Sahil** (API) |
+| Escalation pathway + off-hours alert tagging (Fix 45) | **Nesh** |
+| Feedback loop Layer 2: calibration recommendations (Fix 42 L2) | **Yash** (scorer) + **Sahil** (API) |
+| BLE vendor webhook connector (Fix 44) | **Kush** (ingestion) + **Nesh** (worker) |
+
+---
+
+### Phase 8 — Infrastructure and Security
+
+| Item | Who |
+|---|---|
+| Verify patient research ID pseudonymization (Fix 35) | **Kush** |
+| Confirm JWT expiry ≤ 1 hour (Fix 36) | **Kush** |
+| Add API rate limiting — `slowapi` (Fix 37) | **Sahil** |
+| DB-level audit trigger with `SET LOCAL` session vars (Fix 38) | **Kush** |
+| Enable TOTP MFA in Supabase Auth (Fix 39) | **Krishna** |
+| Lab values ingestion — creatinine, K+, HbA1c, eGFR (Fix 16) | **Kush** |
+
+---
 
 ### Demo Patients
 
 | Patient | Source | Scenario | Key Finding |
 |---|---|---|---|
-| A | Patient 1091 iEMR, monitoring_active=TRUE | Therapeutic inertia | 21 days elevated BP avg 163/101, 91% adherence, no medication change — likely treatment failure |
+| A | Patient 1091 iEMR, monitoring_active=TRUE | Therapeutic inertia | Elevated BP avg 163/101 over 21 days, 91% adherence, no medication change — likely treatment failure |
 | B | Patient 1091 iEMR, monitoring_active=FALSE | EHR-only pathway | Overdue lab flag, NSAID + antihypertensive drug interaction flag |
 
 ---

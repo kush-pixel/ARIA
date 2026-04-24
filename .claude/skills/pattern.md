@@ -6,13 +6,16 @@ Layer 1 (runs async via worker, NEVER in HTTP path):
 - Inertia: ALL 5 conditions simultaneously
     systolic_avg >= patient_threshold (NOT hardcoded 140)
     patient_threshold = max(130, stable_baseline_mean + 1.5×SD) capped at 145
-    comorbidity adjustment: -7 mmHg floor 130 when cardio+metabolic both elevated
-    med change: from med_history JSONB NOT last_med_change column
+    comorbidity adjustment: -7 mmHg floor 130 when EITHER cardio+metabolic both elevated
+      OR any severe-weight comorbidity (CHF/Stroke/TIA) in elevated state
+      full mode uses problem_assessments; degraded mode (pre-Fix 7) uses active_problems
+    med change: from med_history JSONB (activity=add|modify) NOT last_med_change column
     slope check: 7-day recent avg must still be >= threshold (do NOT fire when declining)
 - Deterioration: positive slope + recent > baseline + recent >= patient_threshold (absolute gate)
     step-change sub-detector: 7d recent - 7d three-weeks-ago >= 15 mmHg → flag regardless of slope
 - Adherence: < 80% threshold, Pattern A/B/C interpretation
-    Pattern B suppression: slope < -0.3 AND recent < threshold AND med_change <= 14d → suppress to none
+    Pattern B suppression: slope < -0.3 AND recent < threshold AND med_change <= 42d → suppress to none
+      42-day gate aligns with Fix 34 titration window (4-6 week antihypertensive response)
     Pattern A → write alert row with alert_type="adherence"
 - Language always hedged: possible not definitive
 - threshold_utils.py: shared patient-adaptive threshold + comorbidity adjustment (all 4 detectors use it)
@@ -29,13 +32,20 @@ Layer 2 (risk_scorer.py, runs AFTER all Layer 1 detectors):
 - Write to patients.risk_score
 - Dashboard sorts by risk_tier then risk_score DESC
 
-Adaptive detection window — all 4 detectors (Fix 28):
-  window_days = min(90, max(14, (next_appointment - last_visit_date).days))
-  Replaces hardcoded _WINDOW_DAYS = 28. Prerequisite: Fix 15 (full timeline readings).
+Adaptive detection window — all 4 detectors (Fix 28, Phase 2):
+  if next_appointment is None or last_visit_date is None or interval <= 0:
+    window_days = 28 (fallback default)
+  else:
+    window_days = min(90, max(14, (next_appointment - last_visit_date).days))
+  Log window_days_source ("adaptive" vs "fallback_default").
+  When available readings < window_days: log window_truncated_to_available, use available range.
+  Silently benefits from longer lookback once Fix 15 full-timeline data lands.
 
 White-coat exclusion — inertia + deterioration only (Fix 27):
-  Filter readings where effective_datetime >= (next_appointment - 3 days)
-  before threshold comparison. Excluded rows stay in DB, visible in briefing trend.
+  Filter readings where effective_datetime >= (next_appointment - 5 days)
+  before threshold comparison (5d matches the synthetic 3-5d dip window).
+  When next_appointment is None, no exclusion applied.
+  Excluded rows stay in DB, visible in briefing trend.
 
 Write to alerts table (types: gap_urgent|gap_briefing|inertia|deterioration|adherence).
 Write audit_events per alert.
