@@ -10,9 +10,11 @@ GIT POLICY: Never push, commit, or add.
 Patient list sorted by: risk_tier (High first) then risk_score DESC.
 RiskScoreBar visualises Layer 2 score as a priority indicator.
 SparklineChart shows 28-day BP with morning/evening overlay.
-BriefingCard shows all 9 briefing JSON sections.
+BriefingCard shows all 10 briefing JSON sections (includes problem_assessments).
 Admin trigger button fires POST /api/admin/trigger-scheduler for demo.
 
 TypeScript strict, no any, Tailwind only, all types in types.ts.
 No PHI in emails or notifications.
 Clinical language in UI: possible not definitive.
+Patient list sort: backend order is authoritative — remove sortPatients() from PatientList.tsx (Fix 31).
+Briefing icon condition: whether a briefing row exists for the patient, not just today's appointment (Fix 23).

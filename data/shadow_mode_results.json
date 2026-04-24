@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-04-22T21:34:21.778976+00:00",
+  "generated_at": "2026-04-23T19:30:29.233177+00:00",
   "patient_id": "1091",
   "total_eval_points": 62,
   "skipped": 3,
@@ -9,10 +9,10 @@
   "concerned_flag1_or_2": 10,
   "stable_flag3": 25,
   "no_ground_truth": 24,
-  "agreements": 32,
-  "false_negatives": 1,
+  "agreements": 33,
+  "false_negatives": 0,
   "false_positives": 2,
-  "agreement_pct": 91.4,
+  "agreement_pct": 94.3,
   "passed": true,
   "best_demo_window": {
     "visit_indices": [
@@ -24,7 +24,7 @@
     ],
     "date_from": "2008-01-29",
     "date_to": "2008-02-18",
-    "summary": "ARIA would have alerted before 4 of 5 visits where the physician found elevated BP in 5 cases"
+    "summary": "ARIA would have alerted before 5 of 5 visits where the physician found elevated BP in 5 cases"
   },
   "visits": [
     {
@@ -121,6 +121,9 @@
       "with_aria": {
         "fired": true,
         "personal_threshold": 140.0,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.0,
+        "threshold_adjustment": 0.0,
         "personal_baseline": null,
         "n_stable_history": 0,
         "detectors": {
@@ -277,6 +280,9 @@
       "with_aria": {
         "fired": true,
         "personal_threshold": 140.0,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.0,
+        "threshold_adjustment": 0.0,
         "personal_baseline": null,
         "n_stable_history": 0,
         "detectors": {
@@ -445,6 +451,9 @@
       "with_aria": {
         "fired": true,
         "personal_threshold": 140.0,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.0,
+        "threshold_adjustment": 0.0,
         "personal_baseline": null,
         "n_stable_history": 0,
         "detectors": {
@@ -625,6 +634,9 @@
       "with_aria": {
         "fired": true,
         "personal_threshold": 140.0,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.0,
+        "threshold_adjustment": 0.0,
         "personal_baseline": null,
         "n_stable_history": 0,
         "detectors": {
@@ -959,8 +971,11 @@
         ]
       },
       "with_aria": {
-        "fired": false,
+        "fired": true,
         "personal_threshold": 140.0,
+        "comorbidity_concern_state": "cardiovascular+metabolic",
+        "adjusted_threshold": 133.0,
+        "threshold_adjustment": 7.0,
         "personal_baseline": null,
         "n_stable_history": 0,
         "detectors": {
@@ -977,18 +992,20 @@
             "no_med_change": false
           },
           "adherence": {
-            "fired": false,
-            "pattern": "none",
+            "fired": true,
+            "pattern": "B",
             "slope": -0.8666,
             "overall_pct": 96.4,
-            "interpretation": "no adherence concern identified"
+            "interpretation": "possible treatment-review case"
           },
           "deterioration": {
             "fired": false,
             "slope": -1.7327
           }
         },
-        "visit_agenda": [],
+        "visit_agenda": [
+          "Possible treatment-review case: high adherence with persistent elevation"
+        ],
         "urgent_flags": [],
         "adherence_pct": 96.4
       },
@@ -1234,7 +1251,7 @@
           "session": "evening"
         }
       ],
-      "result": "false_negative",
+      "result": "agree",
       "between_visit_alerts": []
     },
     {
@@ -1331,6 +1348,9 @@
       "with_aria": {
         "fired": true,
         "personal_threshold": 140.0,
+        "comorbidity_concern_state": "cardiovascular+metabolic",
+        "adjusted_threshold": 140.0,
+        "threshold_adjustment": 0.0,
         "personal_baseline": null,
         "n_stable_history": 0,
         "detectors": {
@@ -1751,6 +1771,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 140.0,
+        "comorbidity_concern_state": "cardiovascular+metabolic",
+        "adjusted_threshold": 140.0,
+        "threshold_adjustment": 0.0,
         "personal_baseline": null,
         "n_stable_history": 0,
         "detectors": {
@@ -2133,6 +2156,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 143.0,
+        "comorbidity_concern_state": "cardiovascular+metabolic",
+        "adjusted_threshold": 143.0,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 131.0,
         "n_stable_history": 1,
         "detectors": {
@@ -2509,6 +2535,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 143.0,
+        "comorbidity_concern_state": "cardiovascular+metabolic",
+        "adjusted_threshold": 143.0,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 131.0,
         "n_stable_history": 2,
         "detectors": {
@@ -2862,6 +2891,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 145.7,
+        "comorbidity_concern_state": "cardiovascular+metabolic",
+        "adjusted_threshold": 145.7,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 133.7,
         "n_stable_history": 3,
         "detectors": {
@@ -3215,6 +3247,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 145.5,
+        "comorbidity_concern_state": "cardiovascular+metabolic",
+        "adjusted_threshold": 145.5,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 133.5,
         "n_stable_history": 4,
         "detectors": {
@@ -3580,6 +3615,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 145.0,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 145.0,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 133.0,
         "n_stable_history": 5,
         "detectors": {
@@ -3969,6 +4007,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 145.0,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 145.0,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 133.0,
         "n_stable_history": 5,
         "detectors": {
@@ -4406,6 +4447,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 145.0,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 145.0,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 133.0,
         "n_stable_history": 5,
         "detectors": {
@@ -4783,6 +4827,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 144.7,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 144.7,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 132.7,
         "n_stable_history": 6,
         "detectors": {
@@ -5160,6 +5207,9 @@
       "with_aria": {
         "fired": true,
         "personal_threshold": 143.0,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 143.0,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 131.0,
         "n_stable_history": 7,
         "detectors": {
@@ -5574,6 +5624,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 143.0,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 143.0,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 131.0,
         "n_stable_history": 7,
         "detectors": {
@@ -5991,6 +6044,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 143.5,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 143.5,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 131.5,
         "n_stable_history": 8,
         "detectors": {
@@ -6410,6 +6466,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 143.5,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 143.5,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 131.5,
         "n_stable_history": 8,
         "detectors": {
@@ -6835,6 +6894,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 142.1,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 142.1,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 130.1,
         "n_stable_history": 9,
         "detectors": {
@@ -7274,6 +7336,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 142.1,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 142.1,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 130.1,
         "n_stable_history": 9,
         "detectors": {
@@ -7648,6 +7713,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 141.7,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 141.7,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 127.9,
         "n_stable_history": 10,
         "detectors": {
@@ -8046,6 +8114,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 142.5,
+        "comorbidity_concern_state": "none",
+        "adjusted_threshold": 142.5,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.8,
         "n_stable_history": 11,
         "detectors": {
@@ -8511,6 +8582,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 141.5,
+        "comorbidity_concern_state": "none",
+        "adjusted_threshold": 141.5,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 124.8,
         "n_stable_history": 12,
         "detectors": {
@@ -8970,6 +9044,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 142.6,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 142.6,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.8,
         "n_stable_history": 13,
         "detectors": {
@@ -9429,6 +9506,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 141.6,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 141.6,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.3,
         "n_stable_history": 14,
         "detectors": {
@@ -9894,6 +9974,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 141.6,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 141.6,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.3,
         "n_stable_history": 14,
         "detectors": {
@@ -10323,6 +10406,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 141.6,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 141.6,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.3,
         "n_stable_history": 14,
         "detectors": {
@@ -10818,6 +10904,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 141.6,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 141.6,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.3,
         "n_stable_history": 14,
         "detectors": {
@@ -11229,6 +11318,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 141.6,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 141.6,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.3,
         "n_stable_history": 14,
         "detectors": {
@@ -11700,6 +11792,9 @@
       "with_aria": {
         "fired": true,
         "personal_threshold": 141.6,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 141.6,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.3,
         "n_stable_history": 14,
         "detectors": {
@@ -12173,6 +12268,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 141.6,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 141.6,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.3,
         "n_stable_history": 14,
         "detectors": {
@@ -12621,6 +12719,9 @@
       "with_aria": {
         "fired": true,
         "personal_threshold": 141.6,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 141.6,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.3,
         "n_stable_history": 14,
         "detectors": {
@@ -13093,6 +13194,9 @@
       "with_aria": {
         "fired": true,
         "personal_threshold": 141.6,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 141.6,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.3,
         "n_stable_history": 14,
         "detectors": {
@@ -13518,6 +13622,9 @@
       "with_aria": {
         "fired": true,
         "personal_threshold": 141.6,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 141.6,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.3,
         "n_stable_history": 14,
         "detectors": {
@@ -13968,6 +14075,9 @@
       "with_aria": {
         "fired": true,
         "personal_threshold": 141.6,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 141.6,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.3,
         "n_stable_history": 14,
         "detectors": {
@@ -14370,6 +14480,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 141.6,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 141.6,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.3,
         "n_stable_history": 14,
         "detectors": {
@@ -14840,6 +14953,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 140.9,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.9,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.1,
         "n_stable_history": 15,
         "detectors": {
@@ -15300,6 +15416,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 140.9,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.9,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.1,
         "n_stable_history": 15,
         "detectors": {
@@ -15760,6 +15879,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 140.8,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.8,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.4,
         "n_stable_history": 16,
         "detectors": {
@@ -16256,6 +16378,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 140.8,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.8,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.4,
         "n_stable_history": 16,
         "detectors": {
@@ -16710,6 +16835,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 140.8,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.8,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.4,
         "n_stable_history": 16,
         "detectors": {
@@ -17128,6 +17256,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 140.8,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.8,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.4,
         "n_stable_history": 16,
         "detectors": {
@@ -17498,6 +17629,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 140.8,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.8,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.4,
         "n_stable_history": 16,
         "detectors": {
@@ -17821,6 +17955,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 140.9,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.9,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.8,
         "n_stable_history": 17,
         "detectors": {
@@ -18324,6 +18461,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 140.9,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.9,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.8,
         "n_stable_history": 17,
         "detectors": {
@@ -18791,6 +18931,9 @@
       "with_aria": {
         "fired": true,
         "personal_threshold": 140.9,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.9,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.8,
         "n_stable_history": 17,
         "detectors": {
@@ -19212,6 +19355,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 140.9,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.9,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.8,
         "n_stable_history": 17,
         "detectors": {
@@ -19667,6 +19813,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 140.2,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.2,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.3,
         "n_stable_history": 18,
         "detectors": {
@@ -20110,6 +20259,9 @@
       "with_aria": {
         "fired": true,
         "personal_threshold": 140.2,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.2,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.3,
         "n_stable_history": 18,
         "detectors": {
@@ -20591,6 +20743,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 140.2,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.2,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.3,
         "n_stable_history": 18,
         "detectors": {
@@ -21058,6 +21213,9 @@
       "with_aria": {
         "fired": true,
         "personal_threshold": 140.2,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.2,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.3,
         "n_stable_history": 18,
         "detectors": {
@@ -21503,6 +21661,9 @@
       "with_aria": {
         "fired": true,
         "personal_threshold": 140.2,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.2,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.3,
         "n_stable_history": 18,
         "detectors": {
@@ -21973,6 +22134,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 140.2,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.2,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.3,
         "n_stable_history": 18,
         "detectors": {
@@ -22405,6 +22569,9 @@
       "with_aria": {
         "fired": true,
         "personal_threshold": 140.2,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.2,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.3,
         "n_stable_history": 18,
         "detectors": {
@@ -22827,6 +22994,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 140.2,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.2,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.3,
         "n_stable_history": 18,
         "detectors": {
@@ -23307,6 +23477,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 140.2,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 140.2,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 125.3,
         "n_stable_history": 18,
         "detectors": {
@@ -23701,6 +23874,9 @@
       "with_aria": {
         "fired": true,
         "personal_threshold": 141.8,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 141.8,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 126.2,
         "n_stable_history": 19,
         "detectors": {
@@ -24170,6 +24346,9 @@
       "with_aria": {
         "fired": false,
         "personal_threshold": 143.4,
+        "comorbidity_concern_state": "metabolic",
+        "adjusted_threshold": 143.4,
+        "threshold_adjustment": 0.0,
         "personal_baseline": 127.1,
         "n_stable_history": 20,
         "detectors": {

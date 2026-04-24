@@ -24,7 +24,7 @@ view of what happened to their hypertensive patients since the last appointment.
 
 ARIA fixes this by:
 1. Ingesting patient EHR data via FHIR R4 Bundle
-2. Generating clinically realistic synthetic home BP readings (28 days)
+2. Generating clinically realistic synthetic home BP readings and medication confirmations spanning the patient's full care timeline
 3. Running three-layer AI analysis (rules → scoring → explanation)
 4. Delivering a structured pre-visit briefing at 7:30 AM on appointment days
 
@@ -183,6 +183,7 @@ aria-platform/
         alerts.py       <- GET /api/alerts (alert inbox)
         ingest.py       <- POST /api/ingest (FHIR Bundle)
         admin.py        <- POST /api/admin/trigger-scheduler (demo mode)
+        shadow_mode.py  <- GET /api/shadow-mode (ARIA vs physician agreement results)
       services/
         __init__.py
         fhir/
@@ -192,8 +193,8 @@ aria-platform/
           validator.py        <- validate FHIR Bundle structure
         generator/
           __init__.py
-          reading_generator.py      <- synthetic 28-day home BP
-          confirmation_generator.py <- synthetic medication confirmations
+          reading_generator.py      <- synthetic full-timeline home BP (inter-visit interpolation, parametric baseline)
+          confirmation_generator.py <- synthetic full-timeline medication confirmations (Beta-distributed adherence per interval)
         pattern_engine/
           __init__.py
           gap_detector.py           <- Layer 1: gap detection SQL
@@ -251,7 +252,7 @@ aria-platform/
   scripts/
     run_adapter.py     <- convert iEMR JSON to FHIR Bundle
     run_ingestion.py   <- ingest FHIR Bundle into PostgreSQL
-    run_generator.py   <- generate synthetic readings for a patient
+    run_generator.py   <- generate synthetic readings + confirmations for full patient timeline
     run_worker.py      <- start background processing worker
     run_scheduler.py   <- manually trigger 7:30 AM logic
     run_shadow_mode.py <- validate ARIA vs physician notes (target 80%)
@@ -299,6 +300,16 @@ historic_bp_systolic   SMALLINT[]           all clinic readings chronologically
 historic_bp_dates      DATE[]               parallel to historic_bp_systolic
 overdue_labs        TEXT[]
 social_context      TEXT
+problem_assessments JSONB               per-problem visit assessment history,
+                                        list of {problem_code, visit_date, htn_flag,
+                                        status_text, assessment_text} sorted by date DESC
+recent_labs         JSONB               latest lab values: creatinine, K+, HbA1c, eGFR
+                                        {loinc_code: {value, unit, date}}
+last_clinic_pulse      SMALLINT         bpm from last BP visit (LOINC 8867-4)
+last_clinic_weight_kg  NUMERIC(5,1)     kg from last BP visit (LOINC 29463-7)
+last_clinic_spo2       NUMERIC(4,1)     % from last visit (LOINC 59408-5)
+historic_spo2          NUMERIC[]        all clinic SpO2 readings chronologically
+allergy_reactions   TEXT[]              parallel to allergies — reaction type per allergy
 last_updated        TIMESTAMPTZ DEFAULT NOW()
 
 ### readings (home BP readings + generated)
@@ -341,7 +352,7 @@ created_at          TIMESTAMPTZ DEFAULT NOW()
 ### alerts
 alert_id            UUID PK DEFAULT gen_random_uuid()
 patient_id          TEXT REFERENCES patients
-alert_type          TEXT NOT NULL           gap_urgent | gap_briefing | inertia | deterioration
+alert_type          TEXT NOT NULL           gap_urgent | gap_briefing | inertia | deterioration | adherence
 gap_days            SMALLINT
 systolic_avg        NUMERIC(5,1)
 triggered_at        TIMESTAMPTZ DEFAULT NOW()
@@ -423,9 +434,21 @@ CREATE INDEX idx_audit_events_patient_time
 CREATE INDEX idx_patients_risk_score
   ON patients (risk_tier, risk_score DESC);
 
--- Migration (added after initial schema) — run via setup_db.py, not a CREATE INDEX:
-ALTER TABLE clinical_context
-  ADD COLUMN IF NOT EXISTS med_history JSONB;
+CREATE UNIQUE INDEX idx_readings_patient_datetime_source
+  ON readings (patient_id, effective_datetime, source);
+
+CREATE UNIQUE INDEX idx_confirmations_patient_med_scheduled
+  ON medication_confirmations (patient_id, medication_name, scheduled_time);
+
+-- Migrations (added after initial schema) — run via setup_db.py ADD COLUMN IF NOT EXISTS, safe to re-run:
+ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS med_history JSONB;
+ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS problem_assessments JSONB;
+ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS recent_labs JSONB;
+ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS last_clinic_pulse SMALLINT;
+ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS last_clinic_weight_kg NUMERIC(5,1);
+ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS last_clinic_spo2 NUMERIC(4,1);
+ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS historic_spo2 NUMERIC[];
+ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS allergy_reactions TEXT[];
 
 ---
 
@@ -438,18 +461,29 @@ Two-reading session:       readings 1 and 2 differ by 2-6 mmHg (2 slightly lower
 Diastolic:                 systolic × 0.60-0.66
 Heart rate:                64-82 bpm, slight negative correlation with systolic
                            when beta-blocker in regimen (metoprolol effect)
-Device outage:             1-2 episodes of 2-4 days per 28 days
+Device outage:             1-2 episodes of 2-4 days per inter-visit interval
                            ABSENT ROWS — never null values in readings table
 White-coat dip:            systolic drops 10-15 mmHg in 3-5 days before appointment
 Post-appointment return:   readings return to elevated baseline after dip
 
-Patient A scenario (anchored on patient 1091 real clinic BPs 185/72 and 180/73):
-  Days 1-7:   Baseline. Morning Gaussian ~163 mmHg SD=8. Evening 6-9 lower.
-  Days 8-14:  Inertia develops. Systolic drifts to ~165. One missed evening (Saturday).
-  Days 15-18: Continued elevation 164-167. Device outage days 16-17.
-  Days 19-21: Pre-appointment dip to 148-153. Gradual decline, not sudden.
-  Days 22-28: Return to 160-166. Weekend misses days 25-26.
-Adherence signal: 91% synthetic confirmations across all three medications.
+Generation scope — full care timeline (not just 28 days):
+  For each consecutive pair of clinic readings, generate daily synthetic readings
+  by linearly interpolating between the two BP anchors with Gaussian noise.
+  Baseline derived from median(clinical_context.historic_bp_systolic) — NOT hardcoded.
+  Falls back to PATIENT_A_MORNING_MEAN = 163.0 only when fewer than 2 clinic readings exist.
+  Patient 1091 has 65 clinic readings (2008-01-21 to 2013-09-26, mean 133.8 mmHg, SD 16.2).
+  The elevated demo window (~158 mmHg avg) reflects the 2011-2013 period used in the briefing.
+
+Confirmation scope — full care timeline (not just 28 days):
+  For each inter-visit interval, generate confirmations for every medication active
+  during that interval, derived from clinical_context.med_history (not hardcoded med list).
+  Per-interval adherence drawn from Beta distribution anchored near patient's known overall
+  adherence (≈91% for patient 1091) with ±10-15 percentage point interval-to-interval variation.
+  Idempotency: unique constraint on (patient_id, medication_name, scheduled_time).
+
+Prerequisite before full-timeline generation:
+  readings table must have UNIQUE INDEX on (patient_id, effective_datetime, source)
+  so re-running generator uses ON CONFLICT DO NOTHING (not batch-level skip).
 
 ---
 
@@ -475,7 +509,27 @@ VITALS SYSTOLIC+DIASTOLIC     -> Observation
   component 8480-6 (systolic), component 8462-4 (diastolic)
   effectiveDateTime from VITALS_DATETIME (NOT ADMIT_DATE)
 
+VITALS PULSE/WEIGHT/SpO2/TEMP -> Observation (additional, same visit)
+  LOINC 8867-4 (pulse), 29463-7 (weight kg), 59408-5 (SpO2 %), 8310-5 (temperature)
+  stored in clinical_context last_clinic_pulse/weight_kg/spo2, historic_spo2[]
+  SpO2 < 92% in a CHF patient triggers a visit agenda alert
+
+PROBLEM assessments (all visits) -> _aria_problem_assessments (non-FHIR bundle key)
+  Not a FHIR resource. Appended to bundle root as bundle["_aria_problem_assessments"].
+  Collected per-visit: {problem_code, visit_date, htn_flag, status_text, assessment_text}
+  Stored in clinical_context.problem_assessments JSONB.
+  Used by briefing composer to surface most recent assessment per active problem.
+
+VISIT dates (all visits)      -> _aria_visit_dates (non-FHIR bundle key)
+  Not a FHIR resource. List of ADMIT_DATE values from all 124 visits regardless of type.
+  Used to set clinical_context.last_visit_date = max(all_visit_dates).
+  Currently last_visit_date only reflects BP clinic dates — this corrects that.
+
 ALLERGY                       -> AllergyIntolerance
+  Filter: ALLERGY_STATUS == "Active" only — inactive allergies must not appear in briefing
+  Include: ALLERGY_REACTION stored in reaction[0].manifestation[0].text
+  Stored in clinical_context.allergy_reactions[] parallel to allergies[]
+
 PLAN where PLAN_NEEDS_FOLLOWUP=YES -> ServiceRequest
 
 ---
@@ -488,18 +542,63 @@ FROM readings WHERE patient_id = $1;
 Thresholds: High tier flag>=1 urgent>=3 | Medium flag>=3 urgent>=5 | Low flag>=7 urgent>=14
 
 ### Therapeutic inertia (ALL conditions required)
-AVG(systolic_avg) >= 140 over last 28 days
-COUNT(*) >= 5 elevated readings
+AVG(systolic_avg) >= patient_threshold over the adaptive window (see below)
+  patient_threshold = max(130, stable_baseline_mean + 1.5×SD) capped at 145 mmHg
+  derived from historic_bp_systolic filtered to physician-labeled stable visits
+  falls back to 140 if fewer than 3 stable-labeled readings exist
+  comorbidity adjustment: threshold lowered by 7 mmHg (floor 130) when EITHER
+    (a) cardiovascular AND metabolic comorbidities both in elevated concern state, OR
+    (b) any severe-weight comorbidity (CHF/Stroke/TIA) in elevated concern state
+  full mode uses clinical_context.problem_assessments status flags (post Fix 7)
+  degraded mode (pre Fix 7) uses clinical_context.active_problems presence
+  log threshold_adjustment_mode per computation
+Slope direction check: if 7-day recent avg < patient_threshold, do NOT fire (BP declining)
+COUNT(*) >= 5 readings with systolic_avg >= patient_threshold
 NOW() - MIN(effective_datetime) > 7 days
-last_med_change < MIN(effective_datetime) OR last_med_change IS NULL
+Most recent med change date from clinical_context.med_history JSONB < MIN(effective_datetime) OR NULL
+  (NOT clinical_context.last_med_change — that is a single stale ingestion-time snapshot)
+  reads max({date}) across all med_history entries where date <= first_elevated_reading_date
+  uses the activity field (add|modify|remove) — dose direction parsing (increase/decrease)
+  deferred to a dedicated dose_parser.py module
+
+### Deterioration (three gates required)
+Positive linear slope across the adaptive window
+Recent 3-day avg > baseline days 4-10 avg
+recent_avg >= patient_threshold (absolute gate — prevents firing on 115→119 rise)
+Step-change sub-detector: if (7-day recent mean) - (7-day mean three weeks ago) >= 15 mmHg,
+  flag deterioration regardless of overall linear slope
+patient_threshold derived identically to the inertia detector (including comorbidity adjustment)
 
 ### Adherence-BP correlation
 Join readings and medication_confirmations on same date.
 adherence_pct = COUNT(confirmed_at) / COUNT(*) * 100
 Clinical threshold: < 80% flags non-adherence
-Pattern A: high systolic + low adherence -> "possible adherence concern"
+Pattern A: high systolic + low adherence -> "possible adherence concern" -> write alert row
 Pattern B: high systolic + high adherence -> "possible treatment-review case"
+  Suppress Pattern B to "none" when ALL of: slope < -0.3 AND recent_7day_avg < patient_threshold
+    AND days_since_med_change <= 42 (aligned with titration window — see medication_status below)
+  Without the 42-day med-change gate, a noise-driven negative slope on a persistently-elevated
+  patient incorrectly suppresses a real treatment-review signal.
 Pattern C: normal systolic + low adherence -> "contextual review"
+
+### Adaptive detection window (all four detectors)
+if next_appointment IS NULL or last_visit_date IS NULL or interval <= 0:
+  window_days = 28 (fallback default)
+else:
+  window_days = min(90, max(14, (next_appointment - last_visit_date).days))
+Replaces hardcoded _WINDOW_DAYS = 28 in gap, inertia, adherence, and deterioration queries.
+Floor 14: prevents degenerate short windows. Cap 90: bounds computation.
+Log window_days_source ("adaptive" vs "fallback_default").
+When available readings < window_days, log window_truncated_to_available and use available range
+  (conservative behaviour; benefits silently once Fix 15 full-timeline readings land).
+
+### White-coat exclusion (inertia + deterioration only)
+After querying readings, filter out rows where effective_datetime >= (next_appointment - 5 days)
+before any threshold comparison. 5-day window aligns with the synthetic generator's dip rule
+(10-15 mmHg drop 3-5 days before appointment) — a 3-day window leaks dip-influenced days 4-5
+into threshold computation. When next_appointment IS NULL, no exclusion is applied.
+Excluded readings remain in the DB and are visible in the briefing trend — they are only
+excluded from detector threshold computations.
 
 ---
 
@@ -512,7 +611,12 @@ Score = weighted sum normalised to 0.0-100.0:
   (days_since_med_change * 0.25) +
   (100 - adherence_pct) * 0.20 +
   (gap_days_normalised * 0.15) +
-  (comorbidity_count * 0.10)
+  (comorbidity_severity_score * 0.10)
+
+comorbidity_severity_score — severity-weighted, clamped 0-100 (NEVER raw count / 5):
+  CHF (I50), Stroke (I63/I64), TIA (G45):  25 points each
+  Diabetes (E11), CKD (N18), CAD (I25):    15 points each
+  Any other coded problem:                    5 points each
 
 Store in patients.risk_score.
 Dashboard PatientList sorts by: risk_tier first (High > Medium > Low),
@@ -524,15 +628,19 @@ then risk_score DESC within each tier.
 
 briefings.llm_response JSONB:
 {
-  "trend_summary": str,       <- 28-day BP pattern
-  "medication_status": str,   <- current regimen, last change date
-  "adherence_summary": str,   <- rate per medication + pattern interpretation
-  "active_problems": list,    <- from clinical_context.active_problems
-  "overdue_labs": list,       <- from clinical_context.overdue_labs
-  "visit_agenda": list,       <- prioritised 3-6 items
-  "urgent_flags": list,       <- active unacknowledged alerts
-  "risk_score": float,        <- Layer 2 score
-  "data_limitations": str     <- whether home monitoring available
+  "trend_summary": str,          <- adaptive-window BP pattern (14-90 days based on inter-visit interval)
+                                    + 90-day trajectory from historic_bp_systolic where available
+  "medication_status": str,      <- current regimen, last change date;
+                                    when days_since_med_change <= 42 append
+                                    "— within expected titration window, full response may not yet be established"
+  "adherence_summary": str,      <- rate per medication + pattern interpretation
+  "active_problems": list,       <- from clinical_context.active_problems
+  "problem_assessments": dict,   <- {problem_name: most_recent_assessment_text} from clinical_context.problem_assessments
+  "overdue_labs": list,          <- from clinical_context.overdue_labs + recent_labs abnormal flags
+  "visit_agenda": list,          <- prioritised 3-6 items
+  "urgent_flags": list,          <- active unacknowledged alerts (including adherence type)
+  "risk_score": float,           <- Layer 2 score
+  "data_limitations": str        <- whether home monitoring available; cold-start suppression notice if < 14 days enrolled
 }
 
 visit_agenda priority order:
@@ -548,13 +656,13 @@ visit_agenda priority order:
 ## DEMO PATIENTS
 
 Patient A — Therapeutic Inertia (patient 1091 iEMR, monitoring_active=TRUE)
-  Risk tier: High (CHF auto-override)
-  28-day synthetic readings anchored on clinic BPs 185/72 and 180/73
-  Medications: Metoprolol, Lisinopril, Lasix
-  Adherence signal: 91%
-  Expected briefing: sustained elevated BP avg 163/101 over 21 days,
-                     no med change, high adherence signal,
-                     likely treatment failure not adherence concern
+  Risk tier: High (CHF auto-override, ICD-10 I50.9)
+  Full care timeline synthetic readings spanning 2008-01-21 to 2013-09-26 (65 clinic BP anchors)
+  Parametric baseline: median(historic_bp_systolic) ≈ 134 mmHg; demo window elevated ~158 mmHg
+  14 active medications including Metoprolol, Lisinopril, Lasix (derived from med_history)
+  Adherence: ~91% per interval, Beta-distributed with ±10-15% interval-to-interval variation
+  Expected briefing: sustained elevated 28-day avg ~158 mmHg, no med change since 2013,
+                     high adherence signal → treatment review warranted (not adherence concern)
 
 Patient B — iEMR Only (patient 1091, monitoring_active=FALSE)
   No home readings generated
@@ -573,11 +681,15 @@ TIA in problem_codes -> tier_override="TIA history", force risk_tier="high"
 
 ## SHADOW MODE VALIDATION
 
-Target: >= 80% agreement between ARIA alert output and physician assessment
-Ground truth: PROBLEM_STATUS2_FLAG (3=Green, 2=Yellow, 1=Red)
-              PROBLEM_ASSESSMENT_TEXT for narrative context
-Script: scripts/run_shadow_mode.py
+Target: >= 80% agreement — ACHIEVED: 94.3% (33/35 labelled evaluation points, 0 false negatives, 2 false positives)
+Ground truth: PROBLEM_STATUS2_FLAG (3=Green/stable, 2=Yellow/concerned, 1=Red/urgent)
+              PROBLEM_STATUS2 text and PROBLEM_ASSESSMENT_TEXT for narrative context
+Evaluation points: BP clinic dates + no-vitals iEMR visits with explicit HTN flag and non-empty assessment
+Script: python scripts/run_shadow_mode.py --patient 1091 --iemr data/raw/iemr/1091_data.json
+  --patient defaults to 1091, --iemr defaults to matching path
+  Results written to data/shadow_mode_results.json
 False negatives must be reviewed before demo sign-off.
+The 2 false positives are documented in AUDIT.md Fix 1 and Fix 3 (now resolved in production detectors).
 
 ---
 
@@ -588,7 +700,25 @@ Status flow: queued -> running -> succeeded | failed
 Job types: pattern_recompute | briefing_generation | bundle_import
 Idempotency: check idempotency_key before processing.
 Demo mode: POST /api/admin/trigger-scheduler fires scheduler on demand.
+
 7:30 AM scheduler: enqueues briefing_generation for appointment-day patients.
+  Query: monitoring_active=TRUE AND next_appointment::DATE = today
+  Idempotency key: "briefing_generation:{patient_id}:{YYYY-MM-DD}"
+  Appointment date sourced from patients.next_appointment (NOT parsed from idempotency key)
+
+Midnight UTC scheduler (APScheduler): enqueues pattern_recompute for ALL active patients.
+  Query: ALL monitoring_active=TRUE patients
+  Idempotency key: "pattern_recompute:{patient_id}:{YYYY-MM-DD}"
+  Re-runs are safe — ON CONFLICT DO NOTHING on idempotency_key
+  Ensures gap counters, risk scores, and inertia flags stay current for non-appointment-day patients
+
+Cold-start suppression (in pattern_recompute handler):
+  If (now - enrolled_at).days < 21: skip inertia, deterioration, adherence detectors
+  Set data_limitations = "Patient enrolled N days ago — minimum 21-day monitoring period required"
+  Gap detector still runs — zero readings in first week is itself a gap signal
+  21-day (not 14) avoids a cliff-edge with the adaptive window floor of 14 days — guarantees
+  at least 7 days of home readings exist before any detector first runs, even on weekly-visit
+  patients where the adaptive window floors to 14
 
 ---
 

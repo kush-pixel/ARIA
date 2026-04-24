@@ -1,305 +1,686 @@
 # ARIA System Audit
-**Date:** 2026-04-22  
-**Author:** Claude Code  
-**Scope:** Full system audit comparing production implementation against shadow mode validated behaviour, conversion fidelity, non-HTN visit handling, and hardcoded patient references.  
-**Groq/Layer 3 model choice excluded** — intentional design decision by the team.
+**Date:** 2026-04-23 (revised from 2026-04-22)
+**Verified by:** Code review of `inertia_detector.py`, `deterioration_detector.py`, `adherence_analyzer.py`, `risk_scorer.py`, `processor.py`, `scheduler.py`, `composer.py`, `adapter.py`, `ingestion.py`, `alerts.py`, `PatientList.tsx`
+**Scope:** Production implementation correctness, conversion fidelity, non-HTN visit handling, hardcoded references, detection logic gaps, architectural limitations, and phased fix roadmap.
+
+---
+
+## Verification Notes
+
+All 25 original items verified against production code. Two corrections to the original text:
+- **Item 5 body** — "51 BP clinic visits" corrected to 53 unique clinic dates (65 raw rows, 53 unique dates after deduplication).
+- **Item 4 body** — "26 phone refill calls" was not verifiable from the codebase; restated as approximate.
+
+One item reclassified:
+- **Original Critical item 5** (PULSE/WEIGHT/SpO2 lost) → **High**. The original four Critical items produce incorrect alert output on existing data today using existing schema. SpO2 and weight require new DB columns and a re-ingestion pass before any detector can act on them — making them a Phase 1 ingestion fix, not a standalone output correctness fix.
+
+One Critical item missing from the original audit added:
+- **New item 5** — Comorbidity-adjusted threshold validated at 94.3% in shadow mode was never ported to the production pipeline.
 
 ---
 
 ## Investigation 1 — Does ARIA ignore non-HTN visits?
 
-**Short answer: partially, and in ways that matter clinically.**
+**VERIFIED CORRECT.**
 
-The adapter correctly captures all active conditions from all 124 iEMR visits into Condition resources — CHF, Diabetes, CAD, PVD, etc. all land in `clinical_context.active_problems`. The briefing composer surfaces them in the "Active Problems" section. This part works.
+The adapter correctly captures problem names and ICD-10 codes from all visits into Condition resources. Active problems land in `clinical_context.active_problems`. The briefing surfaces them under "Active Problems." This part works.
 
-**What is ignored:**
+What is ignored: `PROBLEM_STATUS2_FLAG` (1=Red/2=Yellow/3=Green), `PROBLEM_STATUS2` (status text), and `PROBLEM_ASSESSMENT_TEXT` (free-text physician note) are extracted and used by shadow mode but never captured by the production adapter. A visit where the physician wrote "CHF worsening, refer cardiology" produces the same DB entry as "CHF stable, continue current plan."
 
-The physician's clinical assessment of each non-HTN problem per visit is never captured. Each PROBLEM entry in iEMR contains `PROBLEM_STATUS2_FLAG` (1=Red/2=Yellow/3=Green), `PROBLEM_STATUS2` (e.g. "Doing Well"), and `PROBLEM_ASSESSMENT_TEXT` (free text, e.g. "CHF stable, no oedema"). Shadow mode extracts and displays these for non-HTN problems. The production FHIR bundle does not — only the problem name and ICD-10 code survive the conversion. A visit where the physician wrote "CHF worsening, refer cardiology" generates the same DB entry as one where they wrote "CHF stable, continue current plan."
-
-The four Layer 1 detectors are exclusively BP-focused. None of them consider:
-- CHF deterioration signals (weight trend, SpO2)
-- Diabetes control (no HbA1c tracking)
-- Non-HTN medication adherence per condition
-- Physician concern level for any non-HTN condition
-
-For a patient whose primary risk driver on any given day is a CHF exacerbation — not BP — ARIA would fire no alert and generate a briefing that says "28-day avg 128 mmHg, stable." The visit agenda would mention CHF as an active problem but give no indication the physician considered it urgent at the last encounter.
+All four Layer 1 detectors are exclusively BP-focused. A patient whose primary risk driver on a given day is a CHF exacerbation — not BP — generates no alert and a briefing that says "28-day avg 128 mmHg, stable." The visit agenda mentions CHF as an active problem but gives no indication the physician considered it urgent at the last encounter.
 
 ---
 
 ## Investigation 2 — Conversion fidelity: what is lost?
 
-The iEMR data contains far more clinical information than what survives into the FHIR bundle and the database. The following fields exist in the raw iEMR JSON and are **silently discarded** by the adapter.
+**VERIFIED CORRECT** with the two corrections noted above.
 
-### Clinically significant losses
+**Physician visit assessments (PROBLEM level):** `PROBLEM_STATUS2_FLAG`, `PROBLEM_STATUS2`, `PROBLEM_ASSESSMENT_TEXT`, `PROBLEM_SEVERITY_FLAG`, `PROBLEM_NOTE`, `PROBLEM_COMMENT`, `PROBLEM_ONSET_DATE`, `PROBLEM_LAST_MODIFIED_DATE` — all lost.
 
-**Physician visit assessments (PROBLEM level):**
-- `PROBLEM_STATUS2_FLAG` — physician severity rating (1/2/3) per problem per visit. Lost entirely. Shadow mode proved this is the primary ground-truth signal for clinical agreement.
-- `PROBLEM_STATUS2` — status text ("Doing Well", "Under Evaluation", etc.) per problem per visit. Lost.
-- `PROBLEM_ASSESSMENT_TEXT` — free-text physician note per problem per visit. Lost.
-- `PROBLEM_SEVERITY_FLAG`, `PROBLEM_NOTE`, `PROBLEM_COMMENT` — additional clinical context. Lost.
-- `PROBLEM_ONSET_DATE`, `PROBLEM_LAST_MODIFIED_DATE` — when each problem was added and last changed. Lost.
+**Vitals beyond BP:** PULSE (present on all 53 BP visits, relevant to beta-blocker dosing), WEIGHT (including a 12 lb loss over 14 months for this CHF patient), TEMPERATURE, and PULSEOXYGEN (SpO2 84% on November 21 2011 — potentially life-threatening for a CHF patient) — all silently discarded. Adapter `_build_observations()` extracts only `SYSTOLIC_BP` and `DIASTOLIC_BP`.
 
-**Vitals beyond BP:**
-Every clinic visit with BP also has PULSE recorded. Many visits have WEIGHT, TEMPERATURE, and PULSEOXYGEN. None of these are captured in the FHIR bundle. Specific examples of what is lost:
+**Physical examination:** `EXAM_TEXT` (full PE narrative, present on 14+ visits), `ROS_TEXT`, `VISIT_TEXT`, `VISIT_TEXT_GENERATED` — lost.
 
-- **PULSEOXYGEN (SpO2):** On November 21, 2011, this patient had SpO2 of **84%** — a potentially life-threatening finding for a CHF patient. This is completely absent from the database. SpO2 was 84 in November and 93 in December 2011. This trajectory is significant and invisible to ARIA.
-- **WEIGHT:** Patient weighed 170 lbs in July 2010 and 158 lbs in September 2011 — a 12-pound loss over 14 months. For a CHF patient, unexpected weight loss of this magnitude is clinically significant. Completely lost.
-- **PULSE:** All 51 BP clinic visits record the patient's pulse rate (ranging 60–82 bpm). Lost. Directly relevant to metoprolol dosing and arrhythmia surveillance.
-- **TEMPERATURE:** Intermittently recorded. Lost.
+**Allergy detail:** `ALLERGY_REACTION` (e.g., "MYALGIAS" vs "ANAPHYLAXIS") not captured. `ALLERGY_STATUS` not checked — inactive allergies may appear in the briefing.
 
-**Physical examination and review of systems:**
-- `EXAM_TEXT` — full physical examination narrative ("Neck - No carotid bruits, No JVD. Heart - Normal RRR..."). Present on 14+ visits. Lost. For a CHF patient, JVD and heart sounds are primary assessment findings.
-- `ROS_TEXT` — review of systems ("Negative for Night Sweats, Weight Loss, Fatigue..."). Lost.
-- `VISIT_TEXT`, `VISIT_TEXT_GENERATED` — free-text visit notes. Lost.
+**Social context:** `SOCIAL_HX` exists in iEMR. The `clinical_context.social_context` column exists in the schema and ORM model but is never set by the ingestion pipeline — always NULL.
 
-**Allergy detail:**
-- `ALLERGY_REACTION` — the specific reaction to each allergen is not captured. The DB stores "SIMVASTATIN" as an allergy but not that the reaction was "MYALGIAS", or that "BYETTA" caused "Generalized Bad Feeling and Feeling of Dread." These are clinically important for prescribing decisions.
-- `ALLERGY_STATUS` — the adapter captures all allergy entries without checking `ALLERGY_STATUS == "Active"`. Inactive allergies could be included.
+**Plan detail:** `PLAN_FINDINGS_TEXT`, `PLAN_STATUS`, `PLAN_TYPE` lost. All `ServiceRequest` resources inserted with `status: "active"` regardless of actual plan status.
 
-**Social and contextual data:**
-- `SOCIAL_HX` — Social history exists in the iEMR but is not mapped. The `social_context` column exists in the DB schema and the ORM model but is never populated by the ingestion pipeline. It is always NULL.
-- `IMMUNE_HX` — Immunization history. Not captured.
-- `PATIENT_INSTRUCTIONS_TEXT` — What the patient was told at each visit. Not captured.
-
-**Plan/follow-up detail:**
-- `PLAN_FINDINGS_TEXT`, `PLAN_ADJUD_TEXT`, `PLAN_FINDINGS_COMMENT_TEXT` — Test results and adjudication notes. Lost.
-- `PLAN_STATUS`, `PLAN_TYPE` — Whether a plan item is completed or pending. Lost. ServiceRequests are inserted as `status: "active"` regardless.
-
-### Non-clinical losses (lower priority)
-
-- `VISIT_TYPE` — visit category (in-person, phone, annual physical, etc.). Not used anywhere in the pipeline. Shadow mode uses it for context but the production system is blind to whether a visit was a phone call or a face-to-face encounter.
-- `DISCH_DATE` — discharge time (same-day for clinic visits). Not used.
-- `PATIENT_RX_TEXT` — prescription text given to patient. Not used.
+**Visit type:** `VISIT_TYPE` not captured anywhere in the production pipeline. System cannot distinguish phone calls from in-person encounters.
 
 ---
 
 ## Investigation 3 — Hardcoded patient references
 
-### In scripts (operational, not tests)
+**VERIFIED CORRECT.**
 
-| File | Line | Hardcoded value | Impact |
-|---|---|---|---|
-| `scripts/run_shadow_mode.py` | 60 | `PATIENT_ID = "1091"` | Script only works for patient 1091. Cannot validate a second patient without code change. |
-| `scripts/run_shadow_mode.py` | 62 | `IEMR_PATH = .../1091_data.json` | Same — IEMR file path hardcoded. |
-| `scripts/run_ingestion.py` | 73 | Default `--bundle` = `1091_bundle.json` | Second patient requires explicit flag; first patient runs without argument. Inconsistency for multi-patient operation. |
-| `scripts/run_pipeline_tests.py` | 37 | `_DEMO_PATIENT = "1091"` | Pipeline tests run against only this patient. |
-| `scripts/reset_demo.py` | 37 | `_DEMO_PATIENT_ID = "1091"` | Demo reset only resets one patient. Acceptable for demo script but will need updating for multi-patient demo. |
+| File | Hardcoded value | Impact |
+|---|---|---|
+| `scripts/run_shadow_mode.py` | `PATIENT_ID = "1091"`, `IEMR_PATH = .../1091_data.json` | Cannot validate any other patient without code change |
+| `scripts/run_ingestion.py` | Default `--bundle = 1091_bundle.json` | Inconsistency for multi-patient operation |
+| `scripts/run_pipeline_tests.py` | `_DEMO_PATIENT = "1091"` | Pipeline tests single-patient only |
+| `scripts/reset_demo.py` | `_DEMO_PATIENT_ID = "1091"` | Demo reset single-patient only |
 
-`run_adapter.py` and `run_generator.py` already accept `--patient` arguments and are clean. The shadow mode and pipeline test scripts must accept a `--patient` argument to be usable for any patient beyond 1091.
-
-### In backend source code (not tests)
-
-All references to "1091" in backend source are in docstring examples — not in runtime logic. The services themselves take `patient_id: str` as a parameter and are not hardcoded. The backend is clean.
+Backend source code is clean — all services accept `patient_id: str` as a parameter. Only scripts are affected.
 
 ---
 
-## Critical — These will cause wrong clinical output in production
+## Critical — Wrong clinical output in production today
 
-### 1. Production inertia detector uses hard-coded 140 mmHg threshold with no slope check
+### 1. Inertia detector: hard-coded 140 mmHg threshold, no slope check
 **File:** `backend/app/services/pattern_engine/inertia_detector.py` line 32
+**Verified:** `_ELEVATED_THRESHOLD = 140`
 
-Hard-coded population threshold (`_ELEVATED_THRESHOLD = 140`) applies the same standard to all patients regardless of their personal BP history. A patient whose physician has accepted 135 mmHg as their stable level triggers inertia at 141. Shadow mode demonstrated the correct approach is patient-adaptive: `max(130, stable_baseline_mean + 1.5×SD)` capped at 145.
+Hard-coded population threshold applies to all patients regardless of personal BP history. A patient whose physician has accepted 135 mmHg as stable triggers inertia at 141. No slope direction check and no recent 7-day average check — fires even when BP is actively declining, which was the primary false-positive category in shadow mode.
 
-Additionally, there is no slope direction check and no recent 7-day average check. The production detector fires even when BP is actively declining — the exact false-positive category that shadow mode identified and fixed.
+**Fix:** Replace `_ELEVATED_THRESHOLD` with the patient-adaptive threshold proven in shadow mode: `max(130, stable_baseline_mean + 1.5×SD)` capped at 145 mmHg, computed from `clinical_context.historic_bp_systolic` filtered to physician-labeled stable visits. Add a slope direction check: if the 7-day recent average is already below the threshold, do not fire even if the 28-day mean exceeds it. Do this fix together with Fix 4 — both are in the same file.
 
 ---
 
-### 2. Production deterioration detector has no threshold gate
+### 2. Deterioration detector: no absolute threshold gate
 **File:** `backend/app/services/pattern_engine/deterioration_detector.py` line 150
+**Verified:** `deterioration = slope > 0.0 and recent_avg > baseline_avg`
 
-`deterioration = slope > 0.0 and recent_avg > baseline_avg`
+Fires on any positive slope regardless of absolute BP level. A patient rising from 115 to 119 over 14 days triggers a deterioration alert. Shadow mode requires `recent_avg >= patient_threshold` as a necessary third gate.
 
-Fires on any positive slope regardless of absolute BP level. A patient whose BP rises from 115 to 119 over 14 days triggers a DET alert. Shadow mode requires `recent_avg >= patient_threshold` as a necessary gate. Without it, well-controlled patients will generate false deterioration alerts whenever readings drift slightly upward within normal range.
+**Fix:** Add `and recent_avg >= patient_threshold` to the deterioration condition. Derive `patient_threshold` the same way as Fix 1. If historic data is insufficient, fall back to 140. Additionally, add a step-change sub-detector: compare the 7-day rolling mean of the most recent week against the 7-day rolling mean of three weeks ago — if the step exceeds 15 mmHg, flag deterioration regardless of overall linear slope. This catches acute step-changes that 14-day regression smooths over.
 
 ---
 
-### 3. Production adherence analyzer has no treatment-working suppression
+### 3. Adherence analyzer: no treatment-working suppression
 **File:** `backend/app/services/pattern_engine/adherence_analyzer.py` line 110
+**Verified:** Pattern B fires on `high_bp and not low_adherence` with no slope or trajectory check.
 
-Pattern B fires whenever avg_sys ≥ 140 AND adherence ≥ 80%, with no slope check. Shadow mode proved this is a false positive on declining trajectories. A patient whose BP is actively falling from 170 to 135 over 28 days will still trigger Pattern B because the 28-day window mean is above 140, even though treatment is visibly working. The production analyzer fires "possible treatment review" on exactly the patients whose treatment is succeeding.
+A patient whose BP is actively falling from 170 to 135 triggers Pattern B ("possible treatment review warranted") because the 28-day window mean is above 140. This fires on exactly the patients whose treatment is succeeding.
+
+**Fix:** After pattern classification, add a suppression block for Pattern B. Compute the slope over the adaptive window (Fix 28) and the 7-day recent average. If `slope < -0.3 AND recent_7day_avg < patient_threshold AND days_since_med_change <= 42`: suppress Pattern B to `"none"` with interpretation "treatment appears effective — monitoring." The 42-day medication change gate is aligned with Fix 34's titration window (physiologic response to most antihypertensive changes is established within 4–6 weeks) — a shorter 14-day gate fires false positives on patients still titrating. Suppression must not apply when no recent change occurred (root cause of the eliminated false negative in shadow mode: a persistently-elevated slightly-negative-slope patient with no recent change is NOT a succeeding treatment). Do Fix 3 before Fix 11 (writing adherence alerts) so suppression is in place before alerts start writing.
 
 ---
 
-### 4. Production inertia detector ignores `med_history` — uses stale single-date `last_med_change`
+### 4. Inertia detector: ignores `med_history`, uses stale single-date `last_med_change`
 **File:** `backend/app/services/pattern_engine/inertia_detector.py` line 132
+**Verified:** `select(ClinicalContext.last_med_change)` — reads only the ingestion-time snapshot.
 
-`clinical_context.last_med_change` is set at ingestion time from the most recent `authoredOn` across all MedicationRequest resources. Shadow mode revealed the iEMR has 26 phone refill calls and in-person visits that changed medications between clinic dates — all captured correctly in `clinical_context.med_history` (JSONB), but `inertia_detector.py` never reads it. A patient who had a Lasix refill via phone call 5 days ago, where the DB shows `last_med_change = 2013-09-01`, would trigger inertia even though their medication changed last week.
+`clinical_context.last_med_change` is the most recent `authoredOn` across all `MedicationRequest` resources at ingestion time. Phone refill calls and in-person visits that changed medications between clinic dates — all captured in `clinical_context.med_history` JSONB — are invisible to the inertia detector. A patient who had a diuretic refill via phone call 5 days ago would still trigger inertia.
+
+**Fix (core — required):** Replace the `last_med_change` query with a query that reads `ClinicalContext.med_history` JSONB and finds the most recent `date` field across all entries where `date <= first_elevated_reading_date`. Mirrors `_get_last_med_change_at(timeline, cutoff_date)` from shadow mode. The `activity` field already distinguishes add/remove/modify at ingestion time — use `activity` in the gate (any add or modify within the last 42 days counts as a recent change; remove is treated as no recent change unless paired with an add).
+
+**Fix (nice-to-have — deferred):** Parsing dose direction (increase vs decrease) from the `MED_DOSE` free-text field requires a structured dose parser (the strings are inconsistent — "25 MG", "25MG DAILY", "25mg bid", "TITRATE 12.5→25"). Defer to a later phase behind a dedicated `dose_parser.py` module. Do not gate core inertia logic on this. Implement the core fix together with Fix 1 since both touch `inertia_detector.py`.
 
 ---
 
-### 5. Clinically significant vitals lost in conversion
+### 5. Comorbidity-adjusted threshold not applied in production
+**File:** All four detector files under `backend/app/services/pattern_engine/`
+**Status:** NEW — missing from original audit.
+
+Shadow mode validated at 94.3% agreement (33/35, 0 false negatives, 2 false positives) that when cardiovascular and metabolic comorbidities are simultaneously in elevated concern state, lowering the BP threshold by 7 mmHg (floor 130 mmHg) improves clinical agreement. This logic lives only in `scripts/run_shadow_mode.py`. The production detectors use a static threshold regardless of comorbidity state.
+
+**Fix:** Create `backend/app/services/pattern_engine/threshold_utils.py` containing `classify_comorbidity_concern(active_problems, problem_assessments)` and `apply_comorbidity_adjustment(base_threshold, cardio_concern, metabolic_concern)` ported from shadow mode. Each detector calls these functions and uses the adjusted threshold.
+
+Two modes, explicitly labeled:
+- **Full mode (post Fix 7):** `concern_state` derives from the most recent `PROBLEM_STATUS2_FLAG` per problem in `clinical_context.problem_assessments`. Red/Yellow → elevated concern; Green → stable. This is what shadow mode validated at 94.3%.
+- **Degraded mode (pre Fix 7, Phase 2 interim):** `concern_state` falls back to "presence implies elevated concern" using `clinical_context.active_problems` codes alone. Log `threshold_adjustment_mode = "degraded_no_assessments"` on every adjusted threshold computation so downstream reports can distinguish the two modes. Shadow mode agreement is expected to be lower than 94.3% in degraded mode; re-run shadow mode after Fix 7 lands and confirm full-mode agreement recovers.
+
+Also broaden the adjustment trigger: lower the threshold by 7 mmHg when either (a) cardio AND metabolic both in elevated concern (original rule), or (b) any single comorbidity with SEVERE weight in Fix 25 (CHF/Stroke/TIA) is in elevated concern. Rule (b) covers CHF-only and stroke-only patients whom the original rule missed. Floor remains 130 mmHg.
+
+---
+
+## High — Significant gaps affecting clinical correctness or completeness
+
+### 6. PULSE/WEIGHT/SpO2/TEMPERATURE lost in conversion
 **File:** `backend/app/services/fhir/adapter.py` — `_build_observations()`
+**Verified:** Only `SYSTOLIC_BP` and `DIASTOLIC_BP` extracted from VITALS.
 
-Only SYSTOLIC_BP and DIASTOLIC_BP are extracted. PULSE, WEIGHT, TEMPERATURE, and PULSEOXYGEN are silently discarded. For a CHF patient like 1091, a recorded SpO2 of 84% at a clinic visit and a 12-pound weight loss over 14 months are clinically important signals that ARIA is completely blind to. These fields cannot be used in any briefing, alert, or risk scoring because they never reach the database.
+SpO2 of 84% on November 21 2011 is a potentially life-threatening finding for a CHF patient — completely absent from the database. A 12 lb weight loss over 14 months is clinically significant for a CHF patient and invisible to ARIA. Pulse on all 53 BP visits is directly relevant to beta-blocker dosing and arrhythmia surveillance.
+
+**Fix:** Add LOINC-coded Observation resources in `_build_observations()` for PULSE (8867-4), WEIGHT (29463-7), SpO2 (59408-5), and TEMPERATURE (8310-5) alongside existing BP Observations. Add `last_clinic_pulse`, `last_clinic_weight_kg`, `last_clinic_spo2`, and `historic_spo2` columns to `clinical_context` via DB migration. Update `ingestion.py` to extract and store these values. Add an SpO2 < 92% check as a new alert type in the briefing layer for patients with CHF in `problem_codes`.
 
 ---
 
-## High — Significant gaps affecting correctness or completeness
-
-### 6. Physician problem assessments lost in conversion — non-HTN visits invisible to detectors
+### 7. Physician problem assessments lost — clinical concern state invisible
 **File:** `backend/app/services/fhir/adapter.py` — `_build_conditions()`
+**Verified:** Only ICD-10 code and problem name captured. `PROBLEM_STATUS2_FLAG`, `PROBLEM_STATUS2`, `PROBLEM_ASSESSMENT_TEXT` discarded.
 
-Only the ICD-10 code and problem name are captured. `PROBLEM_STATUS2_FLAG`, `PROBLEM_STATUS2`, and `PROBLEM_ASSESSMENT_TEXT` are not mapped to any FHIR field and are lost. The DB has no record of the physician's assessment of any condition at any visit. The briefing shows "CHF" in the active problems list but gives no indication whether the physician last assessed it as "Doing Well" or "Under Evaluation."
-
-All four Layer 1 detectors analyze BP readings and medication confirmations only. They do not trigger on non-HTN clinical deterioration.
+**Fix:** Add non-standard bundle key `_aria_problem_assessments` in the adapter (parallel to `_aria_med_history`). Collect per-visit `{problem_code, visit_date, htn_flag, status_text, assessment_text}` for all problems across all visits. Add `clinical_context.problem_assessments` JSONB column. Ingestion stores it. Briefing composer surfaces the most recent assessment per problem: "CHF — last assessed: Under Evaluation (2026-01-14)." This is exactly how shadow mode uses the data — the pattern is already proven.
 
 ---
 
-### 7. `social_context` column exists in schema but is never populated
+### 8. `social_context` column exists but is never populated
 **Files:** `backend/app/services/fhir/adapter.py`, `backend/app/services/fhir/ingestion.py`
+**Verified:** `cc_values` dict in `ingestion.py` has no `social_context` key. Field is always NULL.
 
-`SOCIAL_HX` data exists in the iEMR. The `clinical_context.social_context` column exists in the ORM model and DB schema. The adapter has no `_build_social_context()` function and the ingestion pipeline never sets this field. It is always NULL. The briefing composer also never includes it even when set.
+**Fix:** Add `_build_social_context(visits)` to `adapter.py` that joins `SOCIAL_HX` text entries across all visits into a structured string. Add `social_context` to the `cc_values` dict in `ingestion.py`. Update `composer.py` to include it in the briefing payload when non-null.
 
 ---
 
-### 8. Allergy reactions and active-status not captured
+### 9. Allergy reactions and active-status not captured
 **File:** `backend/app/services/fhir/adapter.py` — `_build_allergy_intolerances()`
+**Verified:** Only `a.get("code", {}).get("text", "")` stored. Reaction type and status discarded.
 
-Only the allergen name is stored. `ALLERGY_REACTION` (e.g. "MYALGIAS", "LEG CRAMPS", "Generalized Bad Feeling") is discarded. A prescriber sees "SIMVASTATIN" as an allergy but not that the reaction was myalgias — which has different prescribing implications than a rash or anaphylaxis. Additionally, `ALLERGY_STATUS` is not checked, so inactive allergies could appear in the briefing.
+A prescriber sees "SIMVASTATIN" as an allergy but not that the reaction was myalgias — which has different prescribing implications than anaphylaxis. Inactive allergies may appear in the briefing because `ALLERGY_STATUS` is not checked.
+
+**Fix:** Filter on `ALLERGY_STATUS == "Active"` before building each resource. Add `reaction[0].manifestation[0].text` from `ALLERGY_REACTION` to the `AllergyIntolerance` resource. Update `ingestion.py` to store reactions in a parallel `clinical_context.allergy_reactions` array alongside `allergies`.
 
 ---
 
-### 9. No scheduled `pattern_recompute` sweep for all active patients
+### 10. No scheduled `pattern_recompute` sweep for all active patients
 **File:** `backend/app/services/worker/scheduler.py`
+**Verified:** `enqueue_briefing_jobs()` only queries appointment-day patients. No continuous recompute for other patients.
 
-The 7:30 AM scheduler only enqueues `briefing_generation` for appointment-day patients. There is no daily or continuous sweep that runs `pattern_recompute` for all `monitoring_active` patients. Risk scores, alerts, and gap flags are only updated when manually triggered via the admin endpoint. In production, a patient's gap counter increases daily but the alert is never written unless someone manually enqueues a pattern_recompute job.
+In production, a patient's gap counter increases daily but no alert is written unless someone manually triggers a `pattern_recompute`. Risk scores, inertia flags, and deterioration flags are stale for all non-appointment-day patients.
 
----
-
-### 10. Adherence alert type not written to the alerts table
-**File:** `backend/app/services/worker/processor.py` line 197
-
-When adherence Pattern A fires (high BP + low adherence), no Alert row is written. Gap, deterioration, and inertia all write alerts. The briefing's `urgent_flags` section pulls from unacknowledged Alert rows — so an adherence concern never appears as an urgent flag in the briefing even when it is the primary clinical signal.
+**Fix:** Add `enqueue_pattern_recompute_sweep()` to `scheduler.py`. Query all `monitoring_active=TRUE` patients. Enqueue a `pattern_recompute` job for each using idempotency key `pattern_recompute:{patient_id}:{YYYY-MM-DD}`. Schedule via APScheduler at midnight UTC daily. Re-runs are safe via `ON CONFLICT DO NOTHING`.
 
 ---
 
-### 11. `last_visit_date` misses all 71 non-vitals visits
+### 11. Adherence alert not written to the alerts table
+**File:** `backend/app/services/worker/processor.py` lines 197–205
+**Verified:** `_upsert_alert` called for gap, inertia, deterioration — no call for adherence Pattern A.
+
+Adherence Pattern A (`high BP + low adherence`) is the primary clinical signal but never appears as an unacknowledged alert in the alert inbox. The briefing's `urgent_flags` field pulls from unacknowledged Alert rows — so an adherence concern is invisible there even when it is the most important signal.
+
+**Fix:** After computing `adherence` in `_handle_pattern_recompute`, add: `if adherence["pattern"] == "A": await _upsert_alert(session, pid, "adherence")`. Add `"adherence"` to the alert_type enum in the Alert model. Update `_build_urgent_flags()` in `composer.py` to handle the new type. Prerequisite: Fix 3 (treatment-working suppression) must be applied first so Pattern B suppression is in place before adherence alerts start writing.
+
+---
+
+### 12. `last_visit_date` misses 71 non-vitals visits
 **File:** `backend/app/services/fhir/ingestion.py` line 344
+**Verified:** `last_visit_date = eff_dt.date()` set inside the Observation loop — only BP clinic dates considered.
 
-`last_visit_date` is set from the last BP Observation's `effectiveDateTime`. For patient 1091, there are 71 visits with no BP reading (phone calls, in-person without vitals). If the most recent contact was a phone refill call, `last_visit_date` would show the date of the last in-person BP measurement — not the actual last contact date.
+If the patient's most recent contact was a phone refill call, `last_visit_date` shows the date of the last in-person BP measurement, not the actual last contact. This affects gap detection thresholds and the inertia detector's duration calculation.
+
+**Fix:** Add `_aria_visit_dates` as a non-standard bundle key in the adapter — a list of `ADMIT_DATE` values from all 124 visits regardless of type. Ingestion reads this and sets `last_visit_date = max(all_visit_dates)`. Run together with all other Phase 1 adapter changes.
 
 ---
 
-### 12. Shadow mode hardcoded to patient 1091 — cannot validate any other patient
+### 13. Shadow mode hardcoded to patient 1091
 **File:** `scripts/run_shadow_mode.py` lines 60–62
+**Verified:** `PATIENT_ID = "1091"` and `IEMR_PATH` are module-level constants.
 
-`PATIENT_ID = "1091"` and `IEMR_PATH = .../1091_data.json` are constants, not CLI arguments. Once additional patients are added, shadow mode validation cannot be run against them without modifying source code.
+**Fix:** Convert to `argparse` CLI arguments with 1091 as default: `python scripts/run_shadow_mode.py --patient 2045 --iemr data/raw/iemr/2045_data.json`. Same pattern already used by `run_adapter.py` and `run_generator.py`.
 
 ---
 
-### 13. Only one patient in the database
-There is only one patient in the system (1091). The dashboard sort, alert inbox, tier filtering, and risk score comparison are all functionally untested with a real multi-patient dataset.
+### 14. Only one patient in the database
+**Status:** Operational gap for multi-patient validation.
+
+Dashboard sort, alert inbox, tier filtering, and risk score comparison are all untested with a real multi-patient dataset.
+
+**Fix:** Run the full pipeline for at least two additional patients after Fix 13 is applied. Shadow mode validation against additional patients verifies generalizability of the 94.3% agreement rate.
+
+---
+
+### 15. Full care timeline synthetic readings and confirmations not generated
+**Files:** `backend/app/services/generator/reading_generator.py`, `backend/app/services/generator/confirmation_generator.py`
+**Status:** NEW — not in original audit.
+
+The generator produces 28 days of synthetic readings and confirmations anchored on the two most recent clinic BPs. For patient 1091 with 11 years of clinic history, the detectors only see a narrow recent window. Shadow mode validates on inter-visit synthetic readings spanning the full timeline — production has no equivalent. The adaptive window (Fix 28), long-term trend layer (Fix 47), and patient-adaptive threshold (Fix 1) all benefit from a full-timeline reading history. The adherence detector similarly needs full-timeline confirmation history: a patient who missed doses consistently two years ago but is now adherent reads very differently from one with no confirmation history.
+
+**Fix — BP readings:** Add `generate_full_timeline_readings(clinic_readings)` to `reading_generator.py`. For each consecutive pair of clinic readings, generate daily synthetic readings by linearly interpolating between the two BP anchors with Gaussian noise (SD=8–12 mmHg), morning/evening variation (morning 5–10 mmHg higher), device outage episodes (1–2 per inter-visit gap, 2–4 days each), and a white-coat dip in the 3 days before each clinic visit. Store with `source='generated'`, `submitted_by='generator'`. Add generator-level idempotency: skip intervals where generated readings already exist.
+
+**Fix — Medication confirmations:** Add `generate_full_timeline_confirmations(clinic_readings, med_history)` to `confirmation_generator.py`. For each inter-visit interval, generate synthetic daily medication confirmations for every medication active during that interval (derived from `clinical_context.med_history` timeline). Adherence rate per medication should vary realistically across intervals: draw a per-interval adherence rate from a Beta distribution anchored near the patient's known overall adherence (e.g. 91% for patient 1091), with interval-to-interval variation of ±10–15 percentage points. Store with `confirmation_type='synthetic_demo'`. Add idempotency: skip intervals where confirmations for that medication already exist (unique on `patient_id, medication_name, scheduled_time`).
+
+Both generators must be called together from `run_generator.py` and produce records spanning the patient's entire care history — not just the last 28 days. **Prerequisite:** Fix 22 (per-observation idempotency) must be applied first.
+
+---
+
+### 16. Lab values not ingested
+**Status:** NEW — not in original audit.
+
+`clinical_context.overdue_labs` is a text list of lab names with no actual values. Creatinine/eGFR (ACE inhibitor and ARB safety for this patient), potassium (diuretic monitoring — the patient is on Lasix, and the physician's note on Dec 22 2011 specifically mentions "leg cramps" which is a classic hypokalemia symptom), and HbA1c (diabetic comorbidity) are never captured even when available in the EHR.
+
+**Fix:** Add FHIR Observation ingestion for lab LOINC codes: creatinine (2160-0), potassium (2823-3), HbA1c (4548-4), eGFR (62238-1). Add `recent_labs` JSONB column to `clinical_context`. Briefing composer surfaces abnormal values as visit agenda items: "K+ 3.1 mEq/L — diuretic context, review electrolytes." Flag K+ < 3.5 as a visit agenda item for any patient with a diuretic in `current_medications`.
+
+---
+
+### 17. Cold start — new patients get misleading briefings
+**Status:** NEW — not in original audit.
+
+When a patient is first enrolled, there are zero home readings. The inertia, deterioration, and adherence detectors produce null or misleading output. `data_limitations` is populated generically rather than flagging insufficient enrollment age.
+
+**Fix:** At the start of `_handle_pattern_recompute`, if `(now - enrolled_at).days < 21`: skip inertia, deterioration, and adherence detectors; log suppression reason; set `data_limitations` to "Patient enrolled N days ago — minimum 21-day monitoring period required before pattern analysis. Briefing based on EHR data only." Gap detector still runs — zero readings in the first week is itself a gap signal.
+
+The 21-day threshold (not 14) avoids a cliff-edge interaction with Fix 28's adaptive window, whose floor is 14 days. A 14-day cold-start would lift exactly when the adaptive window is at its minimum — giving one overlap day between "no data" and "enough data." 21 days ensures at least 7 days of home readings exist before any detector first runs, even on a weekly-visit patient where the adaptive window floors to 14. Phrased as `days_since_enrollment` rather than `enrolled_at > now - 14 days` for readability.
 
 ---
 
 ## Medium — Gaps affecting demo quality or reliability
 
-### 14. Briefing composer re-implements inertia logic independently with wrong threshold
-**File:** `backend/app/services/briefing/composer.py` line 358
+### 18. Briefing composer re-implements inertia logic with wrong threshold
+**File:** `backend/app/services/briefing/composer.py` — `_build_visit_agenda()` line 359
+**Verified:** `avg_sys >= _ELEVATED_SYSTOLIC and days_since > _INERTIA_DAYS` with `_ELEVATED_SYSTOLIC = 140.0` — duplicates the inertia detector with the same hard-coded threshold problem.
 
-The visit agenda's "Review treatment plan" item checks `avg_sys >= 140 AND days_since_med_change > 7` — independent of the Layer 1 inertia detector output, and with the same hard-coded threshold problem as item 1. The composer should consume Layer 1 detector output rather than re-implementing the check.
+**Fix:** Remove the inline inertia check from `_build_visit_agenda`. Pass the Layer 1 `InertiaResult` dict into `compose_briefing()` and consume `inertia_result["inertia_detected"]` directly. Do Fix 1 first.
 
 ---
 
-### 15. Reading generator only supports a single fixed scenario
+### 19. Reading generator supports only a single fixed scenario
 **File:** `backend/app/services/generator/reading_generator.py` line 361
+**Verified:** Audit claim confirmed — generator uses a hardcoded baseline of ~163 mmHg.
 
-Only `scenario="patient_a"` is supported. Generation is hardcoded to a baseline of ~163 mmHg. For any second patient with different clinic BP anchors, the generator must be extended with a parametric baseline from the patient's own `historic_bp_systolic`. Adding more patients is currently blocked by this.
+**Fix:** Replace the hard-coded scenario baseline with a parametric baseline derived from `clinical_context.historic_bp_systolic`. Generator computes `baseline_mean = median(historic_bp_systolic)` and baseline SD from the patient's actual clinic BP history. This is a prerequisite for Fix 15 (full timeline generation).
 
 ---
 
-### 16. Briefing appointment date parsed from idempotency key rather than patient record
+### 20. Briefing appointment date parsed from idempotency key
 **File:** `backend/app/services/worker/processor.py` line 247
+**Verified:** `date_str = job.idempotency_key[-10:]`
 
-`date_str = job.idempotency_key[-10:]` — the appointment date is today's date (set by the scheduler when it enqueues the job). If the admin trigger is used on a day other than the patient's actual appointment date, the briefing is recorded with the wrong `appointment_date`. The composer should read `patient.next_appointment.date()`.
+If the admin trigger fires on a day other than the patient's actual appointment, the briefing records the wrong `appointment_date`.
 
----
-
-### 17. `next_appointment` has no update mechanism
-After a patient's appointment passes, `next_appointment` is not updated. The scheduler will never fire for them again. `reset_demo.py` manually patches this but only for patient 1091.
+**Fix:** Replace `date_str = job.idempotency_key[-10:]` with a DB query: `patient.next_appointment.date()`. Fall back to today if `next_appointment` is None (preserving demo-mode behavior).
 
 ---
 
-### 18. Readings ingestion uses batch-level idempotency
+### 21. No `next_appointment` update mechanism
+**Verified:** No endpoint or worker task in the codebase advances `next_appointment` after a visit passes.
+
+**Fix:** Add `PATCH /api/patients/{patient_id}/appointment` endpoint accepting `next_appointment: datetime`. Call this after each visit (manually in demo, via EHR webhook in production). `reset_demo.py` continues to patch it for demo purposes.
+
+---
+
+### 22. Readings ingestion uses batch-level idempotency
 **File:** `backend/app/services/fhir/ingestion.py` line 383
+**Verified:** `if clinic_count == 0: (insert all)` — any existing clinic readings block all new inserts for that patient.
 
-If any clinic readings exist for a patient, the entire batch is skipped. Adding a new clinic visit to an existing patient's record requires manually deleting all existing clinic readings first.
+Adding a new clinic visit to an existing patient requires manually deleting all existing clinic readings first.
+
+**Fix:** Replace the batch COUNT check with per-observation idempotency. Add a unique index on `(patient_id, effective_datetime, source)`. Insert each observation with `ON CONFLICT DO NOTHING`. New clinic readings from a subsequent visit insert cleanly alongside existing ones. **This fix is a prerequisite for Fix 15** (full timeline generation).
 
 ---
 
-### 19. PatientList shows briefing icon only for today's appointments
+### 23. Briefing icon only active for today's appointments
 **File:** `frontend/src/components/dashboard/PatientList.tsx` line 69
+**Verified:** `apptToday = patient.next_appointment && isToday(patient.next_appointment)`
 
-The `FileText` icon is active only when `isToday(patient.next_appointment)`. A clinician reviewing the next day's schedule sees no briefing indicator even if briefings exist for those patients.
+A clinician reviewing tomorrow's schedule sees no briefing indicators even if briefings exist for those patients.
+
+**Fix:** Change the briefing icon condition to whether a briefing exists for this patient, not whether the appointment is today. Add a `has_briefing` boolean to the patient list API response (or a separate `GET /api/briefings/{patient_id}/latest` call). The icon activates whenever a briefing row exists, regardless of appointment date.
 
 ---
 
-### 20. Alert API has no patient_id filter
+### 24. Alert API has no `patient_id` filter
 **File:** `backend/app/api/alerts.py` line 25
+**Verified:** `GET /api/alerts` returns all unacknowledged alerts system-wide with no filter.
 
-`GET /api/alerts` returns all unacknowledged alerts system-wide. With multiple patients, this is a firehose. No `?patient_id=` filter exists.
+With multiple patients, this becomes a firehose with no way to scope to one patient.
+
+**Fix:** Add optional `?patient_id=` query parameter. If provided, add `Alert.patient_id == patient_id` to the WHERE clause. Calls without the parameter continue returning all alerts (inbox behavior).
 
 ---
 
-### 21. Comorbidity risk score signal saturates far too early
+### 25. Comorbidity risk score saturates at 5 problems
 **File:** `backend/app/services/pattern_engine/risk_scorer.py` line 161
+**Verified:** `sig_comorbidity = _clamp(_comorbidity_count(context) / 5.0 * 100.0)` — patient 1091 has 17 coded problems, maxing out this signal at 5.
 
-`sig_comorbidity = clamp(problem_count / 5.0 × 100)` — any patient with 5+ problems scores 100 on this signal. Patient 1091 has 17 coded problems. Every complex patient maxes out this signal, making it useless for differentiation.
+Every complex patient scores 100 on this signal, making it useless for differentiation within the high-risk cohort.
+
+**Fix:** Replace linear count with a severity-weighted model loosely grounded in the Charlson Comorbidity Index weighting (which assigns CHF and stroke sequelae weight 2, diabetes and CKD weight 1–2, "any other" weight 1). The ARIA mapping is scaled so the dashboard signal differentiates within the high-risk cohort:
+
+- CHF (I50), Stroke (I63/I64), TIA (G45): 25 points each (Charlson weight ≈2 / severe hemodynamic or neurologic risk)
+- Diabetes (E11), CKD (N18), CAD (I25): 15 points each (Charlson weight ≈1–2 / moderate end-organ risk)
+- Any other coded problem: 5 points each (Charlson weight ≈1 / routine chronicity)
+
+Total clamped to 100. This gives CHF + Diabetes a score of 40/100 on this signal, vs. CHF + Stroke at 50/100 — meaningful clinical differentiation rather than a count cap. Weights are documented as ARIA-specific (not a Charlson score) and subject to clinician calibration via Fix 42 Layer 2 once feedback data accumulates.
+
+---
+
+### 26. Pattern B suppression missing medication-change condition
+**File:** `backend/app/services/pattern_engine/adherence_analyzer.py`
+**Status:** NEW — not in original audit.
+
+Without a medication-change gate, a patient with persistently elevated BP and a slightly negative slope (due to noise) incorrectly suppresses Pattern B — this was the root cause of the false negative in shadow mode before it was fixed. The gate must tie suppression to "a recent change the physician made that is plausibly still taking effect."
+
+**Fix:** In the Pattern B suppression block (part of Fix 3), add `AND days_since_med_change <= 42` as a required condition. The 42-day window aligns with Fix 34's titration window (the physiologic response to most antihypertensive changes is established within 4–6 weeks) — using a shorter 14-day window would fire false positives on patients who had a change 20–40 days ago and are now succeeding. The adherence analyzer reads `clinical_context.med_history` to find the most recent medication date (consistent with Fix 4). If no medication change exists or the change is older than 42 days, suppression does not apply.
+
+---
+
+### 27. White-coat pre-visit window not excluded from threshold comparisons
+**File:** `backend/app/services/pattern_engine/inertia_detector.py`, `deterioration_detector.py`
+**Status:** NEW — not in original audit.
+
+Readings within 3 days of `patients.next_appointment` are known to be suppressed (the synthetic generator explicitly models a white-coat dip). These readings are included in window computations, pulling the mean downward and potentially suppressing a legitimate flag.
+
+**Fix:** After querying readings in both detectors, filter out readings where `effective_datetime >= (next_appointment - timedelta(days=5))`. Pass `next_appointment` into the detectors. The 5-day exclusion window aligns with CLAUDE.md's synthetic generator rule (dip spans 3–5 days before appointment) — a 3-day window leaks dip-influenced days 4–5 into threshold computation. When `next_appointment` is None, no exclusion is applied. Excluded readings remain in the DB and visible in the briefing trend — they are only excluded from threshold comparison computation.
+
+---
+
+### 28. 28-day window does not adapt to visit interval
+**Status:** NEW — not in original audit.
+
+All four detectors use a fixed 28-day window regardless of whether the patient is seen monthly, quarterly, or weekly. For a patient seen every 90 days, ARIA analyzes only the last third of the inter-visit period. Shadow mode demonstrated this clearly: the Nov 2008 – Feb 2009 pneumonia gap spanned 99 days, and any fixed 28-day window misses the clinical picture the physician was responding to.
+
+**Fix:** Compute `window_days` with explicit null-handling:
+
+```
+if next_appointment is None or last_visit_date is None:
+    window_days = 28   # fallback default — preserves legacy behavior
+else:
+    interval = (next_appointment - last_visit_date).days
+    if interval <= 0:         # appointment already passed or same-day — unreliable
+        window_days = 28
+    else:
+        window_days = min(90, max(14, interval))
+```
+
+Use this in place of the hard-coded `_WINDOW_DAYS = 28` in all four detector queries. Cap at 90 to bound computation and generator data requirements. Floor at 14 so short inter-visit intervals don't degenerate. All four detectors receive the same window value for consistency. Log `window_days_source` ("adaptive" vs "fallback_default") alongside each detector result for observability. **Prerequisite:** Fix 15 (full timeline readings) must be complete so generated data exists for longer lookback windows on patients with large inter-visit intervals.
 
 ---
 
 ## Low — Polish and minor issues
 
-### 22. `social_context` never surfaced in briefing even when populated
+### 29. `social_context` never surfaced in briefing even when populated
 **File:** `backend/app/services/briefing/composer.py`
+**Fix:** Add social context to the briefing payload as a `patient_context` field when non-null. One addition to `compose_briefing()` after Fix 8 populates the column.
 
-The column exists, the ORM model exposes it, but `compose_briefing()` never includes it in any briefing field.
+---
 
-### 23. `delivered_at` on alerts is never set
-**Files:** `backend/app/services/worker/processor.py`, `backend/app/api/alerts.py`
+### 30. `delivered_at` on alerts is never set
+**Files:** `backend/app/services/worker/processor.py`
+**Verified:** `_upsert_alert()` never sets `delivered_at`. Serializer always returns it as None.
 
-Always NULL despite being in the schema and serializer.
+**Fix:** Set `delivered_at = datetime.now(UTC)` on the Alert object at insert time inside `_upsert_alert()`. The alert is "delivered" at creation.
 
-### 24. Frontend and backend both sort the patient list independently
+---
+
+### 31. Frontend and backend both sort the patient list independently
 **Files:** `backend/app/api/patients.py`, `frontend/src/components/dashboard/PatientList.tsx`
+**Verified:** `sortPatients()` function confirmed in PatientList.tsx.
 
-Duplicate logic — if they ever diverge the sort order changes silently.
+**Fix:** Remove `sortPatients()` from `PatientList.tsx`. Rely entirely on backend sort order (`risk_tier ASC`, `risk_score DESC`). Backend is authoritative. If sort logic ever diverges, the frontend silently overrides it.
 
-### 25. `run_ingestion.py` default bundle path hardcoded to 1091
+---
+
+### 32. `run_ingestion.py` default bundle path hardcoded to 1091
 **File:** `scripts/run_ingestion.py` line 73
+**Fix:** Remove the default value for `--bundle`. Require explicit supply. Add a usage example in `--help`.
 
-Default `--bundle` argument is `data/fhir/bundles/1091_bundle.json`. With multiple patients, there is no neutral default.
+---
+
+### 33. Shadow mode window overlap not reported in summary
+**Status:** NEW — not in original audit.
+
+Two evaluation points closer than 28 days apart share overlapping synthetic reading windows. The 35 labeled evaluation points are not fully independent — the effective independent sample is smaller than 35, though the 94.3% result is still valid.
+
+**Fix:** Add to the shadow mode summary output: count evaluation points where `days_since_prior_eval_point >= 28` (fully independent) vs. those with overlap. Report as: "Fully independent evaluation points: N/35." No algorithm change required.
+
+---
+
+### 34. Medication titration timing not surfaced in briefing
+**Status:** NEW — not in original audit.
+
+When a medication was changed 25 days ago, the inertia detector correctly does not fire. But the briefing gives no structured signal that the patient is in a titration period. The physician has no indication that current elevated readings may still be responding to a recent change.
+
+**Fix:** In `_build_medication_status()` in `composer.py`, when `days_since_med_change <= 42`: append "— within expected titration window, full response may not yet be established." Informs the physician without making a clinical judgment. One conditional string append.
+
+---
+
+## Infrastructure and Security
+
+### 35. Patient research ID pseudonymization unverified
+**Status:** NEW.
+
+The raw iEMR `MED_REC_NO` (`1091`) is used as `patient_id` throughout the DB and logs. For the current de-identified research dataset, this is the hospital record number. If it can be cross-referenced with hospital records by anyone with DB or log access, the de-identification is incomplete.
+
+**Fix:** Verify the `patient_id` in the patients table is a research pseudonym, not the actual MED_REC_NO. If it is `1091`, replace it at the adapter level with a generated pseudonym (e.g., `ARIA-001`) before any demo with external observers. Also verify no log line emits the raw MED_REC_NO at INFO level.
+
+---
+
+### 36. JWT token expiry not verified
+**Fix:** Confirm the JWT access token expiry is ≤ 1 hour in the auth configuration. Document the current setting. A leaked 7-day token gives a 168× larger exposure window than a 1-hour token.
+
+---
+
+### 37. No API rate limiting
+**Fix:** Add `slowapi` middleware to FastAPI. Limits: `POST /api/readings` at 60/minute per patient, `POST /api/ingest` at 5/minute, `GET /api/alerts` at 30/minute. Protects against misconfigured clients flooding the readings table.
+
+---
+
+### 38. Audit enforcement is application-level only
+**Fix:** Add a PostgreSQL trigger on the `readings` table that inserts an `audit_events` row on every INSERT so a direct DB write or an application bug still produces an audit record. A naive trigger cannot replicate the structured fields the application-level audit populates (`actor_id`, `request_id`, `details`) — these must be threaded through via PostgreSQL `SET LOCAL` session variables set by the application at the start of each request (`SET LOCAL aria.actor_id = '...'`; `SET LOCAL aria.request_id = '...'`). The trigger reads them via `current_setting('aria.actor_id', true)` and defaults to `system` / NULL when unset (e.g., direct DB writes). This requires a small application-layer helper that sets the session variables inside each DB transaction — not "no application code change" as originally stated. Document the trigger behaviour as a safety net with reduced fidelity for non-application writes.
+
+---
+
+### 39. No multi-factor authentication
+**Fix:** Enable TOTP MFA in Supabase Auth. Clinicians enroll an authenticator app on first login. Configuration change in Supabase dashboard — no backend code change required.
+
+---
+
+### 40. No dead-letter queue for failed jobs
+**File:** `backend/app/services/worker/processor.py`
+**Fix:** Add retry logic in `_process_one()`. Track retry count in `error_message` or a new `retry_count` column. Retry up to 3 times with exponential backoff: 30s, 2m, 8m. After 3 failures, set status to `dead`. Add `GET /api/admin/dead-jobs` for inspection. Surface a dashboard indicator when any job reaches `dead` status.
+
+---
+
+## New Clinical Features (production readiness)
+
+### 41. Gap detector cannot distinguish device outage from non-compliance
+**Fix:** Add a `gap_explanations` table: `patient_id`, `start_date`, `end_date`, `reason_code` (enum: `device_malfunction`, `device_lost`, `travelling`, `illness`, `intentional_pause`, `forgot`), `reported_at`, `free_text`. Add `POST /api/gap-explanations` endpoint for patient submission (retroactive reporting supported). Gap detector checks this table before classifying: travel → `EXPLAINED — travel` (low priority); illness → alert retained but labeled with context; "forgot" → tracked as non-compliance without suppressing the alert. Add a consistency flag if readings resume from the same BLE source shortly after a "device broken" report. Patient-facing submission (Fix 43) is a prerequisite.
+
+---
+
+### 42. No feedback loop — ARIA cannot learn from clinician responses
+**Fix (three layers, implement in order):**
+
+**Layer 1:** Extend alert acknowledge endpoint to accept `disposition` (`agree_acting`, `agree_monitoring`, `disagree`) and optional `reason_text`. Store in new `alert_feedback` table: `alert_id`, `disposition`, `clinician_id`, `patient_id`, `detector_type`, `reason_text`, `created_at`.
+
+**Layer 2:** When a detector accumulates 4+ dismissals of the same type for the same patient, surface a calibration recommendation in the admin dashboard. Clinician approves or rejects. Approved rules stored in `calibration_rules` table with provenance: who approved, when, based on how many dismissals. Production detectors read rules at query time. No automatic self-modification — every threshold change requires explicit clinician approval.
+
+**Layer 3:** When a clinician dismisses an alert, track the patient for 30 days. If a concerning event follows (deterioration cluster, urgent visit), prompt the clinician: "Alert dismissed on [date] — patient had a deterioration event 12 days later. Was the alert relevant in retrospect?" Retrospective labels feed back into Layer 2 calibration evidence.
+
+---
+
+### 43. No patient-facing readings submission interface
+**Fix:** Add a `/patient` route in Next.js outside clinician auth. Form with systolic, diastolic, heart rate, session (morning/evening/ad_hoc), and optional symptom flags (headache, dizziness, chest pain, shortness of breath). POST to existing `/api/readings`. Patient authenticates with their research ID. Chest pain triggers an immediate escalation alert regardless of BP value.
+
+---
+
+### 44. BLE connector not built
+**Fix (Option A — manufacturer cloud webhook, fastest):** Register with cuff vendor developer program (Omron Connect, Withings Health). Configure webhook to POST on each BP measurement. Transform payload to ARIA reading schema and call `POST /api/readings` with `source='ble_auto'`. No BLE SDK required.
+**Fix (Option B — direct BLE SDK):** Implement CoreBluetooth (iOS) or Android BLE API reading standard BP cuff Bluetooth profiles. Requires mobile app. `source='ble_auto'` already exists in the readings schema for either path.
+
+---
+
+### 45. No escalation pathway for unacknowledged urgent alerts
+**Fix:** Add time-based escalation in the daily worker sweep (Fix 10). If `gap_urgent` or `deterioration` remains unacknowledged for 24 hours, promote to `escalated` status and send email notification to secondary clinician or admin. Tag alerts generated between 6 PM–8 AM or on weekends as `off_hours`. Display with a distinct visual indicator when clinician next logs in, so overnight alerts are not buried by morning activity.
+
+---
+
+### 46. No between-visit mini-briefing for urgent alerts
+**Fix:** When a `gap_urgent` or `deterioration` alert fires between visits, generate a mini-briefing: the specific detector output, the 7-day synthetic trend, the current clinical snapshot. Store as a `Briefing` row with `appointment_date = None`. Clinician receives actionable context without waiting for the 7:30 AM appointment-day briefing.
+
+---
+
+### 47. Long-term trend not surfaced in briefing
+**Fix:** In `compose_briefing()`, after computing the 28-day trend, compute a secondary 90-day trajectory from `clinical_context.historic_bp_systolic` and `historic_bp_dates`. Append to `trend_summary`: "3-month trajectory: declining from 170 in January — improvement trend" or "3-month trajectory: stable elevation since November." Requires Fix 28 (adaptive window) and Fix 15 (full timeline readings) as prerequisites.
+
+---
+
+## Implementation Roadmap
+
+Phases are ordered so that no fix depends on an incomplete prerequisite. Fixes within a phase can run in parallel.
+
+---
+
+### Phase 0 — Standalone correctness fixes
+No dependencies. Fix wrong output on current data. No re-ingestion required. Start here.
+
+| # | Fix | File | Size |
+|---|---|---|---|
+| 2 | Add threshold gate to deterioration detector | deterioration_detector.py | 1 line |
+| 3 | Pattern B treatment-working suppression | adherence_analyzer.py | ~15 lines |
+| 26 | Add 42-day med change condition to Pattern B suppression | adherence_analyzer.py | 2 lines |
+| 11 | Write adherence alert row in processor | processor.py | 3 lines |
+| 30 | Set `delivered_at` on alert insert | processor.py | 1 line |
+| 20 | Read appointment date from patient record | processor.py | 5 lines |
+| 25 | Fix comorbidity risk score saturation | risk_scorer.py | 5 lines |
+
+After Phase 0: trigger `pattern_recompute` via admin endpoint to refresh all production scores and alerts with the corrected logic.
+
+---
+
+### Phase 1 — Ingestion data fixes
+Apply all changes to `adapter.py` and `ingestion.py` together. Re-ingest once after all Phase 1 fixes are complete.
+
+| # | Fix | Files |
+|---|---|---|
+| 12 | Capture all visit dates for `last_visit_date` | adapter.py, ingestion.py |
+| 8 | Populate `social_context` | adapter.py, ingestion.py |
+| 9 | Allergy reactions + active-status filter | adapter.py, ingestion.py |
+| 7 | Capture physician problem assessments | adapter.py, ingestion.py, clinical_context model |
+| 6 | Capture PULSE/WEIGHT/SpO2 (+ DB migration for new columns) | adapter.py, ingestion.py, migration |
+
+After Phase 1: `python scripts/run_adapter.py` → `python scripts/run_ingestion.py`. Verify `clinical_context` fields updated.
+
+---
+
+### Phase 2 — Detector and briefing fixes
+Apply after Phase 1 data is in the DB. Fixes 1, 4, 5, 27, and 28 all touch the same two detector files (`inertia_detector.py`, `deterioration_detector.py`) and should be applied together to avoid four-touch churn. Fix 28 is included here with a conservative fallback so the code can ship before Fix 15's full-timeline data exists: when the requested window exceeds available readings, the detector logs `window_truncated_to_available` and uses the available range. Once Fix 15 lands in Phase 3, the adaptive window silently starts benefiting from the longer lookback — no further code change needed.
+
+| # | Fix | Files |
+|---|---|---|
+| 1, 4 | Patient-adaptive threshold + `med_history` in inertia detector | inertia_detector.py |
+| 18 | Remove duplicate inertia from briefing composer | composer.py |
+| 5 | Apply comorbidity-adjusted threshold to production detectors (degraded mode until Fix 7 full mode) | threshold_utils.py (new), all 4 detectors |
+| 2 (ext) | Add step-change sub-detector to deterioration | deterioration_detector.py |
+| 27 | Exclude white-coat pre-visit window (5 days) | inertia_detector.py, deterioration_detector.py |
+| 28 | Adaptive window with conservative fallback when full-timeline data absent | all 4 detectors |
+| 29 | Surface social context in briefing | composer.py |
+| 34 | Surface medication titration timing in briefing | composer.py |
+
+After Phase 2: run shadow mode. Agreement rate should be at 94.3% or better with production detectors.
+
+---
+
+### Phase 3 — Generator expansion
+Fix 22 (per-observation idempotency) is the gate for all generator work.
+
+| # | Fix | Files |
+|---|---|---|
+| 22 | Per-observation idempotency (prerequisite) | ingestion.py |
+| 19 | Parametric baseline from patient clinic BPs | reading_generator.py |
+| 15 | Full care timeline synthetic readings | reading_generator.py, run_generator.py |
+| 17 | Cold start detection (< 21 days → suppress detectors) | processor.py |
+
+After Phase 3: `python scripts/run_generator.py` for all patients. Verify readings table has full-timeline generated readings spanning the patient's entire care history. Fix 28's adaptive window (already in Phase 2) silently starts using the longer lookback once full-timeline data exists.
+
+---
+
+### Phase 4 — Scheduler and worker
+
+| # | Fix | Files |
+|---|---|---|
+| 10 | Daily `pattern_recompute` sweep for all active patients | scheduler.py |
+| 21 | `next_appointment` update endpoint | patients.py API |
+| 47 | Long-term trend layer in briefing | composer.py |
+| 46 | Mini-briefing for between-visit urgent alerts | processor.py, composer.py |
+| 40 | Dead-letter queue (max 3 retries) | processor.py |
+
+---
+
+### Phase 5 — API and alert improvements
+
+| # | Fix | Files |
+|---|---|---|
+| 24 | Alert `patient_id` filter | alerts.py |
+| 42 (L1) | Alert disposition on acknowledge (feedback loop Layer 1) | alerts.py, new `alert_feedback` table |
+| 41 | Gap explanations table and API | new table, new API route |
+| 13 | Shadow mode CLI argument | run_shadow_mode.py |
+| 32 | Remove `run_ingestion.py` default bundle | run_ingestion.py |
+| 33 | Shadow mode window overlap reporting | run_shadow_mode.py |
+
+---
+
+### Phase 6 — Frontend
+
+| # | Fix | Files |
+|---|---|---|
+| 23 | Briefing icon for any briefing, not just today | PatientList.tsx |
+| 31 | Remove duplicate frontend sort | PatientList.tsx |
+| 14 | Multi-patient pagination and tier filter | dashboard components |
+| new | Shadow mode drill-down per visit | shadow mode frontend page |
+| new | Push notifications via Web Push service worker | Next.js |
+
+---
+
+### Phase 7 — New clinical features
+
+| # | Feature |
+|---|---|
+| 43 | Patient-facing reading submission + symptom flags |
+| 45 | Escalation pathway + off-hours alert tagging |
+| 42 (L2) | Feedback loop Layer 2: calibration recommendations |
+| 42 (L3) | Feedback loop Layer 3: 30-day outcome verification |
+| 44 | BLE webhook connector |
+
+---
+
+### Phase 8 — Infrastructure and security
+
+| # | Fix |
+|---|---|
+| 35 | Verify patient research ID pseudonymization |
+| 36 | Confirm JWT expiry ≤ 1 hour |
+| 37 | Add API rate limiting (slowapi) |
+| 38 | DB-level audit trigger on readings table |
+| 39 | Enable MFA in Supabase Auth |
+| 16 | Lab values ingestion (FHIR Observation, LOINC codes) |
+| new | EHR adapter generalization (generic FHIR R4, not iEMR-specific) |
+| new | Seasonal BP threshold adjustment (+3–5 mmHg in Dec–Feb) |
 
 ---
 
 ## Summary Table
 
-| # | Category | Severity | File |
-|---|---|---|---|
-| 1 | Inertia: hard-coded 140 threshold, no slope check | Critical | inertia_detector.py |
-| 2 | Deterioration: no threshold gate | Critical | deterioration_detector.py |
-| 3 | Adherence: no treatment-working suppression | Critical | adherence_analyzer.py |
-| 4 | Inertia: ignores med_history, uses stale last_med_change | Critical | inertia_detector.py |
-| 5 | PULSE/WEIGHT/SpO2/TEMPERATURE lost in conversion | Critical | adapter.py |
-| 6 | Physician problem assessments (flag/status/text) lost — non-HTN invisible | High | adapter.py |
-| 7 | social_context column never populated | High | adapter.py / ingestion.py |
-| 8 | Allergy reactions and active-status not captured | High | adapter.py |
-| 9 | No scheduled pattern_recompute sweep | High | scheduler.py |
-| 10 | Adherence alert not written to DB | High | processor.py |
-| 11 | last_visit_date misses 71 non-vitals visits | High | ingestion.py |
-| 12 | Shadow mode hardcoded to patient 1091 | High | run_shadow_mode.py |
-| 13 | Only one patient in the database | High | data |
-| 14 | Briefing composer re-implements inertia with wrong threshold | Medium | composer.py |
-| 15 | Reading generator: only one fixed scenario, can't support new patients | Medium | reading_generator.py |
-| 16 | Briefing appointment date from idempotency key, not patient record | Medium | processor.py |
-| 17 | No next_appointment update mechanism | Medium | patients API |
-| 18 | Readings batch-level idempotency blocks adding new clinic visits | Medium | ingestion.py |
-| 19 | Briefing icon reflects today-only, not briefing existence | Medium | PatientList.tsx |
-| 20 | Alert API has no patient_id filter | Medium | alerts.py |
-| 21 | Comorbidity score saturates at 5 problems | Medium | risk_scorer.py |
-| 22 | social_context never used in briefing | Low | composer.py |
-| 23 | delivered_at never set on alerts | Low | processor.py / alerts.py |
-| 24 | Double sort (backend + frontend) | Low | PatientList.tsx |
-| 25 | run_ingestion.py default bundle hardcoded to 1091 | Low | run_ingestion.py |
+| # | Severity | Description | File(s) | Phase |
+|---|---|---|---|---|
+| 1 | Critical | Inertia: hard-coded 140 threshold, no slope check | inertia_detector.py | 2 |
+| 2 | Critical | Deterioration: no threshold gate | deterioration_detector.py | 0 |
+| 3 | Critical | Adherence: no treatment-working suppression | adherence_analyzer.py | 0 |
+| 4 | Critical | Inertia: ignores med_history | inertia_detector.py | 2 |
+| 5 | Critical | Comorbidity threshold not in production | all detectors | 2 |
+| 6 | High | PULSE/WEIGHT/SpO2 lost in conversion | adapter.py, ingestion.py | 1 |
+| 7 | High | Physician problem assessments lost | adapter.py, ingestion.py | 1 |
+| 8 | High | social_context never populated | adapter.py, ingestion.py | 1 |
+| 9 | High | Allergy reactions + active-status not captured | adapter.py | 1 |
+| 10 | High | No scheduled pattern_recompute sweep | scheduler.py | 4 |
+| 11 | High | Adherence alert not written to DB | processor.py | 0 |
+| 12 | High | last_visit_date misses 71 non-vitals visits | ingestion.py | 1 |
+| 13 | High | Shadow mode hardcoded to patient 1091 | run_shadow_mode.py | 5 |
+| 14 | High | Only one patient in DB | data | 5 |
+| 15 | High | Full care timeline readings not generated | reading_generator.py | 3 |
+| 16 | High | Lab values not ingested | adapter.py, ingestion.py | 8 |
+| 17 | High | Cold start misleading briefings | processor.py | 3 |
+| 18 | Medium | Briefing composer re-implements inertia with wrong threshold | composer.py | 2 |
+| 19 | Medium | Generator: single fixed scenario | reading_generator.py | 3 |
+| 20 | Medium | Appointment date from idempotency key | processor.py | 0 |
+| 21 | Medium | No next_appointment update mechanism | patients.py | 4 |
+| 22 | Medium | Batch-level idempotency blocks new clinic visits | ingestion.py | 3 |
+| 23 | Medium | Briefing icon today-only | PatientList.tsx | 6 |
+| 24 | Medium | Alert API no patient_id filter | alerts.py | 5 |
+| 25 | Medium | Comorbidity score saturates at 5 problems | risk_scorer.py | 0 |
+| 26 | Medium | Pattern B suppression missing 42-day med change condition | adherence_analyzer.py | 0 |
+| 27 | Medium | White-coat window not excluded from threshold comparisons | detectors | 2 |
+| 28 | Medium | 28-day window does not adapt to visit interval | all detectors | 2 |
+| 29 | Low | social_context never in briefing | composer.py | 2 |
+| 30 | Low | delivered_at never set on alerts | processor.py | 0 |
+| 31 | Low | Duplicate sort backend + frontend | PatientList.tsx | 6 |
+| 32 | Low | run_ingestion.py default bundle hardcoded | run_ingestion.py | 5 |
+| 33 | Low | Shadow mode window overlap not reported | run_shadow_mode.py | 5 |
+| 34 | Low | Medication titration timing not in briefing | composer.py | 2 |
+| 35 | Infra | Patient research ID pseudonymization unverified | DB config | 8 |
+| 36 | Infra | JWT expiry not verified | auth config | 8 |
+| 37 | Infra | No API rate limiting | FastAPI middleware | 8 |
+| 38 | Infra | Audit enforcement application-level only | DB trigger | 8 |
+| 39 | Infra | No MFA | Supabase Auth | 8 |
+| 40 | Infra | No dead-letter queue | processor.py | 4 |
+| 41 | Feature | Gap explanations (device vs non-compliance) | new table + API | 5 |
+| 42 | Feature | Feedback loop (3 layers) | new tables + API | 5–7 |
+| 43 | Feature | Patient-facing submission interface | Next.js | 7 |
+| 44 | Feature | BLE connector | new | 7 |
+| 45 | Feature | Escalation pathway + off-hours tagging | processor.py, alerts | 7 |
+| 46 | Feature | Mini-briefing for between-visit alerts | processor.py | 4 |
+| 47 | Feature | Long-term trend layer in briefing | composer.py | 4 |
 
-The five critical items (1–5) affect clinical output correctness in live production. Items 6–8 represent meaningful data that already exists in the iEMR but is silently discarded at conversion time. Items 9–13 are operational gaps that would prevent the system from functioning correctly beyond a single-patient, single-day demo.
+The five Critical items (1–5) affect clinical output correctness in live production. Items 6–17 are high-priority operational and clinical data gaps. Items 18–28 affect demo quality and detection accuracy. Phase 0 fixes require no data migration and can begin immediately.

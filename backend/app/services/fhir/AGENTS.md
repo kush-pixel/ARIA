@@ -40,19 +40,30 @@ Converts a raw iEMR patient JSON blob to a FHIR R4 Bundle.
 | Condition            | VISIT[].PROBLEM[]     | by PROBLEM_CODE, most-recent wins|
 | MedicationRequest    | VISIT[].MEDICATIONS[] | by MED_CODE + secondary by name  |
 | Observation          | VISIT[].VITALS[]      | no dedup — every entry included  |
+|                      | Includes BP (LOINC 55284-4), pulse (8867-4), weight (29463-7), SpO2 (59408-5), temp (8310-5) |
 | AllergyIntolerance   | VISIT[].ALLERGY[]     | by ALLERGY_CODE, most-recent wins|
+|                      | Filter: ALLERGY_STATUS == "Active" only; include ALLERGY_REACTION in manifestation |
 | ServiceRequest       | VISIT[].PLAN[]        | by PLAN_CODE, most-recent wins   |
 
-### Non-standard Bundle Key
-
-`_aria_med_history` is NOT a FHIR resource. It is appended to the bundle root:
+### Non-standard Bundle Keys (appended to bundle root, NOT in bundle["entry"])
 
 ```python
-bundle["_aria_med_history"] = _build_med_history(visits)
+bundle["_aria_med_history"]          = _build_med_history(visits)
+bundle["_aria_problem_assessments"]  = _build_problem_assessments(visits)
+bundle["_aria_visit_dates"]          = _build_visit_dates(visits)
 ```
 
-Ingestion reads this key to populate `clinical_context.med_history` (JSONB).
-This key does NOT appear in `bundle["entry"]`.
+`_aria_med_history`: full medication timeline across all visits.
+  → ingestion stores in clinical_context.med_history JSONB.
+
+`_aria_problem_assessments`: per-visit HTN/problem assessment data.
+  Format: [{problem_code, visit_date, htn_flag, status_text, assessment_text}, ...]
+  → ingestion stores in clinical_context.problem_assessments JSONB.
+  Surfaced by briefing composer as "CHF — last assessed: Under Evaluation (2026-01-14)"
+
+`_aria_visit_dates`: ADMIT_DATE from all 124 visits regardless of visit type.
+  → ingestion sets clinical_context.last_visit_date = max(all_visit_dates)
+  Currently last_visit_date is set only from BP clinic dates (misses 71 non-vitals visits)
 
 ### _build_med_history — Return Shape
 
@@ -187,10 +198,13 @@ Raises:
 |-------------------|--------------------------------------------------------------------|
 | patients          | `INSERT … ON CONFLICT DO NOTHING` on patient_id PK               |
 | clinical_context  | `INSERT … ON CONFLICT DO UPDATE` — refreshed each run             |
-| readings          | `SELECT COUNT(*)` first; skip ALL inserts if clinic readings exist |
+| readings          | Per-observation `ON CONFLICT DO NOTHING` on UNIQUE (patient_id, effective_datetime, source) |
+|                   | NEW clinic readings from subsequent visits insert cleanly alongside existing ones |
+|                   | OLD strategy (batch COUNT check) blocked ALL inserts if any clinic readings existed |
 | audit_events      | Always appended — one row per ingestion attempt                    |
 
-Patient 1091: **65 clinic readings** inserted on first run; `readings_inserted=0` on re-run.
+Patient 1091: **65 clinic readings** on first run; subsequent runs add only new observations.
+UNIQUE INDEX required: `CREATE UNIQUE INDEX idx_readings_patient_datetime_source ON readings (patient_id, effective_datetime, source)`
 
 ### Risk Tier Auto-Overrides (applied at ingestion)
 
@@ -236,3 +250,8 @@ Patient 1091: I50.9 (CHF) triggers `risk_tier="high"`, `tier_override="CHF in pr
 - Do NOT call `ingest_fhir_bundle()` without first calling `validate_fhir_bundle()`
 - Do NOT use `session.query()` — SQLAlchemy 2.0 async uses `select()` only
 - Do NOT use most-recent-wins for Observations — they are never deduplicated
+- Do NOT use batch COUNT check for readings idempotency — use per-row ON CONFLICT DO NOTHING
+- Do NOT include inactive allergies (ALLERGY_STATUS != "Active") in the bundle
+- Do NOT omit _aria_problem_assessments — physician assessment data is required for briefing composer
+- Do NOT set last_visit_date from BP dates only — use _aria_visit_dates to get max across all 124 visits
+- Do NOT discard PULSE, WEIGHT, SpO2, TEMPERATURE from vitals — all four must become Observation resources

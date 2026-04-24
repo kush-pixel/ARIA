@@ -69,6 +69,84 @@ _LABEL_PRIORITY: dict[str, int] = {
 }
 _FLAG_TO_LABEL: dict[str, str] = {"1": "concerned", "2": "concerned", "3": "stable"}
 
+# ---------------------------------------------------------------------------
+# Comorbidity concern classification
+# ---------------------------------------------------------------------------
+
+# Keywords matched against problem names (case-insensitive substring match).
+# When any of these conditions has PROBLEM_STATUS2_FLAG = "1" or "2" at the
+# most recent prior visit, the corresponding concern is active.
+_CARDIOVASCULAR_KEYWORDS: tuple[str, ...] = (
+    "CHF", "CAD", "ANGINA", "PVD", "PERIPHERAL VASCULAR",
+    "BYPASS SURGERY", "STROKE", "TIA", "CORONARY",
+)
+_METABOLIC_KEYWORDS: tuple[str, ...] = (
+    "DIABETES", "HYPERGLYCEMIA", "HYPOGLYCEMIA",
+)
+
+# Threshold reduction applied when concern is active (mmHg).
+# Floor of 130 mmHg is always enforced — never drop below shadow mode minimum.
+_CARDIO_REDUCTION = 5.0    # active cardiac concern: lower threshold by 5 mmHg
+_METABOLIC_REDUCTION = 2.0  # active metabolic concern: lower threshold by 2 mmHg
+
+
+def _classify_comorbidity_concern(
+    other_active_problems: list[dict[str, Any]],
+) -> tuple[bool, bool]:
+    """Return (cardiovascular_concern, metabolic_concern) from non-HTN problems.
+
+    A condition contributes to concern only when PROBLEM_STATUS2_FLAG is "1" or "2"
+    — the physician actively flagged it as under evaluation or urgent.
+    Flag "3" (stable/doing well) does not elevate concern.
+    """
+    cardio = False
+    metabolic = False
+    for prob in other_active_problems:
+        if prob.get("flag") not in ("1", "2"):
+            continue
+        name_upper = (prob.get("name") or "").upper()
+        if any(kw in name_upper for kw in _CARDIOVASCULAR_KEYWORDS):
+            cardio = True
+        if any(kw in name_upper for kw in _METABOLIC_KEYWORDS):
+            metabolic = True
+    return cardio, metabolic
+
+
+def _apply_comorbidity_adjustment(
+    base_threshold: float,
+    cardio_concern: bool,
+    metabolic_concern: bool,
+) -> tuple[float, str]:
+    """Lower the BP threshold only when cardiovascular AND metabolic concerns are
+    simultaneously active — the combined cardiometabolic high-risk state.
+
+    Single-condition concern (cardio-only or metabolic-only) does not lower the
+    threshold on its own — the patient-adaptive threshold already reflects the
+    patient's personal baseline and is sufficient for those cases. The threshold
+    reduction is reserved for the compound state where both systems are flagged
+    as concerning by the physician, which represents materially higher
+    cardiovascular risk than either condition alone.
+
+    Floor of 130 mmHg is always enforced.
+
+    Returns (adjusted_threshold, concern_state_label).
+    """
+    if cardio_concern and metabolic_concern:
+        reduction = _CARDIO_REDUCTION + _METABOLIC_REDUCTION
+        adjusted = max(130.0, base_threshold - reduction)
+        state = "cardiovascular+metabolic"
+    elif cardio_concern:
+        adjusted = base_threshold
+        state = "cardiovascular"      # noted but threshold unchanged
+    elif metabolic_concern:
+        adjusted = base_threshold
+        state = "metabolic"           # noted but threshold unchanged
+    else:
+        adjusted = base_threshold
+        state = "none"
+
+    return round(adjusted, 1), state
+
 
 # ---------------------------------------------------------------------------
 # iEMR timeline loader — replaces the old single-purpose label loader
@@ -770,12 +848,42 @@ async def _run() -> None:
         # Full clinical snapshot: all problems + pending follow-ups as of this visit
         clinical_snapshot = _get_clinical_snapshot_at(timeline, visit_date)
 
+        # Comorbidity-adjusted threshold: lower when cardiovascular+metabolic
+        # conditions are simultaneously flagged as concerning AND there is no
+        # clinic BP reading at this evaluation point.
+        #
+        # Rationale: when ARIA has no measured BP anchor (no_vitals_assessment
+        # visit), the physician's concern is driven by clinical context — symptoms,
+        # comorbidities, examination — not a specific BP number. In that case the
+        # combined cardiometabolic state is the primary signal and a lower threshold
+        # is warranted. When a clinic BP IS present, the window mean provides a
+        # direct BP signal and the standard patient-adaptive threshold is sufficient.
+        # Shadow-mode only — does not affect production detectors.
+        cardio_concern, metabolic_concern = _classify_comorbidity_concern(
+            clinical_snapshot["active_problems"]
+        )
+        if source == "no_vitals_assessment":
+            adjusted_threshold, concern_state = _apply_comorbidity_adjustment(
+                threshold, cardio_concern, metabolic_concern
+            )
+        else:
+            # Clinic BP present — comorbidity state noted but threshold unchanged
+            adjusted_threshold = threshold
+            if cardio_concern and metabolic_concern:
+                concern_state = "cardiovascular+metabolic"
+            elif cardio_concern:
+                concern_state = "cardiovascular"
+            elif metabolic_concern:
+                concern_state = "metabolic"
+            else:
+                concern_state = "none"
+
         adherence_pct = _generate_adherence(visit_date)
 
         gap          = _detect_gap(synthetic)
-        inertia      = _detect_inertia(synthetic, prior_med_change, window_start, threshold)
-        adherence    = _detect_adherence(synthetic, adherence_pct, threshold)
-        deterioration = _detect_deterioration(synthetic, threshold)
+        inertia      = _detect_inertia(synthetic, prior_med_change, window_start, adjusted_threshold)
+        adherence    = _detect_adherence(synthetic, adherence_pct, adjusted_threshold)
+        deterioration = _detect_deterioration(synthetic, adjusted_threshold)
 
         aria_fired = (
             gap["urgent"]
@@ -807,6 +915,9 @@ async def _run() -> None:
         with_aria: dict[str, Any] = {
             "fired": aria_fired,
             "personal_threshold": threshold,
+            "comorbidity_concern_state": concern_state,
+            "adjusted_threshold": adjusted_threshold,
+            "threshold_adjustment": round(threshold - adjusted_threshold, 1),
             "personal_baseline": p_baseline,
             "n_stable_history": n_stable,
             "detectors": {
@@ -846,11 +957,15 @@ async def _run() -> None:
             for k, v in with_aria["detectors"].items()
             if _detector_active(k, v)
         ) or "—"
-        thr_disp = f"thr={threshold:.0f}({'pop' if n_stable == 0 else f'n={n_stable}'})"
+        base_disp = f"thr={threshold:.0f}({'pop' if n_stable == 0 else f'n={n_stable}'})"
+        if concern_state != "none":
+            thr_disp = f"{base_disp}→{adjusted_threshold:.0f}[{concern_state[:4]}]"
+        else:
+            thr_disp = base_disp
         print(
             f"  [{visit_date}] [{src_tag}] {bp_disp}"
             f"  {f'Label={physician_label}':<26}"
-            f"  win={window_mean:.0f}  {thr_disp:<12}"
+            f"  win={window_mean:.0f}  {thr_disp:<22}"
             f"  ARIA: {aria_str} [{detectors_str:<11}]"
             f"  Result: {result_label.upper().replace('_', ' ')}"
         )
@@ -888,17 +1003,21 @@ async def _run() -> None:
             prior_bp = [r for r in deduped if r.effective_datetime.date() < check_date]
             thr, _, _, _ = _compute_personal_threshold(prior_bp, iemr_labels)
             med_chg = _get_last_med_change_at(timeline, check_date)
+            # Apply comorbidity adjustment to continuous monitoring threshold too
+            snap = _get_clinical_snapshot_at(timeline, check_date)
+            cc, mc = _classify_comorbidity_concern(snap["active_problems"])
+            thr_adj, _ = _apply_comorbidity_adjustment(thr, cc, mc)
             # Use fixed 85% adherence for continuous scan — avoids consuming random state
             # that the main evaluation loop depends on. The continuous monitor targets
             # BP trend signals (inertia, deterioration) not adherence variability.
-            ine = _detect_inertia(win_syn, med_chg, window_start, thr)
-            det = _detect_deterioration(win_syn, thr)
-            adh = _detect_adherence(win_syn, 85.0, thr)
+            ine = _detect_inertia(win_syn, med_chg, window_start, thr_adj)
+            det = _detect_deterioration(win_syn, thr_adj)
+            adh = _detect_adherence(win_syn, 85.0, thr_adj)
             gap_mid = _detect_gap(win_syn, urgent_threshold=3)
             win_mean = statistics.mean(r["systolic_avg"] for r in win_syn)
             # GAP is only clinically urgent when the outage coincides with elevated BP —
             # missing monitoring data during a controlled period is a nuisance, not urgent.
-            gap_urgent = gap_mid["urgent"] and win_mean >= thr
+            gap_urgent = gap_mid["urgent"] and win_mean >= thr_adj
 
             fired_types = []
             reasons: list[str] = []

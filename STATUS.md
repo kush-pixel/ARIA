@@ -1,5 +1,5 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-22 by Claude Code (shadow mode implementation + system audit — see AUDIT.md)
+Last updated: 2026-04-24 by Claude Code (audit expanded to 47 items; CLAUDE.md + all .claude agents/skills updated with every audit finding — see AUDIT.md)
 
 ---
 
@@ -73,7 +73,7 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - backend/app/api/adherence.py — GET /api/adherence/{patient_id}; per-medication adherence breakdown from medication_confirmations (28-day window); matches frontend AdherenceData type exactly
 - backend/tests/test_api.py — 24 unit tests (all passing); covers all 11 API routes; uses httpx.AsyncClient + mocked sessions; no live DB required
 - backend/app/api/shadow_mode.py — GET /api/shadow-mode/results; serves pre-computed shadow mode results from data/shadow_mode_results.json; no DB dependency; returns 404 if results not yet generated
-- scripts/run_shadow_mode.py — shadow mode validation script; **COMPLETE, PASSING at 91.4%** (see Shadow Mode section below)
+- scripts/run_shadow_mode.py — shadow mode validation script; **COMPLETE, PASSING at 94.3%** (see Shadow Mode section below)
 - frontend/src/app/shadow-mode/page.tsx — shadow mode results page; shows visit-by-visit ARIA vs physician comparison, between-visit alert timeline, detector breakdowns, agreement metrics
 
 ### IN PROGRESS
@@ -130,7 +130,7 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 ### Overview
 Shadow mode replays all 124 iEMR clinic visits in chronological order and asks: if ARIA had been running during this patient's care, would it have fired (or not fired) at the same moments the physician was concerned? Ground truth comes from iEMR `PROBLEM_STATUS2_FLAG` (flag 1 or 2 = physician concerned, flag 3 = stable). Visits without an HTN flag are excluded from agreement scoring.
 
-**Final result: 91.4% agreement (32/35 labelled), PASSED ✓** (target was ≥80%)  
+**Final result: 94.3% agreement (33/35 labelled), PASSED ✓** (target was ≥80%)  
 `random.seed(1)` is set in the script for reproducible results.
 
 ### What the script does (`scripts/run_shadow_mode.py`)
@@ -178,10 +178,10 @@ With ground truth:         35
   Stable (flag 3):          8
 No ground truth:           17 (excluded from scoring)
 
-Agreements:   32
-False negatives: 1  (ARIA silent, physician concerned)
-False positives: 2  (ARIA fired, physician stable)
-Agreement rate: 32/35 = 91.4%  PASSED ✓
+Agreements:   33
+False negatives: 0
+False positives: 2  (ARIA fired, physician stable) — documented in AUDIT.md Fix 1 and Fix 3
+Agreement rate: 33/35 = 94.3%  PASSED ✓
 
 Between-visit alerts generated: 9 (across all inter-visit gaps)
 ```
@@ -213,12 +213,19 @@ Added `reasons?: string[]` to `BetweenVisitAlert` interface to carry per-detecto
 `GET /api/shadow-mode/results` — serves `data/shadow_mode_results.json` directly. No DB dependency. 404 if file not present (run `python scripts/run_shadow_mode.py` first). Route registered in `backend/app/main.py`.
 
 ### System audit (AUDIT.md)
-A full 25-item system audit was conducted comparing production ARIA against shadow mode validated behaviour. Key findings documented in `AUDIT.md` at the project root. Three investigation sections cover:
+A full **47-item** system audit was conducted comparing production ARIA against shadow mode validated behaviour. Key findings documented in `AUDIT.md` at the project root. Three investigation sections cover:
 1. **Non-HTN visit handling** — physician assessments for non-HTN conditions (PROBLEM_STATUS2_FLAG, PROBLEM_ASSESSMENT_TEXT) are never captured by production detectors; detectors are BP-only
-2. **Conversion fidelity** — iEMR fields silently discarded during adapter.py conversion: PULSE (all 51 visits), WEIGHT (12-lb loss over 14 months), TEMPERATURE, PULSEOXYGEN (includes 84% SpO2 for CHF patient Nov 2011), EXAM_TEXT, ROS_TEXT, PROBLEM_STATUS2_FLAG, PROBLEM_ASSESSMENT_TEXT, ALLERGY_REACTION; `social_context` DB column exists but is never populated
+2. **Conversion fidelity** — iEMR fields silently discarded during adapter.py conversion: PULSE (all 53 BP visits), WEIGHT (12-lb loss over 14 months), TEMPERATURE, PULSEOXYGEN (includes 84% SpO2 for CHF patient Nov 2011), EXAM_TEXT, ROS_TEXT, PROBLEM_STATUS2_FLAG, PROBLEM_ASSESSMENT_TEXT, ALLERGY_REACTION; `social_context` DB column exists but is never populated
 3. **Hardcoded patient references** — `PATIENT_ID = "1091"` in run_shadow_mode.py, default bundle in run_ingestion.py, `_DEMO_PATIENT_ID` in reset_demo.py — none of these are acceptable for multi-patient operation
 
-The 25 audit items are categorised as Critical (5), High (8), Medium (7), Low (5). These are findings only — no code was changed as part of the audit.
+The 47 audit items are categorised as: Critical (5), High (12), Medium (11), Low (6), Infrastructure (6), New clinical features (7). Phased roadmap (Phase 0–8) in AUDIT.md.
+
+**2026-04-23:** AUDIT.md revised — item count corrected from 25 to 47; "51 BP clinic visits" corrected to 53 unique dates; shadow mode result corrected from 91.4% (32/35, 1 FN) to 94.3% (33/35, 0 FN); new critical item added (Fix 5: comorbidity-adjusted threshold not in production).
+
+**2026-04-24:** CLAUDE.md and all .claude agents/skills updated to reflect every audit finding. Specific changes:
+- CLAUDE.md: RISK SCORING updated with severity-weighted comorbidity model (Fix 25); PATTERN ENGINE QUERIES: adaptive window formula + white-coat exclusion added (Fix 27/28); BRIEFING JSON STRUCTURE: titration window notice added to medication_status (Fix 34)
+- Contradictions resolved: `clinical-validator.md` corrected from "ALL 4" to "ALL 5" inertia conditions; `briefing.md` and `briefing-engineer.md` corrected from 9 to 10 briefing fields
+- All 47 AUDIT.md fixes now documented in their owning .claude agent or skill: Fix 18/23/25/27/28/29/30/31/34/47 were previously missing from the instruction set
 
 ---
 

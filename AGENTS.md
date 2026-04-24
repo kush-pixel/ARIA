@@ -39,7 +39,7 @@ view of what happened to hypertensive patients since the last appointment.
 
 ARIA fixes this by:
 1. Ingesting patient EHR data via FHIR R4 Bundle (from iEMR source JSON)
-2. Generating clinically realistic synthetic home BP readings (28 days)
+2. Generating clinically realistic synthetic home BP readings and medication confirmations spanning the patient's full care timeline
 3. Running three-layer AI analysis (rules → scoring → explanation)
 4. Delivering a structured pre-visit briefing at 7:30 AM on appointment days
 
@@ -69,7 +69,10 @@ Dashboard
   ↓ [DONE] Next.js frontend (port 3000), wired to real backend
 ```
 
-Not started: `scripts/run_shadow_mode.py`, `scripts/run_scheduler.py` (standalone CLI)
+Shadow mode: `scripts/run_shadow_mode.py` — DONE. 94.3% agreement (33/35, 0 false negatives).
+  Run: `python scripts/run_shadow_mode.py --patient 1091 --iemr data/raw/iemr/1091_data.json`
+  Results in data/shadow_mode_results.json. Frontend shadow-mode page at /shadow-mode.
+`scripts/run_scheduler.py` (standalone CLI) — standalone trigger not yet wired.
 
 ---
 
@@ -133,11 +136,15 @@ Background: processing_jobs table + Python polling worker (30s interval)
 
 ```
 patients              — risk_tier, risk_score (Layer 2), monitoring_active, next_appointment
-clinical_context      — active_problems[], current_medications[], med_history JSONB
+clinical_context      — active_problems[], current_medications[], med_history JSONB,
+                        problem_assessments JSONB, recent_labs JSONB,
+                        last_clinic_pulse/weight_kg/spo2, allergy_reactions[]
 readings              — systolic_avg, diastolic_avg, source ('generated'|'clinic'|'manual')
+                        UNIQUE INDEX on (patient_id, effective_datetime, source)
 medication_confirmations — confirmed_at (NULL = missed dose), confidence='simulated' for demo
-alerts                — alert_type, gap_days, acknowledged_at
-briefings             — llm_response JSONB (all 9 briefing fields), model_version, prompt_hash
+                           UNIQUE INDEX on (patient_id, medication_name, scheduled_time)
+alerts                — alert_type (gap_urgent|gap_briefing|inertia|deterioration|adherence), gap_days, acknowledged_at
+briefings             — llm_response JSONB (9 briefing fields + problem_assessments), model_version, prompt_hash
 processing_jobs       — status (queued→running→succeeded|failed), idempotency_key UNIQUE
 audit_events          — action, actor_type, outcome ('success'|'failure')
 ```
@@ -238,3 +245,7 @@ alert_acknowledged  action="alert_acknowledged"  resource_type="Alert"
 - Do NOT recommend specific medications in any generated output
 - Do NOT use `ADMIT_DATE` for observation timestamps — always `VITALS_DATETIME`
 - Do NOT insert `NULL` values for device outage days — use absent rows
+- Do NOT use hardcoded 140 mmHg inertia threshold — use patient-adaptive threshold from historic_bp_systolic
+- Do NOT use `clinical_context.last_med_change` for inertia — use med_history JSONB (stale single-date snapshot)
+- Do NOT generate synthetic data for only 28 days — full care timeline required for all patients
+- Do NOT skip the midnight pattern_recompute sweep — risk scores go stale without it
