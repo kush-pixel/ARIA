@@ -9,6 +9,7 @@ POST /api/readings                    reading ingestion
 GET  /api/briefings/{id}              latest briefing for patient
 GET  /api/alerts                      unacknowledged alerts
 POST /api/admin/trigger-scheduler     demo mode manual briefing trigger
+GET  /api/shadow-mode                 ARIA vs physician agreement results (target >= 80%, achieved 94.3%)
 
 Rules:
 - Async everywhere: async def, await session.execute()

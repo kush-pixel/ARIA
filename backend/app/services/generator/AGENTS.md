@@ -11,8 +11,8 @@ Never git push, commit, or add. Tell the user what files changed.
 ## Files in This Directory
 
 ```
-reading_generator.py      — synthetic 28-day home BP readings for demo patients
-confirmation_generator.py — synthetic 28-day medication confirmations for demo patients
+reading_generator.py      — synthetic full-timeline home BP readings (inter-visit interpolation, parametric baseline)
+confirmation_generator.py — synthetic full-timeline medication confirmations (Beta-distributed adherence per interval)
 ```
 
 ---
@@ -29,11 +29,25 @@ async def generate_readings(
 
 - `patient_id`: ARIA identifier (e.g. `"1091"`).
 - `session`: Active async SQLAlchemy session. Caller owns lifecycle; this function does NOT commit.
-- `scenario`: Must be `"patient_a"` (only scenario currently supported).
-- Returns: List of dicts, one per reading. Each dict contains all `readings` table columns except `reading_id` and `created_at` (DB-generated). The caller must insert via `session.add_all([Reading(**r) for r in reading_dicts])`.
+- `scenario`: Must be `"patient_a"` (only scenario currently supported; future: parametric from patient data).
+- Returns: List of dicts, one per reading. Each dict contains all `readings` table columns except `reading_id` and `created_at` (DB-generated). The caller inserts via `session.add_all([Reading(**r) for r in reading_dicts])`.
 - Raises: `ValueError` for unknown scenario name; `SQLAlchemyError` on DB query failure.
+- Idempotency: inserts use `ON CONFLICT DO NOTHING` on `(patient_id, effective_datetime, source)` — safe to re-run.
 
-Queries `clinical_context.historic_bp_systolic` and `current_medications` to anchor generation on real EHR data. If fewer than 2 clinic readings exist, falls back to `PATIENT_A_MORNING_MEAN=163.0`.
+```python
+async def generate_full_timeline_readings(
+    patient_id: str,
+    clinic_readings: list[Any],
+    session: AsyncSession,
+) -> list[dict[str, Any]]
+```
+
+- Generates synthetic readings spanning the entire care timeline (not just 28 days).
+- For each consecutive pair of clinic readings, linearly interpolates baseline systolic between the two anchors with Gaussian noise (SD 8-12 mmHg), morning/evening offsets, device outages (1-2 episodes of 2-4 days per interval), and a white-coat dip in the 3 days before each clinic visit.
+- Baseline computed as `median(historic_bp_systolic)` — NOT hardcoded 163.
+- Falls back to `PATIENT_A_MORNING_MEAN=163.0` only when fewer than 2 clinic readings exist.
+- Skips intervals where generated readings already exist (idempotency via unique index).
+- Queries `clinical_context.historic_bp_systolic`, `historic_bp_dates`, and `current_medications`.
 
 ---
 
@@ -42,8 +56,9 @@ Queries `clinical_context.historic_bp_systolic` and `current_medications` to anc
 ```python
 SCENARIO_PATIENT_A: str = "patient_a"
 
-# Gaussian baseline (anchored on clinic data, falls back to these)
-PATIENT_A_MORNING_MEAN: float = 163.0
+# Gaussian baseline — FALLBACK ONLY (fewer than 2 clinic readings)
+# Primary baseline is median(historic_bp_systolic) from clinical_context
+PATIENT_A_MORNING_MEAN: float = 163.0   # fallback; real patient 1091 median ≈ 134 mmHg
 PATIENT_A_MORNING_SD: float = 8.0
 
 # Systolic clip bounds for morning draw
@@ -93,7 +108,7 @@ PHASE4_TARGETS: list[float] = [158.0, 153.0, 149.0]   # days 19, 20, 21
 PHASE5_MEAN_LOW: float = 160.0
 PHASE5_MEAN_HIGH: float = 166.0
 
-GENERATION_WINDOW_DAYS: int = 28
+GENERATION_WINDOW_DAYS: int = 28  # used for legacy 28-day window only; full-timeline uses inter-visit intervals
 
 # Fixed column values
 GENERATED_SOURCE: str = "generated"
@@ -108,16 +123,26 @@ GENERATED_MEDICATION_TAKEN: str = "yes"
 
 ---
 
-## Patient A 28-Day Schedule — 47 Readings Total
+## Full-Timeline Generation — Patient 1091
 
-```
-Phase 1 (days  1-7):  Baseline Gaussian(163, SD=8). Both sessions. 14 entries.
-Phase 2 (days  8-14): Inertia drift toward 165. One evening missed (random day 12 or 13). 13 entries.
-Phase 3 (days 15-18): Elevation 164-167. Days 16-17 absent (device outage). Days 15 and 18 only. 4 entries.
-Phase 4 (days 19-21): White-coat dip targets [158, 153, 149]. Both sessions. 6 entries.
-Phase 5 (days 22-28): Return 160-166. Days 25-26 absent (weekend miss). 10 entries.
-Total: 47 readings.
-```
+Patient 1091 has 65 clinic readings spanning 2008-01-21 to 2013-09-26 (mean 133.8 mmHg, SD 16.2).
+For each consecutive pair of clinic readings an inter-visit interval is generated.
+
+Per-interval rules (apply to every interval):
+- Baseline: linear interpolation between the two clinic BP anchors
+- Daily noise: Gaussian SD 8-12 mmHg (NEVER less than 5)
+- Morning: 5-10 mmHg higher than evening — every week without exception
+- Device outage: 1-2 episodes of 2-4 days per interval — absent rows only
+- White-coat dip: systolic drops 10-15 mmHg in 3-5 days before next clinic visit
+- Post-clinic return: readings drift back to elevated baseline after dip
+
+Demo briefing window (the visible 28-day period):
+- Reflects the 2011-2013 elevated period (~158 mmHg avg)
+- Inertia fires because avg > patient_threshold, no med change since 2013
+
+Legacy 28-day scenario constants (PHASE1-5 targets) are kept for backward compatibility
+with `generate_readings(scenario="patient_a")` but `generate_full_timeline_readings()`
+derives targets from clinic BP pairs — NOT from hardcoded phase targets.
 
 Device outages and missed sessions are represented as **absent rows** — null values are never generated.
 
@@ -167,11 +192,26 @@ async def generate_confirmations(
 ) -> list[dict[str, Any]]
 ```
 
+- Legacy 28-day window confirmation generator (kept for backward compatibility).
 - Returns list of dicts, one per scheduled dose slot. Caller inserts via `session.add_all([MedicationConfirmation(**c) for c in confs])`.
-- A `confirmed_at=None` represents a missed dose. Every scheduled slot produces exactly one dict — absent rows are never generated.
+- A `confirmed_at=None` represents a missed dose. Every scheduled slot produces exactly one dict.
 - Does NOT commit. Caller owns session lifecycle.
+- Patient 1091: **420 total scheduled doses, 377 confirmed (89.8%)** across all 14 medications over 28 days.
 
-Patient 1091: **420 total scheduled doses, 377 confirmed (89.8%)** across all 14 medications over 28 days.
+```python
+async def generate_full_timeline_confirmations(
+    patient_id: str,
+    clinic_readings: list[Any],
+    med_history: list[dict[str, Any]],
+    session: AsyncSession,
+) -> list[dict[str, Any]]
+```
+
+- Generates confirmations spanning the entire care timeline for every medication active during each inter-visit interval.
+- `med_history`: from `clinical_context.med_history` — determines which medications were active at each point in time. Only generates confirmations for a medication from the date it was added, not retroactively.
+- Per-interval adherence drawn from Beta distribution anchored near patient's overall adherence (≈91% for patient 1091) with ±10-15 percentage point interval-to-interval variation.
+- Idempotency: uses `ON CONFLICT DO NOTHING` on `(patient_id, medication_name, scheduled_time)` — safe to re-run.
+- Does NOT commit. Caller owns session lifecycle.
 
 ---
 
@@ -184,7 +224,7 @@ ADHERENCE_RATE_WEEKEND: float = 0.78   # Saturday (weekday()==5), Sunday (==6)
 CONFIRMATION_CONFIDENCE: str = "simulated"
 CONFIRMATION_TYPE: str = "synthetic_demo"
 
-GENERATION_WINDOW_DAYS: int = 28
+GENERATION_WINDOW_DAYS: int = 28  # used for legacy 28-day window only; full-timeline uses inter-visit intervals
 
 # Jitter around scheduled time
 JITTER_LOW: int = -15
@@ -283,6 +323,9 @@ created_at          TIMESTAMPTZ
 - Do NOT generate exactly-round readings (e.g. 160.0, 140.0) — `_anti_round` prevents this
 - Do NOT set `systolic_2 >= systolic_1` — second reading must be strictly lower
 - Do NOT use `session.query()` — SQLAlchemy 2.0 async uses `select()` only
-- Do NOT hardcode systolic targets without checking `PATIENT_A_*` constants
+- Do NOT use hardcoded 163 mmHg as primary baseline — use `median(historic_bp_systolic)` from clinical_context
+- Do NOT generate only 28 days of data — full-timeline generation is required; 28-day is legacy
+- Do NOT generate confirmations for a medication before its MED_DATE_ADDED in med_history
 - Do NOT set `confidence="self_report"` for generated confirmations — must be `"simulated"`
 - Do NOT set day-to-day systolic SD below 5 mmHg — flat variance is clinically wrong
+- Do NOT use batch-level idempotency (COUNT check) — use per-row ON CONFLICT DO NOTHING

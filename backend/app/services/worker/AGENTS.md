@@ -86,7 +86,11 @@ async def _handle_pattern_recompute(job: ProcessingJob, session: AsyncSession) -
 async def _handle_briefing_generation(job: ProcessingJob, session: AsyncSession) -> None
 ```
 - `job.patient_id` and `job.idempotency_key` must be set.
-- Appointment date is parsed from `idempotency_key` format: `"briefing_generation:{patient_id}:{YYYY-MM-DD}"`.
+- Appointment date sourced from `patients.next_appointment.date()` — NOT parsed from idempotency_key.
+  Falls back to today if next_appointment is None (preserves demo-mode behavior).
+  (Previously used `idempotency_key[-10:]` — this records wrong date when admin trigger fires off-day)
+- Cold-start suppression: if `enrolled_at > now - 14 days`, skip inertia/deterioration/adherence
+  detectors, set data_limitations = "Patient enrolled N days ago — minimum 14-day monitoring period required"
 - Layer 3 failure is caught, logged as a WARNING, and does NOT fail the job — the Layer 1 briefing is already persisted.
 - Raises: `ValueError` if patient_id or idempotency_key is missing or malformed.
 
@@ -124,16 +128,28 @@ async def enqueue_briefing_jobs(
 - Returns: Number of jobs inserted. Re-runs that hit conflict return 0 for those patients.
 - `target_date` defaults to `date.today()` UTC — override in tests.
 
-Idempotency key format:
+```python
+async def enqueue_pattern_recompute_sweep(
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+    target_date: date | None = None,
+) -> int
 ```
-"briefing_generation:{patient_id}:{YYYY-MM-DD}"
-```
-This guarantees at most one briefing job per patient per day, regardless of how many times the scheduler fires.
 
-### Two Execution Paths
+- Finds ALL `monitoring_active=True` patients (not just appointment-day patients).
+- Inserts one `pattern_recompute` job per patient using `ON CONFLICT DO NOTHING`.
+- Idempotency key: `"pattern_recompute:{patient_id}:{YYYY-MM-DD}"`
+- Called by APScheduler at midnight UTC daily.
+- Ensures gap counters, risk scores, inertia/deterioration flags stay current for non-appointment patients.
+- Returns: Number of new jobs inserted.
 
-1. **Automatic (7:30 AM UTC):** APScheduler cron in `scripts/run_worker.py` calls `enqueue_briefing_jobs()`.
-2. **Demo mode (on demand):** `POST /api/admin/trigger-scheduler` calls `enqueue_briefing_jobs()` directly. Guarded by `DEMO_MODE=true` in config.
+Briefing idempotency key format: `"briefing_generation:{patient_id}:{YYYY-MM-DD}"`
+Pattern recompute key format:    `"pattern_recompute:{patient_id}:{YYYY-MM-DD}"`
+
+### Three Execution Paths
+
+1. **7:30 AM UTC:** APScheduler cron calls `enqueue_briefing_jobs()`.
+2. **Midnight UTC:** APScheduler cron calls `enqueue_pattern_recompute_sweep()` for all active patients.
+3. **Demo mode (on demand):** `POST /api/admin/trigger-scheduler` calls `enqueue_briefing_jobs()` directly. Guarded by `DEMO_MODE=true` in config.
 
 ---
 
@@ -180,3 +196,6 @@ created_by          TEXT           "system" | "scheduler" | "admin"
 - Do NOT use `session.query()` — SQLAlchemy 2.0 async uses `select()` only
 - Do NOT expose `POST /api/admin/trigger-scheduler` without `DEMO_MODE=true` guard
 - Do NOT use bare `except:` — catch specific exception types or `Exception` with explicit logging
+- Do NOT parse appointment date from idempotency_key — query patients.next_appointment instead
+- Do NOT skip the midnight pattern_recompute sweep — risk scores and alert flags go stale without it
+- Do NOT run inertia/deterioration/adherence detectors for patients enrolled < 14 days (cold-start suppression)

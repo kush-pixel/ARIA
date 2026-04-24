@@ -16,3 +16,5 @@ Admin trigger button fires POST /api/admin/trigger-scheduler for demo.
 TypeScript strict, no any, Tailwind only, all types in types.ts.
 No PHI in emails or notifications.
 Clinical language in UI: possible not definitive.
+Patient list sort: backend order is authoritative — remove sortPatients() from PatientList.tsx (Fix 31).
+Briefing icon condition: whether a briefing row exists for the patient, not just today's appointment (Fix 23).

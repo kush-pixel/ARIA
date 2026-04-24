@@ -12,10 +12,11 @@ Never git push, commit, or add. Tell the user what files changed.
 
 ```
 gap_detector.py           — Layer 1: days since last home BP reading
-inertia_detector.py       — Layer 1: sustained elevated BP with no med change
-adherence_analyzer.py     — Layer 1: adherence rate vs BP pattern classification
-deterioration_detector.py — Layer 1: worsening systolic trend over 14 days
+inertia_detector.py       — Layer 1: sustained elevated BP with no med change (patient-adaptive threshold)
+adherence_analyzer.py     — Layer 1: adherence rate vs BP pattern (A/B/C with Pattern B suppression)
+deterioration_detector.py — Layer 1: worsening trend + absolute threshold gate + step-change sub-detector
 risk_scorer.py            — Layer 2: weighted 0.0-100.0 priority score
+threshold_utils.py        — shared: patient-adaptive threshold + comorbidity adjustment (used by all 4 detectors)
 ```
 
 ---
@@ -76,20 +77,31 @@ async def run_inertia_detector(session: AsyncSession, patient_id: str) -> Inerti
 }
 ```
 
-All 4 conditions must be simultaneously true to flag inertia:
-1. Average systolic >= 140 over last 28 days
-2. At least 5 readings with systolic_avg >= 140
+All 5 conditions must be simultaneously true to flag inertia:
+1. Average systolic >= patient_threshold over last 28 days
+   patient_threshold = max(130, stable_baseline_mean + 1.5×SD) capped at 145 mmHg
+   derived from historic_bp_systolic filtered to physician-labeled stable visits
+   falls back to 140 if fewer than 3 stable-labeled readings
+   comorbidity adjustment: threshold lowered 7 mmHg (floor 130) when both cardiovascular
+     AND metabolic comorbidities are simultaneously in elevated concern state
+   threshold_utils.py: classify_comorbidity_concern() + apply_comorbidity_adjustment()
+2. At least 5 readings with systolic_avg >= patient_threshold
 3. Elevated condition spans > 7 days (from first elevated reading to now)
-4. No medication change on or after the first elevated reading (`last_med_change` from clinical_context)
+4. No medication change on or after the first elevated reading
+   MUST use clinical_context.med_history JSONB — NOT last_med_change (stale single-date snapshot)
+   reads max({date}) across med_history entries where date <= first_elevated_reading_date
+   also parses change type: dose increase = physician responding → do NOT fire
+5. Slope direction check: if 7-day recent avg < patient_threshold, do NOT fire (BP is declining)
 
 Fail-safe: sparse data, missing context, or any unmet condition → `inertia_detected=False`.
 
 Constants:
 ```python
 _WINDOW_DAYS = 28
-_ELEVATED_THRESHOLD = 140      # systolic_avg >= this qualifies as elevated
-_MIN_ELEVATED_COUNT = 5        # minimum elevated readings to trigger
-_MIN_DURATION_DAYS = 7         # elevated condition must persist at least this long
+_ELEVATED_THRESHOLD = 140      # FALLBACK ONLY — primary is patient-adaptive threshold
+_MIN_ELEVATED_COUNT = 5
+_MIN_DURATION_DAYS = 7
+_RECENT_SLOPE_WINDOW = 7       # days for slope direction check
 ```
 
 Patient 1091 result: `inertia_detected=True` (avg_systolic ~158, no med change since 2013-09-26).
@@ -111,13 +123,21 @@ async def run_adherence_analyzer(session: AsyncSession, patient_id: str) -> Adhe
 }
 ```
 
-Pattern matrix (28-day window):
+Pattern matrix (28-day window, thresholds use patient_threshold not hardcoded 140):
 ```
-Pattern A: elevated BP (avg systolic >= 140) + low adherence  (< 80%)  → "possible adherence concern"
-Pattern B: elevated BP (avg systolic >= 140) + high adherence (>= 80%) → "treatment review warranted"
-Pattern C: normal BP   (avg systolic < 140)  + low adherence  (< 80%)  → "contextual review"
-none:      normal BP   (avg systolic < 140)  + high adherence (>= 80%) → "no adherence concern identified"
+Pattern A: elevated BP (avg systolic >= patient_threshold) + low adherence  (< 80%)  → "possible adherence concern"
+Pattern B: elevated BP (avg systolic >= patient_threshold) + high adherence (>= 80%) → "treatment review warranted"
+Pattern C: normal BP   (avg systolic < patient_threshold)  + low adherence  (< 80%)  → "contextual review"
+none:      normal BP   (avg systolic < patient_threshold)  + high adherence (>= 80%) → "no adherence concern identified"
 ```
+
+Pattern B suppression — treatment is working (do NOT fire if ALL true):
+  slope < -0.3 mmHg/day AND 7-day recent avg < patient_threshold AND days_since_med_change <= 14
+  Suppressed pattern becomes "none" with interpretation "treatment appears effective — monitoring"
+  The 14-day gate is critical — suppression MUST NOT apply when no recent med change occurred
+
+Pattern A fires an alert row: if pattern == "A" → _upsert_alert(session, pid, "adherence")
+  "adherence" is a valid alert_type in the alerts table
 
 Clinical language boundary enforced at code level:
 - NEVER use `"non-adherent"` — always `"possible adherence concern"` (Pattern A)
@@ -150,9 +170,16 @@ async def run_deterioration_detector(session: AsyncSession, patient_id: str) -> 
 }
 ```
 
-Requires both signals to be positive (reduces false positives):
+Requires all three signals to be positive (reduces false positives):
 1. Positive least-squares slope across the full 14-day window
 2. Recent 3-day average > baseline days 4–10 average
+3. recent_avg >= patient_threshold (absolute gate — prevents firing on a patient rising 115→119)
+   patient_threshold derived same way as inertia (from threshold_utils.py)
+   falls back to 140 if insufficient history
+
+Step-change sub-detector: if 7-day rolling mean of most recent week exceeds 7-day rolling mean
+of 3 weeks ago by >= 15 mmHg → flag deterioration regardless of overall linear slope.
+This catches acute step-changes that linear regression smooths over.
 
 Returns `deterioration=False` if fewer than 7 readings exist (insufficient data).
 Slope computed in pure Python — no numpy dependency. Missing days (device outages) are handled without interpolation.
@@ -250,3 +277,8 @@ risk_scorer:             risk_score=69.48
 - Do NOT use `"medication failure"` anywhere — always `"treatment review warranted"`
 - Do NOT use numpy — slope computation uses pure Python arithmetic
 - Do NOT interpolate missing days in deterioration detection — absent rows are device outages
+- Do NOT use hardcoded 140 mmHg threshold — always call threshold_utils.py for patient-adaptive threshold
+- Do NOT fire inertia when BP slope is negative (7-day recent avg < patient_threshold)
+- Do NOT fire deterioration when recent_avg < patient_threshold (absolute gate required)
+- Do NOT fire Pattern B when treatment is working (suppression: slope < -0.3 + recent < threshold + med change ≤ 14d)
+- Do NOT use clinical_context.last_med_change for inertia — use med_history JSONB instead
