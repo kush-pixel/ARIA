@@ -20,9 +20,11 @@ risk_score, data_limitations
 visit_agenda priority: urgent alerts, inertia, adherence concern,
                        overdue labs, active problems, next appt
 
-medication_status field (Fix 34): when days_since_med_change <= 42, append
+medication_status field (Fix 34): when days_since_med_change <= titration_window, append
   "— within expected titration window, full response may not yet be established"
-  Informs without making a clinical judgment.
+  titration_window is drug-class-aware (TITRATION_WINDOWS):
+    diuretics/beta-blockers → 14d, ACE/ARBs → 28d, amlodipine → 56d, default → 42d
+  Consistent with Pattern B suppression window. Informs without making a clinical judgment.
 
 social_context (Fix 29): when clinical_context.social_context is non-null,
   include as patient_context field in briefing payload.

@@ -14,8 +14,10 @@ Layer 1 (runs async via worker, NEVER in HTTP path):
 - Deterioration: positive slope + recent > baseline + recent >= patient_threshold (absolute gate)
     step-change sub-detector: 7d recent - 7d three-weeks-ago >= 15 mmHg → flag regardless of slope
 - Adherence: < 80% threshold, Pattern A/B/C interpretation
-    Pattern B suppression: slope < -0.3 AND recent < threshold AND med_change <= 42d → suppress to none
-      42-day gate aligns with Fix 34 titration window (4-6 week antihypertensive response)
+    Pattern B suppression: slope < -0.3 AND recent < threshold AND med_change <= titration_window → suppress to none
+      titration_window is drug-class-aware (TITRATION_WINDOWS):
+        diuretics → 14d, beta-blockers → 14d, ACE/ARBs → 28d, amlodipine → 56d, default → 42d
+      Suppression must NOT apply when no recent med change exists — that is not a succeeding treatment.
     Pattern A → write alert row with alert_type="adherence"
 - Language always hedged: possible not definitive
 - threshold_utils.py: shared patient-adaptive threshold + comorbidity adjustment (all 4 detectors use it)
@@ -29,7 +31,10 @@ Layer 2 (risk_scorer.py, runs AFTER all Layer 1 detectors):
     Diabetes(E11) / CKD(N18) / CAD(I25): 15 points each
     Any other coded problem: 5 points each
     NOT raw count / 5 — that saturates at 5 problems, useless for complex patients
-- Write to patients.risk_score
+- Normalisation (Fix 58):
+    sig_gap = clamp(gap_days / window_days * 100.0)           — adaptive window_days, NOT / 14.0
+    sig_inertia = clamp(days_since_med_change / 180.0 * 100.0) — saturates at 6 months, NOT 90 days
+- Write to patients.risk_score AND patients.risk_score_computed_at = now() (Fix 61)
 - Dashboard sorts by risk_tier then risk_score DESC
 
 Adaptive detection window — all 4 detectors (Fix 28, Phase 2):

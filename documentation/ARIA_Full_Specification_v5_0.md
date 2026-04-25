@@ -123,7 +123,16 @@ Implemented in `classify_comorbidity_concern(active_problems, problem_assessment
 
 **Known defect (Audit item 3):** Pattern B fires when a patient's BP is actively declining (e.g. falling from 170 to 135) because the 28-day window mean is still above 140. This fires on exactly the patients whose treatment is succeeding.
 
-**Phase 0 fix (immediate):** Add Pattern B suppression block. If `slope < -0.3 AND recent_7day_avg < patient_threshold AND days_since_med_change <= 42`: suppress Pattern B to `"none"` with interpretation "treatment appears effective — monitoring." The 42-day medication change gate aligns with Fix 34's titration window — most antihypertensive adjustments take 4–6 weeks to produce a full response. A shorter 14-day gate fires false positives on patients 20–40 days into a successful titration. Suppression must not apply when no recent change occurred (a noise-driven slightly-negative slope on a persistently elevated patient with no change is NOT a succeeding treatment — this was the root cause of the shadow mode false negative before it was resolved).
+**Phase 0 fix (immediate):** Add Pattern B suppression block. If `slope < -0.3 AND recent_7day_avg < patient_threshold AND days_since_med_change <= titration_window`: suppress Pattern B to `"none"` with interpretation "treatment appears effective — monitoring."
+
+`titration_window` is drug-class-aware — derived from the most recently changed drug in `clinical_context.med_history` using the `TITRATION_WINDOWS` lookup dict:
+- Diuretics → 14 days
+- Beta-blockers → 14 days
+- ACE inhibitors / ARBs → 28 days
+- Long-acting CCBs (amlodipine) → 56 days
+- Default (other or unknown class) → 42 days
+
+A blanket 42-day gate over-suppresses Pattern B on fast-acting drugs (diuretics, beta-blockers) and under-suppresses on amlodipine. Suppression must not apply when no recent medication change occurred — a noise-driven slightly-negative slope on a persistently elevated patient with no change is NOT a succeeding treatment. This was the root cause of the shadow mode false negative before it was resolved.
 
 **Phase 0 fix (immediate):** Write adherence Pattern A alerts to the `alerts` table (`alert_type = "adherence"`). Currently, adherence is the only Layer 1 detector that does not produce an alert row, making it invisible in the urgent_flags briefing section.
 
@@ -158,10 +167,18 @@ After all Layer 1 detectors complete, the risk scorer computes a numeric priorit
 | Signal | Weight | Source |
 |---|---|---|
 | 28-day avg systolic vs personal baseline | 30% | readings table |
-| Days since last medication change | 25% | clinical_context.last_med_change |
+| Days since last medication change | 25% | clinical_context.med_history JSONB (Phase 2+) / last_med_change column (Phase 0 interim) |
 | Adherence rate (inverted) | 20% | medication_confirmations table |
-| Gap duration (days without reading) | 15% | readings table |
-| Active comorbidity count | 10% | clinical_context.problem_codes |
+| Gap duration (days without reading) | 15% | readings table (normalised by adaptive window_days, not fixed 14) |
+| Active comorbidity severity | 10% | clinical_context.problem_codes |
+
+#### Signal Normalisation — Fix 58 (Phase 0)
+
+`sig_gap = clamp(gap_days / window_days * 100.0)` — uses the **adaptive window** computed from visit interval (14–90 days). The previous divisor of 14.0 saturated at 14 days; a 45-day gap and a 14-day gap both scored 100/100, eliminating differentiation for quarterly-visit patients.
+
+`sig_inertia = clamp(days_since_med_change / 180.0 * 100.0)` — saturates at 6 months (180 days). The previous divisor of 90.0 maxed out at 3 months, treating a 91-day and a 5-year gap identically.
+
+`risk_score_computed_at TIMESTAMPTZ` is written alongside `risk_score` on every update. The frontend shows a staleness badge when `risk_score_computed_at` is older than 26 hours — one missed sweep is tolerable, a second is not.
 
 #### Comorbidity Scoring — Severity-Weighted Model **(ROADMAP — Phase 0)**
 
@@ -184,6 +201,8 @@ Total clamped to 100. CHF + Diabetes = 40/100; CHF + Stroke = 50/100; provides m
 ### 2.3 Layer 3 — LLM Explanation (Optional) **(CURRENT)**
 
 The optional readable summary layer converts the deterministic briefing JSON from Layer 1 into a 3-sentence readable summary per section. Model: `claude-sonnet-4-20250514` via Anthropic API. The prompt template is stored in `prompts/briefing_summary_prompt.md`. Every Layer 3 call must log `model_version`, `prompt_hash`, and `generated_at` in the briefings table. Layer 3 never runs before the Layer 1 deterministic briefing is complete and verified. The deterministic briefing JSON is always the primary output — Layer 3 is additive.
+
+**Layer 3 Output Validation (implemented — commit db6092b):** `backend/app/services/briefing/llm_validator.py` is implemented with 14 checks across 3 groups: PHI leak detection, prompt injection detection, and 10 guardrail/faithfulness checks. 57 tests pass in `tests/test_llm_validator.py`. Every LLM response must pass both the guardrails check and the faithfulness check before `readable_summary` is stored; on failure the validator logs a warning, retries once, then stores `readable_summary=None`. All validation outcomes are written to `audit_events` (`action="llm_validation"`). The `check_problem_assessments` check was strengthened on 2026-04-25 to validate condition names against the Layer 1 payload even when `active_problems` is non-empty, using a synonym map to prevent false positives on known condition name variants.
 
 ### 2.4 MVP Build Scope
 
@@ -423,6 +442,7 @@ ARIA uses eight PostgreSQL tables in the MVP runtime, with additional tables in 
 | risk_tier | TEXT NOT NULL | 'high' \| 'medium' \| 'low' |
 | tier_override | TEXT | 'CHF in problem list' \| 'Stroke history' \| 'TIA history' |
 | risk_score | NUMERIC(5,2) | Layer 2 weighted priority score 0.0–100.0 |
+| risk_score_computed_at | TIMESTAMPTZ | Set on every risk_score update. Frontend shows staleness badge if > 26 hours. |
 | monitoring_active | BOOLEAN DEFAULT TRUE | FALSE = EHR-only pathway |
 | next_appointment | TIMESTAMPTZ | Used by 7:30 AM briefing scheduler |
 | enrolled_at | TIMESTAMPTZ DEFAULT NOW() | |
@@ -609,6 +629,7 @@ ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS last_clinic_weight_kg NUME
 ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS last_clinic_spo2 SMALLINT;
 ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS recent_labs JSONB;
 ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS problem_assessments JSONB;
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS risk_score_computed_at TIMESTAMPTZ;
 ```
 
 ### 6.9 Idempotency — Current and Target
@@ -718,9 +739,11 @@ WHERE r.patient_id = $1
 GROUP BY r.reading_id, r.effective_datetime, r.systolic_avg
 ORDER BY r.effective_datetime ASC;
 
--- Pattern A: high systolic + low adherence_pct → possible adherence concern
+-- Pattern A: high systolic + low adherence_pct → possible adherence concern → writes alert row
 -- Pattern B: high systolic + high adherence_pct → possible treatment-review case
---            (suppressed if slope < -0.3 AND recent_7day < threshold AND days_since_med_change <= 42)
+--            (suppressed if slope < -0.3 AND recent_7day < threshold AND days_since_med_change <= titration_window)
+--            titration_window is drug-class-aware (TITRATION_WINDOWS): diuretics/beta-blockers → 14d,
+--            ACE/ARBs → 28d, amlodipine → 56d, default → 42d. Not suppressed if no recent med change.
 -- Pattern C: normal systolic + low adherence_pct → contextual review
 ```
 
@@ -779,8 +802,10 @@ ON CONFLICT (idempotency_key) DO NOTHING;
 
 ### 8.3 Medication Status — Titration Window Messaging *(v5.0 Phase 2)*
 
-When `days_since_med_change <= 42`:
+When `days_since_med_change <= titration_window`, append:
 > "— within expected titration window, full response may not yet be established."
+
+`titration_window` is drug-class-aware (TITRATION_WINDOWS): diuretics/beta-blockers → 14d, ACE inhibitors/ARBs → 28d, long-acting CCBs (amlodipine) → 56d, default → 42d. Uses the same lookup as Pattern B suppression so the briefing message and the suppression condition are always consistent with each other.
 
 ### 8.4 Duplicate Inertia Logic Removal *(v5.0 Phase 2)*
 
@@ -857,13 +882,16 @@ Phases are ordered so that no fix depends on an incomplete prerequisite. Fixes w
 | # | Fix | File | Size |
 |---|---|---|---|
 | 2 | Add threshold gate to deterioration detector | deterioration_detector.py | 1 line |
-| 3 + 26 | Pattern B suppression + 42-day med change gate | adherence_analyzer.py | ~17 lines |
+| 3 + 26 | Pattern B suppression + drug-class-aware TITRATION_WINDOWS gate | adherence_analyzer.py | ~20 lines |
 | 11 | Write adherence alert row in processor | processor.py | 3 lines |
 | 30 | Set `delivered_at` on alert insert | processor.py | 1 line |
 | 20 | Read appointment date from patient record | processor.py | 5 lines |
 | 25 | Severity-weighted comorbidity risk score | risk_scorer.py | ~20 lines |
+| 58 | Fix sig_gap (use window_days not /14) and sig_inertia (divisor 180 not 90) | risk_scorer.py | 3 lines |
+| 61 | Add `risk_score_computed_at` column; set on every score update | patient.py, risk_scorer.py, setup_db.py | 4 lines |
+| 48–57 | Layer 3 LLM output validation + guardrails | llm_validator.py (new), summarizer.py | ~200 lines |
 
-After Phase 0: trigger `pattern_recompute` via admin endpoint to refresh all production scores.
+After Phase 0: trigger `pattern_recompute` via admin endpoint to refresh all production scores and alerts with corrected logic.
 
 ### Phase 1 — Ingestion Data Fixes (Single Re-Ingestion Pass)
 
@@ -1073,11 +1101,11 @@ A consistency check flags if readings resume from the same BLE source shortly af
 | Therapeutic inertia | Failure to intensify treatment when readings are consistently above target |
 | Patient-adaptive threshold | `max(130, stable_baseline_mean + 1.5 × SD)` capped at 145 mmHg — derived from patient's own BP history |
 | Comorbidity-adjusted threshold | Patient threshold reduced by 7 mmHg (floor 130) when cardiovascular + metabolic comorbidities simultaneously in elevated concern state |
-| Pattern B suppression | Suppressing treatment-review classification when slope < -0.3 AND recent 7-day avg < threshold AND medication changed within 14 days |
+| Pattern B suppression | Suppressing treatment-review classification when slope < -0.3 AND recent 7-day avg < threshold AND medication changed within `titration_window` (drug-class-aware: diuretics/beta-blockers 14d, ACE/ARBs 28d, amlodipine 56d, default 42d). Not applied when no recent medication change exists. |
 | Shadow mode | Validation: ARIA alert engine vs iEMR physician PROBLEM_STATUS2_FLAG ground truth. v4.3 result: 94.3% (33/35, 0 FN, 2 FP) |
 | White-coat adherence | BP readings improve before appointments and return to elevated levels afterwards |
 | Full care timeline | Synthetic readings generated between all consecutive clinic BP pairs spanning the patient's entire care history |
 | Medication Possession Ratio (MPR) | Proportion of days medication was available based on dispensing history — proxy for adherence |
 | Parallel arrays | `active_problems[n]` corresponds to `problem_codes[n]`, `historic_bp_systolic[n]` to `historic_bp_dates[n]` |
-| cold start | Patient enrolled with no home readings yet — minimum 14-day window required before pattern analysis |
+| cold start | Patient enrolled with no home readings yet — minimum 21-day monitoring period required before pattern analysis (inertia, deterioration, adherence detectors suppressed; gap detector still runs) |
 | Dead-letter queue | Job status after 3 retry failures — surfaced in admin dashboard for investigation |

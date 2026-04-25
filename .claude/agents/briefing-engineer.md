@@ -27,7 +27,9 @@ All language hedged: possible may suggest not definitive.
 LLM layer: log model_version + prompt_hash + generated_at.
 Briefing view: update read_at + write audit_events.
 
-medication_status (Fix 34): append titration window notice when days_since_med_change <= 42 days.
+medication_status (Fix 34): append titration window notice when days_since_med_change <= titration_window.
+  titration_window is drug-class-aware (TITRATION_WINDOWS): diuretics/beta-blockers → 14d,
+  ACE/ARBs → 28d, amlodipine → 56d, default → 42d. Consistent with Pattern B suppression window.
 social_context (Fix 29): include clinical_context.social_context as patient_context field when non-null.
 Inertia in visit_agenda (Fix 18): consume inertia_result["inertia_detected"] from Layer 1 —
   NEVER re-implement inertia threshold logic inline in _build_visit_agenda().

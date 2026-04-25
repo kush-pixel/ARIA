@@ -94,7 +94,7 @@ Fires on any positive slope regardless of absolute BP level. A patient rising fr
 
 A patient whose BP is actively falling from 170 to 135 triggers Pattern B ("possible treatment review warranted") because the 28-day window mean is above 140. This fires on exactly the patients whose treatment is succeeding.
 
-**Fix:** After pattern classification, add a suppression block for Pattern B. Compute the slope over the adaptive window (Fix 28) and the 7-day recent average. If `slope < -0.3 AND recent_7day_avg < patient_threshold AND days_since_med_change <= 42`: suppress Pattern B to `"none"` with interpretation "treatment appears effective — monitoring." The 42-day medication change gate is aligned with Fix 34's titration window (physiologic response to most antihypertensive changes is established within 4–6 weeks) — a shorter 14-day gate fires false positives on patients still titrating. Suppression must not apply when no recent change occurred (root cause of the eliminated false negative in shadow mode: a persistently-elevated slightly-negative-slope patient with no recent change is NOT a succeeding treatment). Do Fix 3 before Fix 11 (writing adherence alerts) so suppression is in place before alerts start writing.
+**Fix:** After pattern classification, add a suppression block for Pattern B. Compute the slope over the adaptive window (Fix 28) and the 7-day recent average. If `slope < -0.3 AND recent_7day_avg < patient_threshold AND days_since_med_change <= titration_window`: suppress Pattern B to `"none"` with interpretation "treatment appears effective — monitoring." Rather than a blanket 42-day gate, derive `titration_window` from the most recently changed drug's class using a `TITRATION_WINDOWS` lookup dict: diuretics → 14 days, beta-blockers → 14 days, ACE inhibitors / ARBs → 28 days, long-acting CCBs (amlodipine) → 56 days, default → 42 days. Since `med_history` already has medication names and the `-olol`, `-pril`, `-sartan`, `-dipine` suffix patterns already exist in the codebase (llm_validator.py), class inference is a small additional function. A drug-class-aware window reduces both false positives (suppressing too long on fast-acting drugs) and false negatives (releasing too early on amlodipine). Suppression must not apply when no recent change occurred (root cause of the eliminated false negative in shadow mode: a persistently-elevated slightly-negative-slope patient with no recent change is NOT a succeeding treatment). Do Fix 3 before Fix 11 (writing adherence alerts) so suppression is in place before alerts start writing.
 
 ---
 
@@ -104,9 +104,9 @@ A patient whose BP is actively falling from 170 to 135 triggers Pattern B ("poss
 
 `clinical_context.last_med_change` is the most recent `authoredOn` across all `MedicationRequest` resources at ingestion time. Phone refill calls and in-person visits that changed medications between clinic dates — all captured in `clinical_context.med_history` JSONB — are invisible to the inertia detector. A patient who had a diuretic refill via phone call 5 days ago would still trigger inertia.
 
-**Fix (core — required):** Replace the `last_med_change` query with a query that reads `ClinicalContext.med_history` JSONB and finds the most recent `date` field across all entries where `date <= first_elevated_reading_date`. Mirrors `_get_last_med_change_at(timeline, cutoff_date)` from shadow mode. The `activity` field already distinguishes add/remove/modify at ingestion time — use `activity` in the gate (any add or modify within the last 42 days counts as a recent change; remove is treated as no recent change unless paired with an add).
+**Fix (core — required):** Replace the `last_med_change` query with a query that reads `ClinicalContext.med_history` JSONB and finds the most recent `date` field across all entries where `date <= first_elevated_reading_date`. Mirrors `_get_last_med_change_at(timeline, cutoff_date)` from shadow mode. The `activity` field already distinguishes add/remove/modify at ingestion time — use `activity` in the gate (any add or modify within the last 42 days counts as a recent change; remove is treated as no recent change unless paired with an add). Apply the identical fix to `risk_scorer.py`'s `_days_since_med_change()` helper — it also reads `ClinicalContext.last_med_change` directly, so the Layer 2 inertia signal carries the same staleness bug.
 
-**Fix (nice-to-have — deferred):** Parsing dose direction (increase vs decrease) from the `MED_DOSE` free-text field requires a structured dose parser (the strings are inconsistent — "25 MG", "25MG DAILY", "25mg bid", "TITRATE 12.5→25"). Defer to a later phase behind a dedicated `dose_parser.py` module. Do not gate core inertia logic on this. Implement the core fix together with Fix 1 since both touch `inertia_detector.py`.
+**Fix (nice-to-have — deferred):** Parsing dose direction (increase vs decrease) from the `MED_DOSE` free-text field is achievable without a free-text parser: when the same drug appears in consecutive `med_history` entries, compare the normalised numeric dose value. If the new entry has a higher value, it is an increase; lower is a decrease. This is more reliable than parsing strings like "25 MG", "25MG DAILY", "25mg bid", "TITRATE 12.5→25". Defer behind a dedicated `dose_parser.py` module. Do not gate core inertia logic on this. Implement the core fix together with Fix 1 since both touch `inertia_detector.py`.
 
 ---
 
@@ -332,7 +332,7 @@ Total clamped to 100. This gives CHF + Diabetes a score of 40/100 on this signal
 
 Without a medication-change gate, a patient with persistently elevated BP and a slightly negative slope (due to noise) incorrectly suppresses Pattern B — this was the root cause of the false negative in shadow mode before it was fixed. The gate must tie suppression to "a recent change the physician made that is plausibly still taking effect."
 
-**Fix:** In the Pattern B suppression block (part of Fix 3), add `AND days_since_med_change <= 42` as a required condition. The 42-day window aligns with Fix 34's titration window (the physiologic response to most antihypertensive changes is established within 4–6 weeks) — using a shorter 14-day window would fire false positives on patients who had a change 20–40 days ago and are now succeeding. The adherence analyzer reads `clinical_context.med_history` to find the most recent medication date (consistent with Fix 4). If no medication change exists or the change is older than 42 days, suppression does not apply.
+**Fix:** In the Pattern B suppression block (part of Fix 3), add `AND days_since_med_change <= titration_window` as a required condition, where `titration_window` is derived from the most recently changed drug's class (see Fix 3 for the `TITRATION_WINDOWS` lookup dict). Do not use a blanket 42 days — this over-suppresses on fast-acting drugs (diuretics, beta-blockers) and under-suppresses on amlodipine. The adherence analyzer reads `clinical_context.med_history` to find the most recent medication date (consistent with Fix 4). If no medication change exists or the change is older than the class-specific window, suppression does not apply.
 
 ---
 
@@ -398,12 +398,12 @@ Use this in place of the hard-coded `_WINDOW_DAYS = 28` in all four detector que
 
 ---
 
-### 33. Shadow mode window overlap not reported in summary
+### 33. Shadow mode window overlap not reported; no confidence interval or per-detector breakdown
 **Status:** NEW — not in original audit.
 
-Two evaluation points closer than 28 days apart share overlapping synthetic reading windows. The 35 labeled evaluation points are not fully independent — the effective independent sample is smaller than 35, though the 94.3% result is still valid.
+Two evaluation points closer than 28 days apart share overlapping synthetic reading windows. The 35 labeled evaluation points are not fully independent — the effective independent sample is smaller than 35, though the 94.3% result is still valid. Additionally, the 94.3% aggregate rate (33/35) has a 95% Wilson confidence interval of roughly [82%, 99%] — a 17-point spread that narrows only as the patient panel grows. Finally, the two disagreements could both be in the inertia detector, or split across detectors — the aggregate rate hides which specific detector to prioritise improving.
 
-**Fix:** Add to the shadow mode summary output: count evaluation points where `days_since_prior_eval_point >= 28` (fully independent) vs. those with overlap. Report as: "Fully independent evaluation points: N/35." No algorithm change required.
+**Fix:** Add to the shadow mode summary output: (1) count evaluation points where `days_since_prior_eval_point >= 28` (fully independent) vs. those with overlap — "Fully independent evaluation points: N/35"; (2) Wilson 95% confidence interval on the agreement rate — `lower, upper = wilson_ci(agreed, total)`; (3) per-detector breakdown — for each disagreement, record which detector fired incorrectly (inertia / deterioration / adherence) and report "Inertia: N/M, Deterioration: N/M, Adherence: N/M." No algorithm change required. This decomposition is the primary guide for which detector to prioritise in subsequent fixes.
 
 ---
 
@@ -412,7 +412,7 @@ Two evaluation points closer than 28 days apart share overlapping synthetic read
 
 When a medication was changed 25 days ago, the inertia detector correctly does not fire. But the briefing gives no structured signal that the patient is in a titration period. The physician has no indication that current elevated readings may still be responding to a recent change.
 
-**Fix:** In `_build_medication_status()` in `composer.py`, when `days_since_med_change <= 42`: append "— within expected titration window, full response may not yet be established." Informs the physician without making a clinical judgment. One conditional string append.
+**Fix:** In `_build_medication_status()` in `composer.py`, when `days_since_med_change <= titration_window` (derived from the changed drug's class — see Fix 3 `TITRATION_WINDOWS` dict): append "— within expected titration window, full response may not yet be established." Use the same drug-class-aware window as Fixes 3 and 26 so the briefing message is consistent with suppression logic: a patient on amlodipine gets a 56-day notice, not a 42-day one. Informs the physician without making a clinical judgment. One conditional string append plus a call to the shared `TITRATION_WINDOWS` lookup.
 
 ---
 
@@ -423,7 +423,7 @@ When a medication was changed 25 days ago, the inertia detector correctly does n
 
 The raw iEMR `MED_REC_NO` (`1091`) is used as `patient_id` throughout the DB and logs. For the current de-identified research dataset, this is the hospital record number. If it can be cross-referenced with hospital records by anyone with DB or log access, the de-identification is incomplete.
 
-**Fix:** Verify the `patient_id` in the patients table is a research pseudonym, not the actual MED_REC_NO. If it is `1091`, replace it at the adapter level with a generated pseudonym (e.g., `ARIA-001`) before any demo with external observers. Also verify no log line emits the raw MED_REC_NO at INFO level.
+**Fix:** Apply HMAC-based pseudonymization at the adapter level before any data enters the DB: `patient_id = hmac_sha256(secret_key, med_rec_no.encode())[:16]`. Add `PATIENT_PSEUDONYM_KEY` to `Settings` in `config.py` — stored in `backend/.env`, excluded from git. This approach is deterministic (same MED_REC_NO always produces the same pseudonym across re-ingestion runs), non-reversible without the key, and requires no separate mapping table. Sequential identifiers like `ARIA-001` are pseudonymization by obscurity — anyone with the run order or a mapping table can reverse them. A simple sequential scheme also does not scale to multi-site deployment where two sites must independently produce consistent pseudonyms for the same patient. Also verify no log line emits the raw MED_REC_NO at INFO level — grep for the literal `1091` in log output.
 
 ---
 
@@ -439,6 +439,8 @@ The raw iEMR `MED_REC_NO` (`1091`) is used as `patient_id` throughout the DB and
 
 ### 38. Audit enforcement is application-level only
 **Fix:** Add a PostgreSQL trigger on the `readings` table that inserts an `audit_events` row on every INSERT so a direct DB write or an application bug still produces an audit record. A naive trigger cannot replicate the structured fields the application-level audit populates (`actor_id`, `request_id`, `details`) — these must be threaded through via PostgreSQL `SET LOCAL` session variables set by the application at the start of each request (`SET LOCAL aria.actor_id = '...'`; `SET LOCAL aria.request_id = '...'`). The trigger reads them via `current_setting('aria.actor_id', true)` and defaults to `system` / NULL when unset (e.g., direct DB writes). This requires a small application-layer helper that sets the session variables inside each DB transaction — not "no application code change" as originally stated. Document the trigger behaviour as a safety net with reduced fidelity for non-application writes.
+
+Additionally, apply PostgreSQL Row-Level Security (RLS) on the `readings` table to force all writes through the application role. Without RLS, a direct admin DB connection or a future application bug that skips the `SET LOCAL` call still produces an audit row with `actor_id=NULL` — the audit record exists but is uninformative. With RLS, the policy can enforce that only the designated application role (`aria_app`) may INSERT, making it structurally impossible for unaudited writes to succeed. Enable with `ALTER TABLE readings ENABLE ROW LEVEL SECURITY` and a permissive policy for the `aria_app` role. Admin access uses a superuser role that bypasses RLS by design — document this explicitly as the one permitted unaudited write path (DB migrations, data recovery).
 
 ---
 
@@ -565,7 +567,7 @@ The spec (`summarizer.py` docstring, `ARIA_SOP_v2_0.md` section 2.3, `CLAUDE.md`
 
 The LLM could mention a drug not in the patient's current medication list. For a patient with 14 active medications (patient 1091), the risk of hallucinating a plausible drug name is real. A clinician reading "consider reviewing amlodipine dosing" when the patient isn't on amlodipine would be misled.
 
-**Fix:** Add `check_medication_hallucination(text, payload)` in `llm_validator.py`. Extract drug-like tokens from text using suffix patterns (`-olol`, `-pril`, `-sartan`, `-pine`, `-ide`, `-statin`, `-mab`) and capitalised known drug names. Each must appear in `payload["medication_status"]`. On mismatch: `failed_check="medication_hallucination"`, `detail=unknown_drug_name`.
+**Fix:** Add `check_medication_hallucination(text, payload)` in `llm_validator.py`. Extract drug-like tokens from text using suffix patterns (`-olol`, `-pril`, `-sartan`, `-dipine`, `-statin`, `-mab`) and a curated list of known unsuffixed names. Rather than checking each token against the full `payload["medication_status"]` string with `in`, build a token set from the payload at validation time: `med_tokens = set(re.findall(r'\b[a-z]+\b', medication_status.lower()))`, then check `word in med_tokens`. The string-level `in` check has a false-positive risk: "prilosec" (a brand name for omeprazole) contains the substring "pril" at its start and would be flagged as drug-like, then fail the `in medication_status` check even though the patient is on omeprazole — the names don't match. Token-set membership avoids this: "prilosec" is not a token in `{"omeprazole", "metoprolol", ...}` and would fail, but this can be addressed by adding brand-to-generic synonyms (prilosec → omeprazole, lasix → furosemide) to a `_BRAND_GENERIC` dict consulted before the final check. On mismatch with no synonym match: `failed_check="medication_hallucination"`, `detail=unknown_drug_name`.
 
 ---
 
@@ -608,6 +610,49 @@ The faithfulness checks (Fix 49) test whether the LLM has support for what it cl
 
 ---
 
+### 58. Risk scorer `sig_gap` saturates at 14 days — misaligned with adaptive window
+**File:** `backend/app/services/pattern_engine/risk_scorer.py` line 159
+**Severity: Medium**
+**Status:** NEW — identified during implementation review.
+
+`sig_gap = _clamp(gap_days / 14.0 * 100.0)` saturates at 14 days: a 45-day gap and a 14-day gap both score 100/100 on this signal, eliminating differentiation for patients on quarterly schedules. Fix 28 extends the adaptive window to 90 days, but the risk scorer's gap normalization was never updated to match.
+
+**Fix:** Replace the hard-coded divisor with the adaptive window value: `sig_gap = _clamp(gap_days / window_days * 100.0)` where `window_days` is computed by the same adaptive window logic as the detectors (Fix 28). Pass `window_days` into `compute_risk_score()` or recompute it from `next_appointment` and `last_visit_date` within the scorer. Also update `sig_inertia = _clamp(_days_since_med_change / 180.0 * 100.0)` — the current divisor of 90.0 means any patient with no med change for more than 90 days scores 100/100 regardless of whether that is 91 days or 5 years; 180 days (6 months) is a more clinically meaningful saturation point. Implement together with Fix 4's risk_scorer.py `med_history` fix.
+
+---
+
+### 59. BP variability not surfaced as an independent risk signal
+**Severity: High**
+**Status:** NEW — not in original audit.
+
+All four Layer 1 detectors and the Layer 2 risk score focus on the BP mean. High day-to-day BP variability — measured as coefficient of variation (CV = SD / mean) > 12% — is an independent cardiovascular risk factor separate from elevated mean. A patient oscillating 130→165→132→168 over two weeks has a materially different risk profile from one stable at 152, yet ARIA currently treats them identically. The synthetic generator already models realistic SD (8–12 mmHg) but it is never analysed.
+
+**Fix:** Add `run_variability_detector(session, patient_id, window_days)` to a new `variability_detector.py` in `pattern_engine/`. Compute `cv = stddev(systolic_avg) / avg(systolic_avg) * 100` over the adaptive window. Thresholds: CV ≥ 15% → flag "high BP variability — consider 24h ambulatory monitoring or ABPM referral"; CV 12–14% → "moderate variability — monitor trend." Add `variability_flag` to the Layer 1 output passed to the briefing composer. Surface in `visit_agenda` at priority level 3 (after inertia, before overdue labs). Add `variability_score` component to the Layer 2 risk scorer (5% weight, drawn from the `sig_systolic` allocation) so patients with identical means but high variability rank higher within their tier. Prerequisite: Fix 15 (full-timeline readings) for meaningful long-window variability calculation.
+
+---
+
+### 60. Background worker uses 30-second polling — high latency and unnecessary DB load
+**File:** `backend/app/services/worker/processor.py`
+**Severity: Medium**
+**Status:** NEW — not in original audit.
+
+The `processor.py` polling loop queries `processing_jobs WHERE status='queued'` every 30 seconds. At GP-panel scale (1800 patients), the midnight sweep enqueues ~1800 jobs. Under 30-second polling, the first batch of jobs may not start processing until nearly 30 seconds after enqueue, and the 7:30 AM briefing window imposes a hard deadline. The constant polling also adds ~2880 unnecessary DB queries per day when no jobs are queued.
+
+**Fix:** Replace the polling loop with PostgreSQL `LISTEN/NOTIFY`. In `ingestion.py` and `scheduler.py`, after every `INSERT INTO processing_jobs`, execute `NOTIFY aria_jobs, job_id`. In `processor.py`, open a persistent `asyncpg` connection and call `await conn.add_listener('aria_jobs', callback)`. The worker wakes immediately on notification with near-zero latency — no polling overhead when idle. Keep a 60-second fallback `SELECT` poll as a safety net for missed notifications (connection drops, restart recovery). This requires no additional infrastructure — `LISTEN/NOTIFY` is built into PostgreSQL and already available via the Supabase connection. Implement in Phase 4 alongside the scheduler fixes.
+
+---
+
+### 61. No staleness indicator on `patients.risk_score`
+**File:** `backend/app/models/patient.py`, `backend/app/services/pattern_engine/risk_scorer.py`
+**Severity: Low**
+**Status:** NEW — not in original audit.
+
+`patients.risk_score` has no corresponding timestamp. If the midnight sweep fails for any reason (server outage, DB connection timeout, APScheduler miss), the GP's dashboard displays a stale score with no visual indication. A score computed 48 hours ago during an acute patient episode is clinically misleading.
+
+**Fix:** Add `risk_score_computed_at TIMESTAMPTZ` column to the `patients` table via `setup_db.py` (`ADD COLUMN IF NOT EXISTS`, safe to re-run). Update `risk_scorer.py` to set `risk_score_computed_at = datetime.now(UTC)` alongside `risk_score` in the `UPDATE` statement. In the frontend `PatientList.tsx`, display a staleness badge on any patient whose `risk_score_computed_at` is older than 26 hours — a single missed sweep is tolerable, a second is not. Phase 0 — no dependencies.
+
+---
+
 ## Implementation Roadmap
 
 Phases are ordered so that no fix depends on an incomplete prerequisite. Fixes within a phase can run in parallel.
@@ -620,12 +665,14 @@ No dependencies. Fix wrong output on current data. No re-ingestion required. Sta
 | # | Fix | File | Size |
 |---|---|---|---|
 | 2 | Add threshold gate to deterioration detector | deterioration_detector.py | 1 line |
-| 3 | Pattern B treatment-working suppression | adherence_analyzer.py | ~15 lines |
-| 26 | Add 42-day med change condition to Pattern B suppression | adherence_analyzer.py | 2 lines |
+| 3 | Pattern B treatment-working suppression + drug-class titration window | adherence_analyzer.py | ~20 lines |
+| 26 | Add class-aware med change condition to Pattern B suppression | adherence_analyzer.py | 2 lines |
 | 11 | Write adherence alert row in processor | processor.py | 3 lines |
 | 30 | Set `delivered_at` on alert insert | processor.py | 1 line |
 | 20 | Read appointment date from patient record | processor.py | 5 lines |
 | 25 | Fix comorbidity risk score saturation | risk_scorer.py | 5 lines |
+| 58 | Fix sig_gap and sig_inertia normalization in risk scorer | risk_scorer.py | 3 lines |
+| 61 | Add `risk_score_computed_at` column + set on every score update | patient.py, risk_scorer.py, setup_db.py | 4 lines |
 | 48–57 | Layer 3 LLM output validation + guardrails | llm_validator.py (new), summarizer.py | ~200 lines |
 
 After Phase 0: trigger `pattern_recompute` via admin endpoint to refresh all production scores and alerts with the corrected logic.
@@ -652,14 +699,15 @@ Apply after Phase 1 data is in the DB. Fixes 1, 4, 5, 27, and 28 all touch the s
 
 | # | Fix | Files |
 |---|---|---|
-| 1, 4 | Patient-adaptive threshold + `med_history` in inertia detector | inertia_detector.py |
+| 1, 4 | Patient-adaptive threshold + `med_history` in inertia detector + identical fix to risk_scorer.py | inertia_detector.py, risk_scorer.py |
 | 18 | Remove duplicate inertia from briefing composer | composer.py |
 | 5 | Apply comorbidity-adjusted threshold to production detectors (degraded mode until Fix 7 full mode) | threshold_utils.py (new), all 4 detectors |
 | 2 (ext) | Add step-change sub-detector to deterioration | deterioration_detector.py |
 | 27 | Exclude white-coat pre-visit window (5 days) | inertia_detector.py, deterioration_detector.py |
 | 28 | Adaptive window with conservative fallback when full-timeline data absent | all 4 detectors |
 | 29 | Surface social context in briefing | composer.py |
-| 34 | Surface medication titration timing in briefing | composer.py |
+| 34 | Surface drug-class-aware titration timing in briefing | composer.py |
+| 59 | BP variability detector — CV threshold signal | variability_detector.py (new), processor.py, composer.py |
 
 After Phase 2: run shadow mode. Agreement rate should be at 94.3% or better with production detectors.
 
@@ -688,6 +736,7 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 | 47 | Long-term trend layer in briefing | composer.py |
 | 46 | Mini-briefing for between-visit urgent alerts | processor.py, composer.py |
 | 40 | Dead-letter queue (max 3 retries) | processor.py |
+| 60 | Replace 30s polling with PostgreSQL LISTEN/NOTIFY | processor.py, scheduler.py, ingestion.py |
 
 ---
 
@@ -700,7 +749,7 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 | 41 | Gap explanations table and API | new table, new API route |
 | 13 | Shadow mode CLI argument | run_shadow_mode.py |
 | 32 | Remove `run_ingestion.py` default bundle | run_ingestion.py |
-| 33 | Shadow mode window overlap reporting | run_shadow_mode.py |
+| 33 | Shadow mode window overlap + CI + per-detector breakdown | run_shadow_mode.py |
 
 ---
 
@@ -732,10 +781,10 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 
 | # | Fix |
 |---|---|
-| 35 | Verify patient research ID pseudonymization |
+| 35 | HMAC-based patient pseudonymization (replace MED_REC_NO at adapter level) |
 | 36 | Confirm JWT expiry ≤ 1 hour |
 | 37 | Add API rate limiting (slowapi) |
-| 38 | DB-level audit trigger on readings table |
+| 38 | DB-level audit trigger + Row-Level Security on readings table |
 | 39 | Enable MFA in Supabase Auth |
 | 16 | Lab values ingestion (FHIR Observation, LOINC codes) |
 | new | EHR adapter generalization (generic FHIR R4, not iEMR-specific) |
@@ -772,19 +821,19 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 | 23 | Medium | Briefing icon today-only | PatientList.tsx | 6 |
 | 24 | Medium | Alert API no patient_id filter | alerts.py | 5 |
 | 25 | Medium | Comorbidity score saturates at 5 problems | risk_scorer.py | 0 |
-| 26 | Medium | Pattern B suppression missing 42-day med change condition | adherence_analyzer.py | 0 |
+| 26 | Medium | Pattern B suppression missing drug-class-aware med change condition | adherence_analyzer.py | 0 |
 | 27 | Medium | White-coat window not excluded from threshold comparisons | detectors | 2 |
 | 28 | Medium | 28-day window does not adapt to visit interval | all detectors | 2 |
 | 29 | Low | social_context never in briefing | composer.py | 2 |
 | 30 | Low | delivered_at never set on alerts | processor.py | 0 |
 | 31 | Low | Duplicate sort backend + frontend | PatientList.tsx | 6 |
 | 32 | Low | run_ingestion.py default bundle hardcoded | run_ingestion.py | 5 |
-| 33 | Low | Shadow mode window overlap not reported | run_shadow_mode.py | 5 |
-| 34 | Low | Medication titration timing not in briefing | composer.py | 2 |
-| 35 | Infra | Patient research ID pseudonymization unverified | DB config | 8 |
+| 33 | Low | Shadow mode: window overlap + CI + per-detector breakdown not reported | run_shadow_mode.py | 5 |
+| 34 | Low | Medication titration timing not in briefing — use drug-class-aware window | composer.py | 2 |
+| 35 | Infra | Patient research ID — HMAC-based pseudonymization (not sequential IDs) | adapter.py, config.py | 8 |
 | 36 | Infra | JWT expiry not verified | auth config | 8 |
 | 37 | Infra | No API rate limiting | FastAPI middleware | 8 |
-| 38 | Infra | Audit enforcement application-level only | DB trigger | 8 |
+| 38 | Infra | Audit trigger + Row-Level Security on readings table | DB trigger, RLS policy | 8 |
 | 39 | Infra | No MFA | Supabase Auth | 8 |
 | 40 | Infra | No dead-letter queue | processor.py | 4 |
 | 41 | Feature | Gap explanations (device vs non-compliance) | new table + API | 5 |
@@ -799,10 +848,14 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 | 50 | Critical | Layer 3: PHI leak possible in readable_summary | llm_validator.py (new) | 0 |
 | 51 | High | Layer 3: no prompt injection detection | llm_validator.py (new) | 0 |
 | 52 | Medium | Layer 3: sentence count not validated (spec requires 3) | llm_validator.py (new) | 0 |
-| 53 | High | Layer 3: medication name hallucination not detected | llm_validator.py (new) | 0 |
+| 53 | High | Layer 3: medication hallucination — use payload-derived token set + brand/generic synonyms | llm_validator.py (new) | 0 |
 | 54 | Medium | Layer 3: BP values not validated for plausibility | llm_validator.py (new) | 0 |
 | 55 | High | Layer 3: validation outcome not in audit_events | llm_validator.py (new) | 0 |
 | 56 | Low | Layer 3: no retry on validation failure | summarizer.py | 0 |
 | 57 | Medium | Layer 3: contradiction detection missing | llm_validator.py (new) | 0 |
+| 58 | Medium | Risk scorer: sig_gap saturates at 14 days, sig_inertia at 90 days — misaligned with adaptive window | risk_scorer.py | 0 |
+| 59 | High | BP variability (CV%) missing as independent risk signal | variability_detector.py (new) | 2 |
+| 60 | Medium | 30s polling — replace with PostgreSQL LISTEN/NOTIFY | processor.py, scheduler.py | 4 |
+| 61 | Low | No staleness indicator on risk_score — add risk_score_computed_at | patient.py, risk_scorer.py, setup_db.py | 0 |
 
-The five Critical items (1–5) affect clinical output correctness in live production. Items 6–17 are high-priority operational and clinical data gaps. Items 18–28 affect demo quality and detection accuracy. Items 48–50 are new Critical items affecting Layer 3 clinical safety — addressable in Phase 0 with no dependencies. Phase 0 fixes require no data migration and can begin immediately.
+The five Critical items (1–5) affect clinical output correctness in live production. Items 6–17 are high-priority operational and clinical data gaps. Items 18–28 affect demo quality and detection accuracy. Items 48–50 are new Critical items affecting Layer 3 clinical safety — addressable in Phase 0 with no dependencies. Items 58 and 61 are Phase 0 fixes requiring no data migration. Phase 0 fixes require no data migration and can begin immediately.

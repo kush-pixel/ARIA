@@ -72,6 +72,29 @@ _INJECTION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bAssistant:"), "assistant_colon"),
 ]
 
+# ── Condition synonym map ─────────────────────────────────────────────────────
+# LLM-facing term → set of lowercase terms that count as payload support.
+# Prevents false positives when LLM writes "heart failure" for payload "CHF".
+_CONDITION_SYNONYMS: dict[str, frozenset[str]] = {
+    "heart failure":       frozenset({"chf", "heart failure", "cardiac failure", "congestive heart"}),
+    "chf":                 frozenset({"chf", "heart failure", "cardiac failure", "congestive heart"}),
+    "atrial fibrillation": frozenset({"atrial fibrillation", "afib", "a-fib", "af "}),
+    "afib":                frozenset({"atrial fibrillation", "afib", "a-fib", "af "}),
+    "a-fib":               frozenset({"atrial fibrillation", "afib", "a-fib", "af "}),
+    "diabetes":            frozenset({"diabetes", "t2dm", "type 2", "dm"}),
+    "t2dm":                frozenset({"diabetes", "t2dm", "type 2", "dm"}),
+    "ckd":                 frozenset({"ckd", "renal", "chronic kidney", "kidney disease"}),
+    "renal":               frozenset({"ckd", "renal", "chronic kidney", "kidney disease"}),
+    "stroke":              frozenset({"stroke", "cva", "cerebrovascular"}),
+    "tia":                 frozenset({"tia", "transient ischemic"}),
+    "cad":                 frozenset({"cad", "coronary artery disease", "coronary artery"}),
+    "hypertension":        frozenset({"hypertension", "htn", "high blood pressure"}),
+    "htn":                 frozenset({"hypertension", "htn", "high blood pressure"}),
+}
+
+# Ordered so longer phrases are checked before substrings ("atrial fibrillation" before "atrial")
+_CONDITION_NAMES: tuple[str, ...] = tuple(sorted(_CONDITION_SYNONYMS, key=len, reverse=True))
+
 # ── Drug name detection ───────────────────────────────────────────────────────
 
 # Searches for common drug class suffixes anywhere within a lowercase word.
@@ -352,31 +375,38 @@ def check_overdue_labs(text: str, payload: dict[str, Any]) -> ValidationResult:
 def check_problem_assessments(text: str, payload: dict[str, Any]) -> ValidationResult:
     """Validate medical condition references are grounded in payload active_problems.
 
-    Only fires when active_problems is explicitly empty — guards against the LLM
-    inventing conditions when no problem data exists.
+    Checks every recognised condition name mentioned in the LLM output against
+    the payload's active_problems list and problem_assessments keys. A condition
+    is accepted if any of its canonical synonyms appears (case-insensitive) in
+    the known payload terms — preventing false positives when the LLM writes
+    "heart failure" for a payload entry of "CHF".
+
+    Fires regardless of whether active_problems is empty or populated, so
+    hallucinated conditions are caught even when the patient has other real problems.
 
     Args:
         text: Raw LLM output string.
         payload: Layer 1 briefing payload dict.
 
     Returns:
-        Failed result if conditions mentioned with no active_problems in payload.
+        Failed result on first condition mentioned that cannot be grounded in payload.
     """
-    active_problems = payload.get("active_problems")
-    if active_problems:
-        return ValidationResult(passed=True)  # problems exist — no hallucination to catch
+    active_problems: list[str] = payload.get("active_problems") or []
+    problem_assessments: dict = payload.get("problem_assessments") or {}
 
-    condition_names = [
-        "hypertension", "chf", "heart failure", "diabetes", "t2dm",
-        "ckd", "renal", "cad", "stroke", "tia", "atrial fibrillation",
-    ]
+    # Build a single lowercase string of all known payload condition terms for fast substring search
+    known_terms = " ".join(active_problems).lower() + " " + " ".join(problem_assessments.keys()).lower()
+
     text_lower = text.lower()
-    for condition in condition_names:
-        if condition in text_lower:
+    for condition in _CONDITION_NAMES:
+        if condition not in text_lower:
+            continue
+        synonyms = _CONDITION_SYNONYMS[condition]
+        if not any(syn in known_terms for syn in synonyms):
             return ValidationResult(
                 passed=False,
                 failed_check="problem_hallucination",
-                detail=f"LLM mentions '{condition}' but payload active_problems is empty",
+                detail=f"LLM mentions '{condition}' which is not in payload active_problems",
             )
     return ValidationResult(passed=True)
 

@@ -31,7 +31,9 @@ Pattern engine:
   [ ] Deterioration has absolute threshold gate (recent_avg >= patient_threshold)
   [ ] Deterioration has step-change sub-detector (7d rolling mean delta >= 15 mmHg)
   [ ] Adherence pattern A/B/C distinction made; Pattern B suppression applied
-  [ ] Pattern B suppression uses med_change <= 42d gate (aligned with Fix 34 titration window)
+  [ ] Pattern B suppression uses drug-class-aware titration_window (TITRATION_WINDOWS, NOT blanket 42d)
+        diuretics/beta-blockers → 14d, ACE/ARBs → 28d, amlodipine → 56d, default → 42d
+  [ ] Pattern B suppression not applied when no recent med change exists
   [ ] Pattern A writes alert row with alert_type="adherence"
   [ ] Adaptive window null-safe: falls back to 28d when next_appointment or last_visit_date is None
   [ ] White-coat exclusion uses 5-day window (matches synthetic 3-5d dip rule)
@@ -56,9 +58,10 @@ Audit:
   [ ] alert_acknowledged -> audit_events
 
 Database:
-  [ ] All 13 CREATE INDEX + 8 ALTER TABLE migrations in setup_db.py
+  [ ] All 13 CREATE INDEX + 9 ALTER TABLE migrations in setup_db.py (includes risk_score_computed_at)
   [ ] TIMESTAMPTZ not TIMESTAMP
   [ ] risk_score column exists on patients
+  [ ] risk_score_computed_at column exists on patients (Fix 61)
   [ ] clinical_context: med_history, problem_assessments, recent_labs, vitals columns, allergy_reactions
   [ ] UNIQUE INDEX on readings (patient_id, effective_datetime, source)
   [ ] UNIQUE INDEX on medication_confirmations (patient_id, medication_name, scheduled_time)
@@ -70,8 +73,9 @@ Database:
 Worker:
   [ ] Midnight pattern_recompute sweep for all monitoring_active patients
   [ ] Appointment date from patients.next_appointment (not idempotency_key parsing)
-  [ ] Cold-start suppression: skip inertia/deterioration/adherence if enrolled < 21 days
+  [ ] Cold-start suppression: skip inertia/deterioration/adherence if enrolled < 21 days (NOT 14)
   [ ] delivered_at set on alert insert (not left NULL)
+  [ ] risk_score_computed_at written on every risk score update
 
 Code:
   [ ] SQLAlchemy 2.0 async syntax throughout

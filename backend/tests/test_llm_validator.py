@@ -302,6 +302,66 @@ def test_no_lab_mention_passes(base_payload: dict[str, Any]) -> None:
     assert result.passed
 
 
+# ── Group C: Problem assessments ─────────────────────────────────────────────
+
+def test_problem_empty_list_condition_mentioned_fails() -> None:
+    # Empty active_problems — any condition mention is a hallucination
+    payload: dict[str, Any] = {"active_problems": [], "problem_assessments": {}}
+    text = "CHF and hypertension are both active concerns for this patient."
+    result = check_problem_assessments(text, payload)
+    assert not result.passed
+    assert result.failed_check == "problem_hallucination"
+
+
+def test_problem_hallucinated_condition_not_in_list_fails(base_payload: dict[str, Any]) -> None:
+    # base_payload active_problems = ["HYPERTENSION", "CHF", "T2DM"]
+    # LLM mentions atrial fibrillation — not in the list
+    text = (
+        "BP remains elevated at 158/100 mmHg over the monitoring window. "
+        "The patient's atrial fibrillation and CKD add significant cardiovascular risk. "
+        "Treatment review is warranted given high adherence alongside persistent elevation."
+    )
+    result = check_problem_assessments(text, base_payload)
+    assert not result.passed
+    assert result.failed_check == "problem_hallucination"
+    assert "atrial fibrillation" in (result.detail or "")
+
+
+def test_problem_synonym_accepted_passes() -> None:
+    # Payload has "CHF", LLM writes "heart failure" — synonym map must accept this
+    payload: dict[str, Any] = {
+        "active_problems": ["CHF", "HYPERTENSION"],
+        "problem_assessments": {},
+    }
+    text = "Heart failure management and BP control are the primary visit concerns."
+    result = check_problem_assessments(text, payload)
+    assert result.passed
+
+
+def test_problem_known_condition_in_payload_passes(base_payload: dict[str, Any]) -> None:
+    # base_payload has HYPERTENSION, CHF, T2DM — all three mentioned → passes
+    text = "Hypertension remains elevated; CHF and diabetes warrant continued monitoring."
+    result = check_problem_assessments(text, base_payload)
+    assert result.passed
+
+
+def test_problem_no_condition_mention_passes(base_payload: dict[str, Any]) -> None:
+    text = "BP is elevated and treatment review is warranted given adherence patterns."
+    result = check_problem_assessments(text, base_payload)
+    assert result.passed
+
+
+def test_problem_assessments_key_accepted_passes() -> None:
+    # Condition grounded in problem_assessments keys, not active_problems
+    payload: dict[str, Any] = {
+        "active_problems": [],
+        "problem_assessments": {"ATRIAL FIBRILLATION": "Stable, rate controlled."},
+    }
+    text = "Atrial fibrillation is rate-controlled and stable per recent assessment."
+    result = check_problem_assessments(text, payload)
+    assert result.passed
+
+
 # ── Group C: Medication hallucination ─────────────────────────────────────────
 
 def test_known_drug_passes(base_payload: dict[str, Any]) -> None:

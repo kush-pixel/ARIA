@@ -236,7 +236,9 @@ aria-platform/
           inertia_detector.py       <- Layer 1: therapeutic inertia SQL
           adherence_analyzer.py     <- Layer 1: adherence-BP correlation SQL
           deterioration_detector.py <- Layer 1: sustained worsening trend
+          variability_detector.py   <- Layer 1: BP coefficient of variation detector (Phase 2)
           risk_scorer.py            <- Layer 2: weighted priority score
+          threshold_utils.py        <- shared patient-adaptive threshold + comorbidity adjustment (all 4 detectors)
         briefing/
           __init__.py
           composer.py     <- deterministic briefing JSON (Layer 1 output)
@@ -313,6 +315,7 @@ age                 SMALLINT
 risk_tier           TEXT NOT NULL           high | medium | low
 tier_override       TEXT                    e.g. "CHF in problem list"
 risk_score          NUMERIC(5,2)            Layer 2 score 0.0-100.0
+risk_score_computed_at TIMESTAMPTZ         set on every risk_score update; frontend shows staleness badge if > 26 hours
 monitoring_active   BOOLEAN DEFAULT TRUE    FALSE = EHR-only pathway
 next_appointment    TIMESTAMPTZ
 enrolled_at         TIMESTAMPTZ DEFAULT NOW()
@@ -488,6 +491,7 @@ ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS last_clinic_weight_kg NUME
 ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS last_clinic_spo2 NUMERIC(4,1);
 ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS historic_spo2 NUMERIC[];
 ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS allergy_reactions TEXT[];
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS risk_score_computed_at TIMESTAMPTZ;
 
 ---
 
@@ -615,9 +619,13 @@ Clinical threshold: < 80% flags non-adherence
 Pattern A: high systolic + low adherence -> "possible adherence concern" -> write alert row
 Pattern B: high systolic + high adherence -> "possible treatment-review case"
   Suppress Pattern B to "none" when ALL of: slope < -0.3 AND recent_7day_avg < patient_threshold
-    AND days_since_med_change <= 42 (aligned with titration window — see medication_status below)
-  Without the 42-day med-change gate, a noise-driven negative slope on a persistently-elevated
+    AND days_since_med_change <= titration_window (drug-class-aware — see TITRATION_WINDOWS)
+  TITRATION_WINDOWS lookup (derive from most recently changed drug in med_history):
+    diuretics → 14 days, beta-blockers → 14 days, ACE inhibitors/ARBs → 28 days,
+    long-acting CCBs (amlodipine) → 56 days, default → 42 days
+  Without the med-change gate, a noise-driven negative slope on a persistently-elevated
   patient incorrectly suppresses a real treatment-review signal.
+  Suppression must not apply when no recent med change exists — that is NOT a succeeding treatment.
 Pattern C: normal systolic + low adherence -> "contextual review"
 
 ### Adaptive detection window (all four detectors)
@@ -657,7 +665,12 @@ comorbidity_severity_score — severity-weighted, clamped 0-100 (NEVER raw count
   Diabetes (E11), CKD (N18), CAD (I25):    15 points each
   Any other coded problem:                    5 points each
 
-Store in patients.risk_score.
+Normalisation (Fix 58 — must match adaptive window):
+  sig_gap     = clamp(gap_days / window_days * 100.0)         — window_days from adaptive window, NOT hardcoded / 14
+  sig_inertia = clamp(days_since_med_change / 180.0 * 100.0)  — saturates at 6 months (NOT 90 days)
+
+Store in patients.risk_score AND patients.risk_score_computed_at = now().
+Frontend shows staleness badge when risk_score_computed_at > 26 hours ago (single missed sweep tolerable, second is not).
 Dashboard PatientList sorts by: risk_tier first (High > Medium > Low),
 then risk_score DESC within each tier.
 
@@ -670,8 +683,10 @@ briefings.llm_response JSONB:
   "trend_summary": str,          <- adaptive-window BP pattern (14-90 days based on inter-visit interval)
                                     + 90-day trajectory from historic_bp_systolic where available
   "medication_status": str,      <- current regimen, last change date;
-                                    when days_since_med_change <= 42 append
+                                    when days_since_med_change <= titration_window append
                                     "— within expected titration window, full response may not yet be established"
+                                    titration_window is drug-class-aware (TITRATION_WINDOWS lookup):
+                                    diuretics/beta-blockers → 14d, ACE/ARBs → 28d, amlodipine → 56d, default → 42d
   "adherence_summary": str,      <- rate per medication + pattern interpretation
   "active_problems": list,       <- from clinical_context.active_problems
   "problem_assessments": dict,   <- {problem_name: most_recent_assessment_text} from clinical_context.problem_assessments
@@ -679,7 +694,7 @@ briefings.llm_response JSONB:
   "visit_agenda": list,          <- prioritised 3-6 items
   "urgent_flags": list,          <- active unacknowledged alerts (including adherence type)
   "risk_score": float,           <- Layer 2 score
-  "data_limitations": str        <- whether home monitoring available; cold-start suppression notice if < 14 days enrolled
+  "data_limitations": str        <- whether home monitoring available; cold-start suppression notice if < 21 days enrolled
 }
 
 visit_agenda priority order:

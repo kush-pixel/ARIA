@@ -33,8 +33,10 @@ Inertia (ALL 5 conditions simultaneously):
 Adherence — Pattern A/B/C with Pattern B suppression:
   Pattern A: elevated BP + low adherence (< 80%) → "possible adherence concern" → write alert row
   Pattern B: elevated BP + high adherence → "treatment review warranted"
-    suppress Pattern B if: slope < -0.3 AND 7d recent < threshold AND med_change <= 42d
-    42-day gate aligned with Fix 34 titration window (physiologic response window for most antihypertensives)
+    suppress Pattern B if: slope < -0.3 AND 7d recent < threshold AND med_change <= titration_window
+    titration_window is drug-class-aware (TITRATION_WINDOWS lookup):
+      diuretics → 14d, beta-blockers → 14d, ACE inhibitors/ARBs → 28d, amlodipine → 56d, default → 42d
+    Suppression must NOT apply when no recent med change exists — that is not a succeeding treatment.
   Pattern C: normal BP + low adherence → "contextual review"
   Language: ALWAYS hedged — possible adherence concern not non-adherent
 
@@ -69,8 +71,12 @@ Comorbidity signal — severity-weighted, clamped 0-100 (Fix 25):
   Diabetes(E11) / CKD(N18) / CAD(I25): 15 points each
   Any other coded problem: 5 points each
   NEVER use raw count / 5.0 * 100 — saturates at 5 problems, useless for complex patients.
-Write to patients.risk_score.
+Normalisation (Fix 58):
+  sig_gap = clamp(gap_days / window_days * 100.0)          — adaptive window_days, NOT / 14.0
+  sig_inertia = clamp(days_since_med_change / 180.0 * 100.0) — saturates at 6 months, NOT 90 days
+Write to patients.risk_score AND patients.risk_score_computed_at = now() (Fix 61).
 Dashboard sorts by tier then risk_score DESC.
+Frontend shows staleness badge when risk_score_computed_at > 26 hours.
 
 Write alerts table. Write audit_events per alert.
 Alert types: gap_urgent | gap_briefing | inertia | deterioration | adherence

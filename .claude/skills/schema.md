@@ -2,13 +2,14 @@
 Working on models, database setup, or migrations.
 
 Rules:
-- 8 tables: patients (with risk_score), clinical_context, readings,
+- 8 tables: patients (with risk_score + risk_score_computed_at), clinical_context, readings,
   medication_confirmations, alerts, briefings, processing_jobs, audit_events
 - SQLAlchemy 2.0 async ORM only
 - gen_random_uuid() for all UUID primary keys
 - TIMESTAMPTZ for all timestamps (not TIMESTAMP)
 - All indexes from CLAUDE.md must exist before data is inserted (13 CREATE INDEX + 8 ALTER TABLE)
 - patients.risk_score NUMERIC(5,2) — Layer 2 score 0.0-100.0
+- patients.risk_score_computed_at TIMESTAMPTZ — set on every score update (Fix 61); frontend staleness badge if > 26h
 - Idempotency: processing_jobs.idempotency_key UNIQUE constraint
 - Parallel arrays: active_problems[n] == problem_codes[n]
 
@@ -34,3 +35,4 @@ Critical unique indexes (idempotency):
 
 - scripts/setup_db.py creates all tables and indexes
 - Additive schema changes use ALTER TABLE ... ADD COLUMN IF NOT EXISTS in setup_db.py. Safe to re-run.
+- Pending migration: ALTER TABLE patients ADD COLUMN IF NOT EXISTS risk_score_computed_at TIMESTAMPTZ;

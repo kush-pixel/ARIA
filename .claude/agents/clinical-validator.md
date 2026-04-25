@@ -19,10 +19,13 @@ Pattern engine: runs async, inertia ALL 5 conditions (includes slope check), hed
   patient-adaptive threshold from threshold_utils.py (NOT hardcoded 140)
   med change from med_history JSONB activity field (NOT last_med_change column)
   deterioration has absolute threshold gate + step-change sub-detector
-  Pattern B suppression requires med_change <= 42d (aligned with titration window)
+  Pattern B suppression requires med_change <= titration_window (drug-class-aware, NOT blanket 42d)
+    TITRATION_WINDOWS: diuretics → 14d, beta-blockers → 14d, ACE/ARBs → 28d, amlodipine → 56d, default → 42d
   Pattern A writes alert row with alert_type="adherence"
   adaptive window (14-90d) with null-safe fallback to 28d
   white-coat exclusion filters 5 days before next_appointment (not 3)
+  risk_scorer: sig_gap uses adaptive window_days (NOT / 14), sig_inertia divisor 180 (NOT 90)
+  risk_score_computed_at updated on every score write (check for staleness > 26h)
 Briefing: all 10 fields (includes problem_assessments), priority order, Layer 3 after Layer 1 verified
   trend_summary uses adaptive window (not hardcoded "28-day")
   inertia consumed from Layer 1 dict (not re-implemented inline)
