@@ -1,7 +1,7 @@
 """Optional Layer 3 LLM briefing summariser for ARIA.
 
 Converts a deterministic Layer 1 briefing JSON payload into a 3-sentence
-readable summary using Groq (llama-3.3-70b-versatile).
+readable summary using the Anthropic claude-sonnet-4-20250514 model.
 
 IMPORTANT: This module must only be called AFTER compose_briefing() has
 produced and persisted a verified Layer 1 briefing.  Never run Layer 3
@@ -18,16 +18,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from groq import AsyncGroq
+import anthropic
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models.briefing import Briefing
+from app.services.briefing.llm_validator import validate_llm_output
 from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
 
-_MODEL_VERSION = "llama-3.3-70b-versatile"
+_MODEL_VERSION = "claude-sonnet-4-20250514"
 
 # prompts/ lives at the project root — 4 levels above this file:
 # briefing/ -> services/ -> app/ -> backend/ -> ARIA root
@@ -117,17 +118,14 @@ async def generate_llm_summary(
 
     Raises:
         FileNotFoundError: If prompts/briefing_summary_prompt.md is missing.
-        ValueError: If the briefing has no llm_response payload or no Groq key.
-        groq.APIError: If the Groq API call fails.
+        anthropic.APIError: If the Anthropic API call fails.
+        ValueError: If the briefing has no llm_response payload.
     """
     if not briefing.llm_response:
         raise ValueError(
             f"Briefing {briefing.briefing_id} has no Layer 1 payload. "
             f"Run compose_briefing() before generate_llm_summary()."
         )
-
-    if not settings.groq_api_key:
-        raise ValueError("GROQ_API_KEY is not set — Layer 3 summary cannot run.")
 
     logger.info(
         "Generating Layer 3 LLM summary for briefing=%s patient=%s",
@@ -139,21 +137,45 @@ async def generate_llm_summary(
     prompt_hash = _compute_prompt_hash(system_prompt)
     user_message = _build_user_message(briefing.llm_response)
 
-    client = AsyncGroq(api_key=settings.groq_api_key)
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
-    response = await client.chat.completions.create(
-        model=_MODEL_VERSION,
-        max_tokens=256,
-        temperature=0.3,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
-    )
+    # Attempt up to 2 times — retry once on validation failure before storing None
+    summary_text: str | None = None
+    for attempt in range(2):
+        message = client.messages.create(
+            model=_MODEL_VERSION,
+            max_tokens=256,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_message}],
+        )
+        candidate = message.content[0].text.strip()
 
-    summary_text = response.choices[0].message.content.strip()
+        result = await validate_llm_output(
+            candidate,
+            briefing.llm_response,
+            str(briefing.briefing_id),
+            briefing.patient_id,
+            session,
+        )
 
-    # Merge summary into existing payload
+        if result.passed:
+            summary_text = candidate
+            break
+
+        if attempt == 0:
+            logger.warning(
+                "Layer 3 validation failed (attempt 1) briefing=%s check=%s — retrying",
+                briefing.briefing_id,
+                result.failed_check,
+            )
+        else:
+            logger.error(
+                "Layer 3 validation failed (attempt 2) briefing=%s check=%s — storing None",
+                briefing.briefing_id,
+                result.failed_check,
+            )
+
+    # Merge summary into existing payload (summary_text is None if both attempts failed)
     updated_payload = dict(briefing.llm_response)
     updated_payload["readable_summary"] = summary_text
 

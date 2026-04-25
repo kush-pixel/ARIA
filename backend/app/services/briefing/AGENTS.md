@@ -55,19 +55,21 @@ select MedicationConfirmation where patient_id = ? AND scheduled_time >= (now - 
 
 ---
 
-## BriefingPayload — 9 Fields (stored as `briefings.llm_response` JSONB)
+## BriefingPayload — 10 Fields (stored as `briefings.llm_response` JSONB)
 
 ```python
 {
-    "trend_summary":      str,    # 28-day home BP pattern in plain English
-    "medication_status":  str,    # current regimen and days since last med change
-    "adherence_summary":  str,    # rate per medication + Pattern A/B/C classification
-    "active_problems":    list[str],  # from clinical_context.active_problems[]
-    "overdue_labs":       list[str],  # from clinical_context.overdue_labs[]
-    "visit_agenda":       list[str],  # 3-6 prioritised agenda items
-    "urgent_flags":       list[str],  # unacknowledged alert descriptions
-    "risk_score":         float | None,  # from patients.risk_score (Layer 2)
-    "data_limitations":   str,    # home monitoring availability + reading count
+    "trend_summary":        str,    # adaptive-window home BP pattern (14-90 days based on inter-visit interval)
+                                    # + 90-day trajectory from historic_bp_systolic where available
+    "medication_status":    str,    # current regimen and days since last med change
+    "adherence_summary":    str,    # rate per medication + Pattern A/B/C classification
+    "active_problems":      list[str],   # from clinical_context.active_problems[]
+    "problem_assessments":  dict[str, str],  # {problem_name: most_recent_assessment} from clinical_context.problem_assessments
+    "overdue_labs":         list[str],   # from clinical_context.overdue_labs[] + recent_labs abnormal flags
+    "visit_agenda":         list[str],   # 3-6 prioritised agenda items
+    "urgent_flags":         list[str],   # unacknowledged alert descriptions (gap | inertia | deterioration | adherence)
+    "risk_score":           float | None,  # from patients.risk_score (Layer 2)
+    "data_limitations":     str,    # home monitoring availability + cold-start notice if < 14 days enrolled
 }
 ```
 
@@ -166,11 +168,16 @@ Returns one of:
 
 Clinical threshold constants:
 ```python
-_ELEVATED_SYSTOLIC: float = 140.0
+_ELEVATED_SYSTOLIC: float = 140.0   # FALLBACK ONLY — composer must consume InertiaResult from Layer 1
+                                      # Do NOT re-implement inertia logic here; pass inertia_result dict in
 _ADHERENCE_THRESHOLD: float = 80.0
 _INERTIA_DAYS: int = 7
 _TREND_MIN_READINGS: int = 7
 ```
+
+IMPORTANT: `_build_visit_agenda()` must NOT re-implement the inertia threshold check.
+It must consume `inertia_result["inertia_detected"]` passed from the processor.
+The duplicate inline check (`avg_sys >= _ELEVATED_SYSTOLIC`) carries the same hardcoded-140 bug as the detector.
 
 ---
 
@@ -252,3 +259,6 @@ prompt_hash         TEXT               — SHA-256 of prompt template (populated
 - Do NOT recommend specific medications in any generated output
 - Do NOT send briefings directly to patients — output is for clinician review only
 - Do NOT use `session.query()` — SQLAlchemy 2.0 async uses `select()` only
+- Do NOT re-implement the inertia threshold check in composer — consume inertia_result from Layer 1
+- Do NOT hardcode trend_summary as "28-day" — window is adaptive (14-90 days based on inter-visit interval)
+- Do NOT omit problem_assessments from the briefing payload — it's the 10th required field

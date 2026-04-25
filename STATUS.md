@@ -1,5 +1,5 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-22 by Claude Code (pre-demo audit — 9 bugs fixed across backend + frontend)
+Last updated: 2026-04-25 by Kush (check_problem_assessments gap fixed — condition hallucination now caught even when active_problems is non-empty; synonym map added; test suite expanded 51→57)
 
 ---
 
@@ -41,10 +41,12 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - scripts/run_generator.py — updated: independent idempotency checks for readings (source='generated') and confirmations (confidence='simulated'); both data types generated and reported in a single CLI run; prints adherence summary (total/confirmed/missed) when confirmations are inserted
 
 - backend/app/services/briefing/composer.py — compose_briefing() async function; queries DB for 28-day readings, unacknowledged alerts, medication confirmations, clinical context; assembles all 9 deterministic briefing fields (trend_summary, medication_status, adherence_summary, active_problems, overdue_labs, visit_agenda, urgent_flags, risk_score, data_limitations); persists Briefing row + audit_event row; clinical language enforced at code level ("possible adherence concern", "treatment review warranted"); Layer 1 only — no LLM. Data quality fix 2026-04-21: visit agenda item prefix changed from "Order overdue lab:" to "Pending follow-up:" because the overdue_labs field contains a mix of actual lab orders and clinical referrals/protocols.
-- backend/app/services/briefing/summarizer.py — generate_llm_summary() async function; loads prompt from prompts/briefing_summary_prompt.md; computes SHA-256 prompt_hash; calls claude-sonnet-4-20250514 for 3-sentence readable summary; writes readable_summary into llm_response JSONB; populates model_version, prompt_hash, generated_at on briefing row for audit; must only run after Layer 1 is verified
+- backend/app/services/briefing/summarizer.py — generate_llm_summary() async function; loads prompt from prompts/briefing_summary_prompt.md; computes SHA-256 prompt_hash; calls claude-sonnet-4-20250514 for 3-sentence readable summary; retry loop (max 2 attempts): calls validate_llm_output() after each attempt — on pass stores readable_summary, on fail retries once then stores None; populates model_version, prompt_hash, generated_at on briefing row for audit; must only run after Layer 1 is verified
+- backend/app/services/briefing/llm_validator.py — Layer 3 output validation and guardrails; ValidationResult dataclass; three check groups: Group A safety (check_phi_leak, check_prompt_injection), Group B guardrails (check_guardrails — 10 forbidden phrases), Group C faithfulness (check_sentence_count, check_risk_score_consistency, check_adherence_language, check_titration_window, check_urgent_flags, check_overdue_labs, check_problem_assessments, check_data_limitations, check_medication_hallucination, check_bp_plausibility, check_contradiction); validate_llm_output() runs all checks in order, returns on first failure; always writes audit_events row with action="llm_validation", outcome="success"|"failure"; ruff clean. check_problem_assessments() updated 2026-04-25: previously exited immediately when active_problems was non-empty, allowing hallucinated conditions to pass unchecked; now scans all recognised condition names against payload terms regardless of list size; _CONDITION_SYNONYMS map (15 entries) prevents false positives when LLM writes "heart failure" for payload "CHF" or "diabetes" for "T2DM"
 - backend/app/services/briefing/__init__.py — exports compose_briefing, generate_llm_summary
 - prompts/briefing_summary_prompt.md — Layer 3 system prompt; enforces 3-sentence output, clinical language rules, no medication recommendations
 - backend/tests/test_briefing_composer.py — 61 unit tests (all passing); covers all helper functions, all 9 briefing fields, clinical language enforcement, async compose_briefing with mocked session, error handling, summarizer helpers
+- backend/tests/test_llm_validator.py — 57 unit tests (all passing); fixture-based, no real DB or API calls; covers all 14 check functions individually + 4 full validate_llm_output integration tests; asyncio mode=auto; tests: 3 PHI leak, 3 prompt injection, 11 guardrail (9 parametrized + 2), 3 sentence count, 4 risk score, 4 adherence language, 3 titration window, 3 urgent flags, 3 overdue labs, 6 problem assessments (empty list, hallucinated condition with non-empty problems, synonym acceptance, known condition passes, no condition mention, grounding via problem_assessments keys), 3 medication hallucination, 4 BP plausibility, 3 contradiction, 4 full pipeline (audit event on pass/fail, first-failed-check ordering, compliant summary)
 
 - backend/app/services/pattern_engine/risk_scorer.py — Layer 2 compute_risk_score(patient_id, session); verifies patient exists, queries 28-day readings, clinical_context, medication_confirmations directly; computes weighted 0.0–100.0 priority score from systolic-vs-baseline, medication inertia, inverted adherence, reading gap, and comorbidity count; handles missing data with neutral/default signals; rounds to 2 decimals and persists patients.risk_score; no audit_event required for this computation
 - backend/tests/test_risk_scorer.py — 14 unit tests passing with mocked AsyncSession; covers high/low risk scenarios, no readings, no confirmations, NULL last_med_change, clinic systolic fallback, patient not found, clamping, persistence, rounding/commit behavior, and per-signal weight verification
@@ -72,12 +74,14 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - backend/app/api/admin.py — POST /api/admin/trigger-scheduler; guarded by DEMO_MODE=true
 - backend/app/api/adherence.py — GET /api/adherence/{patient_id}; per-medication adherence breakdown from medication_confirmations (28-day window); matches frontend AdherenceData type exactly
 - backend/tests/test_api.py — 24 unit tests (all passing); covers all 11 API routes; uses httpx.AsyncClient + mocked sessions; no live DB required
+- backend/app/api/shadow_mode.py — GET /api/shadow-mode/results; serves pre-computed shadow mode results from data/shadow_mode_results.json; no DB dependency; returns 404 if results not yet generated
+- scripts/run_shadow_mode.py — shadow mode validation script; **COMPLETE, PASSING at 94.3%** (see Shadow Mode section below)
+- frontend/src/app/shadow-mode/page.tsx — shadow mode results page; shows visit-by-visit ARIA vs physician comparison, between-visit alert timeline, detector breakdowns, agreement metrics
 
 ### IN PROGRESS
 - None
 
 ### NOT STARTED
-- scripts/run_shadow_mode.py — shadow mode validation (target ≥80% agreement vs physician notes)
 - scripts/run_scheduler.py — standalone manual scheduler trigger script
 
 ---
@@ -109,6 +113,7 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 | GET /api/adherence/{patient_id} | DONE | per-medication breakdown |
 | POST /api/ingest | DONE | validates then ingests |
 | POST /api/admin/trigger-scheduler | DONE | DEMO_MODE guard |
+| GET /api/shadow-mode/results | DONE | serves pre-computed JSON results file |
 | GET /health | DONE | |
 
 ---
@@ -119,6 +124,130 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - ANTHROPIC_API_KEY in backend/.env is placeholder — Layer 3 LLM summary will be skipped until real key is set. Briefing still generates via Layer 1 without it.
 - Some iEMR medication entries have null MED_ACTIVITY (e.g. ASPIRIN 81, METOPROLOL in patient 1091's earliest visits). The activity field in med_history will be null for these entries. Acceptable for now — briefing composer should handle null activity gracefully.
 - risk_score for patient 1091 (69.48) was computed before the medication list was corrected. It should be recomputed via a pattern_recompute job after the next demo run. The score will shift slightly because the adherence denominator changed (420 confirmations vs the old 1092).
+
+---
+
+## Shadow Mode Development — 2026-04-22
+
+### Overview
+Shadow mode replays all 124 iEMR clinic visits in chronological order and asks: if ARIA had been running during this patient's care, would it have fired (or not fired) at the same moments the physician was concerned? Ground truth comes from iEMR `PROBLEM_STATUS2_FLAG` (flag 1 or 2 = physician concerned, flag 3 = stable). Visits without an HTN flag are excluded from agreement scoring.
+
+**Final result: 94.3% agreement (33/35 labelled), PASSED ✓** (target was ≥80%)  
+`random.seed(1)` is set in the script for reproducible results.
+
+### What the script does (`scripts/run_shadow_mode.py`)
+
+**Step 1 — Clinic BP extraction (53 visits)**  
+Loads all clinic BP readings from the Supabase DB (`source='clinic'`). Deduplicates by date keeping the chronologically last reading per day (settled post-assessment BP, not white-coat spike). Applies physician label from iEMR `PROBLEM_STATUS2_FLAG` via a label map.
+
+**Step 2 — Synthetic home reading generation (28-day windows)**  
+For each BP visit, generates a 28-day window of synthetic home readings using the same `ReadingGenerator` rules as production (SD 8–12 mmHg, morning/evening split, device outage episodes, white-coat dip before visit, post-appointment return). Minimum 4 readings in window required — visits with fewer are skipped.
+
+**Step 3 — Patient-adaptive threshold**  
+Computes a personal BP threshold from prior clinic visits only: `max(130, stable_baseline_mean + 1.5×SD)` capped at 145 mmHg. Falls back to population threshold of 140 mmHg if fewer than 3 stable readings exist. This is more accurate than the production hard-coded 140 mmHg for all patients.
+
+**Step 4 — Continuous monitoring (between-visit alerts)**  
+Scans every 7 days through each inter-visit gap using a rolling 28-day synthetic window. Fires all four detectors at each check point. Keeps only the earliest alert per gap (avoids double-counting). Alert format includes `alert_type` (pipe-separated codes), `days_before_visit`, plain-English `message`, and a `reasons[]` list with one entry per fired detector.
+
+**Step 5 — Four Layer 1 detectors (shadow versions)**  
+All four detectors are re-implemented locally (no DB calls) operating on the in-memory synthetic window:
+- **GAP** — ≥3 consecutive days absent while window mean ≥ threshold
+- **INE (Therapeutic Inertia)** — window mean ≥ threshold + no medication change since `last_med_change`
+- **DET (Deterioration)** — positive least-squares slope across the 28-day window
+- **ADH (Adherence)** — synthetic adherence rate computed per-visit; Pattern A (low adherence + high BP) and Pattern B (high adherence + high BP = possible treatment-review case)
+
+**Step 6 — Scoring and agreement**  
+`aria_fired = gap_urgent OR inertia OR deterioration OR adherence`.  
+`result` = agree | false_negative | false_positive | no_ground_truth.  
+Only visits with ground truth (flag 1/2 or 3) contribute to agreement %.
+
+**Step 7 — Best demo window identification**  
+Finds the contiguous run of visits with the highest density of `agree` results — used by the frontend to highlight the recommended demo window.
+
+**Step 8 — Output**  
+Results written to `data/shadow_mode_results.json`. Per-visit summary printed to console with label, window mean, threshold, fired detectors, and result. Between-visit alerts printed per gap.
+
+### Other active problems display
+Each visit in the results includes `other_active_problems` — a list of non-HTN physician assessments from that visit (name, PROBLEM_STATUS2_FLAG, PROBLEM_STATUS2 text, assessment text). These are displayed on the shadow mode frontend to give clinical context for false positive/negative cases.
+
+### Result breakdown (patient 1091)
+```
+Total evaluation points:  53
+Skipped (< 4 readings):    1
+Clinic BP points:          52
+With ground truth:         35
+  Concerned (flag 1/2):    27
+  Stable (flag 3):          8
+No ground truth:           17 (excluded from scoring)
+
+Agreements:   33
+False negatives: 0
+False positives: 2  (ARIA fired, physician stable) — documented in AUDIT.md Fix 1 and Fix 3
+Agreement rate: 33/35 = 94.3%  PASSED ✓
+
+Between-visit alerts generated: 9 (across all inter-visit gaps)
+```
+
+### Frontend — shadow mode page (`frontend/src/app/shadow-mode/`)
+New route `/shadow-mode` added to the app. Features:
+- **Summary banner** — agreement %, pass/fail badge, evaluation point counts
+- **Best demo window** — highlighted date range with summary
+- **Visit timeline** — expandable cards for each of 52 evaluation points
+  - Shows: visit date, source (clinic BP vs no-vitals), physician label badge, ARIA fired/silent badge, result (AGREE / FALSE NEG / FALSE POS / NO GT)
+  - Expanded view: synthetic reading sparkline, detector breakdown (GAP / INE / DET / ADH), `other_active_problems`, and "First alert ARIA would have sent" section
+- **Between-visit alerts** — per-gap alert strip with days-before-visit, color-coded `AlertTypeBadge` components (Reading Gap / Therapeutic Inertia / BP Deterioration / Treatment Review), and bullet-point plain-English reasons per detector
+- **No ground truth** visits shown with neutral badge (excluded from scoring)
+- Null BP handled gracefully (displays "—" instead of crashing)
+
+### Alert clarity improvements (2026-04-22)
+Between-visit alerts previously showed raw acronyms ("GAP|INE") and a single concatenated message string. Updated to:
+- **`AlertTypeBadge` component** — maps GAP→"Reading Gap" (red), INE→"Therapeutic Inertia" (orange), DET→"BP Deterioration" (red), ADH→"Treatment Review" (amber) with full-name labels and color-coded pills
+- **`reasons[]` list on each alert** — one plain-English sentence per fired detector, stored in JSON and displayed as bullet points in the UI
+- Example reasons:
+  - "No readings received for 5 consecutive days while BP was elevated (avg 148 mmHg)"
+  - "High BP (avg 148 mmHg) despite good medication adherence (85%) — possible treatment review warranted"
+  - "Sustained elevated BP (avg 163 mmHg, threshold 140 mmHg) with no medication change in the past 42 days — possible therapeutic inertia"
+
+### Types updated (`frontend/src/lib/types.ts`)
+Added `reasons?: string[]` to `BetweenVisitAlert` interface to carry per-detector reasons from script output to frontend.
+
+### New API endpoint
+`GET /api/shadow-mode/results` — serves `data/shadow_mode_results.json` directly. No DB dependency. 404 if file not present (run `python scripts/run_shadow_mode.py` first). Route registered in `backend/app/main.py`.
+
+### System audit (AUDIT.md)
+A full **47-item** system audit was conducted comparing production ARIA against shadow mode validated behaviour. Key findings documented in `AUDIT.md` at the project root. Three investigation sections cover:
+1. **Non-HTN visit handling** — physician assessments for non-HTN conditions (PROBLEM_STATUS2_FLAG, PROBLEM_ASSESSMENT_TEXT) are never captured by production detectors; detectors are BP-only
+2. **Conversion fidelity** — iEMR fields silently discarded during adapter.py conversion: PULSE (all 53 BP visits), WEIGHT (12-lb loss over 14 months), TEMPERATURE, PULSEOXYGEN (includes 84% SpO2 for CHF patient Nov 2011), EXAM_TEXT, ROS_TEXT, PROBLEM_STATUS2_FLAG, PROBLEM_ASSESSMENT_TEXT, ALLERGY_REACTION; `social_context` DB column exists but is never populated
+3. **Hardcoded patient references** — `PATIENT_ID = "1091"` in run_shadow_mode.py, default bundle in run_ingestion.py, `_DEMO_PATIENT_ID` in reset_demo.py — none of these are acceptable for multi-patient operation
+
+The 57 audit items are categorised as: Critical (7), High (14), Medium (13), Low (7), Infrastructure (6), New clinical features (7), Layer 3 LLM safety (3 Critical, 4 High, 3 Medium, 1 Low). Phased roadmap (Phase 0–8) in AUDIT.md.
+
+**2026-04-23:** AUDIT.md revised — item count corrected from 25 to 47; "51 BP clinic visits" corrected to 53 unique dates; shadow mode result corrected from 91.4% (32/35, 1 FN) to 94.3% (33/35, 0 FN); new critical item added (Fix 5: comorbidity-adjusted threshold not in production).
+
+**2026-04-24:** CLAUDE.md and all .claude agents/skills updated to reflect every audit finding. Specific changes:
+- CLAUDE.md: RISK SCORING updated with severity-weighted comorbidity model (Fix 25); PATTERN ENGINE QUERIES: adaptive window formula + white-coat exclusion added (Fix 27/28); BRIEFING JSON STRUCTURE: titration window notice added to medication_status (Fix 34)
+- Contradictions resolved: `clinical-validator.md` corrected from "ALL 4" to "ALL 5" inertia conditions; `briefing.md` and `briefing-engineer.md` corrected from 9 to 10 briefing fields
+- All 47 AUDIT.md fixes now documented in their owning .claude agent or skill: Fix 18/23/25/27/28/29/30/31/34/47 were previously missing from the instruction set
+
+**2026-04-24 (later):** Layer 3 LLM output validation and guardrails implemented (AUDIT.md Fixes 48–57).
+- New file: `backend/app/services/briefing/llm_validator.py` — 14 checks across 3 groups (PHI leak, prompt injection, 10 guardrails, 11 faithfulness checks); audit_events written on every call; ruff clean
+- Updated: `backend/app/services/briefing/summarizer.py` — retry loop (max 2 attempts) wraps LLM call + validation; readable_summary=None after two failures; Layer 1 briefing always primary
+- New file: `backend/tests/test_llm_validator.py` — 51 tests, all passing
+- AUDIT.md expanded to 57 items (Fixes 48–57 added); CLAUDE.md updated (briefings table, test list, audit_events action column); AGENTS.md, all .claude agents/skills verified complete
+- Groq/Gemini revert (earlier same day): summarizer.py and config.py reverted to Anthropic-only after branch merge introduced non-spec LLM keys
+
+---
+
+## Bugs Found and Fixed — 2026-04-25
+
+### Bug 16 — check_problem_assessments() allowed condition hallucinations when active_problems was non-empty
+**Date:** 2026-04-25
+**Issue:** `check_problem_assessments()` in `llm_validator.py` exited immediately with `passed=True` whenever `payload["active_problems"]` was truthy. For a patient like 1091 with `active_problems = ["HYPERTENSION", "CHF", "T2DM"]`, an LLM output mentioning "atrial fibrillation" or "CKD" — neither of which the patient has — passed all validation checks and was stored in `readable_summary` unchallenged. The function was written to guard against the empty-list case only, leaving the non-empty case with zero cross-checking.
+**Scenario:** LLM outputs "The patient's atrial fibrillation and CKD add significant cardiovascular risk" for a patient with no such diagnoses. All 14 validation checks pass. A clinician reads fabricated conditions in the pre-visit briefing and may act on them.
+**File:** `backend/app/services/briefing/llm_validator.py`
+**Fix:** Removed the early-exit on non-empty `active_problems`. Function now builds a lowercase string of all known payload terms from both `active_problems` and `problem_assessments` keys, then scans the LLM output for every recognised condition name. Added `_CONDITION_SYNONYMS` dict (15 entries) mapping LLM-facing terms to canonical synonym sets — prevents false positives when LLM writes "heart failure" for payload entry "CHF" or "diabetes" for "T2DM". Returns `failed_check="problem_hallucination"` on first condition that cannot be grounded in payload terms.
+**Tests:** 6 new tests added to `test_llm_validator.py` (51→57 total): empty list blocks condition, hallucinated condition with non-empty problems blocked, synonym accepted, known condition passes, no condition mention passes, grounding via `problem_assessments` keys.
+**Verified by:** `conda run -n aria python -m pytest tests/test_llm_validator.py -v` — 57 passed; `ruff check app/services/briefing/llm_validator.py` — all checks passed
 
 ---
 
