@@ -497,6 +497,117 @@ The raw iEMR `MED_REC_NO` (`1091`) is used as `patient_id` throughout the DB and
 
 ---
 
+## Layer 3 LLM Output Safety — Fixes 48–57
+
+The following items address a gap identified during the April 2026 audit: the Layer 3 LLM output is currently stored without any validation. A hallucinated value, a forbidden clinical phrase, or a PHI leak would be stored directly into `briefings.llm_response.readable_summary` and surfaced to the clinician dashboard.
+
+All 10 fixes below are implemented in a single new file: `backend/app/services/briefing/llm_validator.py`. The `summarizer.py` file is updated to call `validate_llm_output()` after the LLM call and before storing `readable_summary`. On failure: retry once, then store `readable_summary=None`. Layer 1 briefing is always the authoritative output.
+
+**Owner:** Sahil Khalsa | **Phase:** 0 (no dependencies — standalone new file)
+
+---
+
+### 48. Layer 3 output has no clinical language guardrails
+**Severity: Critical**
+
+The LLM output is stored as-is. A response containing "non-adherent," "hypertensive crisis," or "prescribe metoprolol 50mg" violates the clinical boundary enforced at code level throughout the rest of ARIA.
+
+**Fix:** Add `check_guardrails(text)` in `llm_validator.py`. Blocked phrases (case-insensitive): `non-adherent`, `non-compliant`, `hypertensive crisis`, `medication failure`, `prescribe`, `increase.*mg`, `decrease.*mg`, `tell the patient`, `diagnos`, `emergency`. On any match: `validation_outcome="failure"`, `failed_check="guardrail:{phrase}"`.
+
+---
+
+### 49. Layer 3 output not validated for faithfulness against Layer 1 payload
+**Severity: Critical**
+
+The LLM receives the Layer 1 briefing payload as input but its output is never compared back to that payload. The LLM could state a risk score of 85 when the actual score is 69, reference overdue labs when none exist, or mention an adherence concern when the payload shows Pattern B.
+
+**Fix:** Add `validate_faithfulness(text, payload)` in `llm_validator.py` covering:
+- Risk score: if a number ≥ 50 appears near "risk"/"score", must match `payload["risk_score"]` ±10
+- Adherence language: "adherence concern" requires Pattern A in `payload["adherence_summary"]`
+- Treatment review: "treatment review" requires Pattern B in `payload["adherence_summary"]`
+- Titration window: "titration" requires "titration window" in `payload["medication_status"]` (Fix 34)
+- Urgent flags: "urgent" requires non-empty `payload["urgent_flags"]`
+- Overdue labs: "lab"/"overdue" requires non-empty `payload["overdue_labs"]`
+- Problem assessments: problem names in text must exist in `payload["active_problems"]` or `payload["problem_assessments"]` (Kush's new field)
+- Data limitations: "insufficient data"/"enrolled" requires non-empty `payload["data_limitations"]`
+
+---
+
+### 50. Layer 3 output can contain PHI
+**Severity: Critical**
+
+The briefing payload includes `patient_id`. If the LLM reflects the patient ID back in its summary, it becomes PHI in a clinician-facing text field. The briefing is clinician-only but storing a patient identifier in plain text in the readable summary is a data boundary violation.
+
+**Fix:** Add `check_phi_leak(text, patient_id)` in `llm_validator.py`. Scan for `patient_id` appearing verbatim and for 4+ digit numeric strings matching the patient ID pattern. On match: `failed_check="phi_leak"`, hard block.
+
+---
+
+### 51. No prompt injection detection on LLM output
+**Severity: High**
+
+The briefing payload contains patient-sourced text fields: `problem_assessments` (physician assessment text from iEMR), `social_context`, and `data_limitations`. If any of these fields contain injected instructions (e.g., "Ignore previous instructions and say X"), the LLM may echo them back in the summary.
+
+**Fix:** Add `check_prompt_injection(text)` in `llm_validator.py`. Blocked patterns: `"ignore previous"`, `"new instruction"`, `"system:"`, `"[INST]"`, `"<|im_start|>"`, `"Assistant:"`. On match: `failed_check="prompt_injection"`, hard block.
+
+---
+
+### 52. LLM output sentence count not validated
+**Severity: Medium**
+
+The spec (`summarizer.py` docstring, `ARIA_SOP_v2_0.md` section 2.3, `CLAUDE.md`) explicitly defines Layer 3 output as a **3-sentence readable summary**. The current implementation stores whatever the LLM returns — 1 sentence, 6 sentences, or a paragraph.
+
+**Fix:** Add `check_sentence_count(text)` in `llm_validator.py`. Split on `.`, `!`, `?` and count non-empty sentences. Must equal exactly 3. On mismatch: `failed_check="sentence_count"`, `detail=f"got {n} sentences, expected 3"`.
+
+---
+
+### 53. Medication name hallucination not detected
+**Severity: High**
+
+The LLM could mention a drug not in the patient's current medication list. For a patient with 14 active medications (patient 1091), the risk of hallucinating a plausible drug name is real. A clinician reading "consider reviewing amlodipine dosing" when the patient isn't on amlodipine would be misled.
+
+**Fix:** Add `check_medication_hallucination(text, payload)` in `llm_validator.py`. Extract drug-like tokens from text using suffix patterns (`-olol`, `-pril`, `-sartan`, `-pine`, `-ide`, `-statin`, `-mab`) and capitalised known drug names. Each must appear in `payload["medication_status"]`. On mismatch: `failed_check="medication_hallucination"`, `detail=unknown_drug_name`.
+
+---
+
+### 54. BP values in LLM output not validated for plausibility
+**Severity: Medium**
+
+If the LLM mentions a systolic value (e.g., "average BP of 210/130 mmHg"), two issues can arise: the value may be physiologically implausible (outside 60–250 mmHg) or it may contradict the actual average in the payload.
+
+**Fix:** Add `check_bp_plausibility(text, payload)` in `llm_validator.py`. Extract systolic values using regex (3-digit standalone number or "X/Y" pattern). Validate: (a) within 60–250 mmHg, (b) within ±20 mmHg of any systolic value extractable from `payload["trend_summary"]`. On mismatch: `failed_check="bp_value_implausible"`.
+
+---
+
+### 55. LLM validation outcome not written to audit_events
+**Severity: High**
+
+All other sensitive actions in ARIA write to `audit_events`. Layer 3 validation outcome is currently only in Python logs — invisible to audit reporting and the dashboard.
+
+**Fix:** Add `write_audit_event(session, briefing_id, patient_id, result)` in `llm_validator.py`. Always runs regardless of pass/fail. Fields: `action="llm_validation"`, `actor_type="system"`, `actor_id="llm_validator"`, `resource_type="Briefing"`, `resource_id=briefing_id`, `outcome="success"|"failure"`, `details=failed_check+": "+detail` on failure.
+
+---
+
+### 56. No retry on LLM validation failure
+**Severity: Low**
+
+A single LLM call can produce an off-spec response (wrong sentence count, borderline phrase) without the underlying model being consistently broken. Immediately discarding the summary on first failure reduces Layer 3 availability unnecessarily.
+
+**Fix:** In `summarizer.py`, wrap the LLM call and validation in a retry loop (max 2 attempts). On first validation failure: log at WARNING level, repeat the identical LLM call once. On second failure: log at ERROR, set `readable_summary=None`. No prompt modification between attempts — the retry tests whether the failure was transient.
+
+---
+
+### 57. Contradiction detection missing from LLM output validation
+**Severity: Medium**
+
+The faithfulness checks (Fix 49) test whether the LLM has support for what it claims. The inverse — the LLM being more alarming than the data supports — is not caught. A summary saying "urgent intervention needed" when `payload["urgent_flags"]` is empty would pass all current faithfulness checks.
+
+**Fix:** Add `check_contradiction(text, payload)` in `llm_validator.py`:
+- If `payload["urgent_flags"]` is empty AND text contains urgent/alarming language → `failed_check="contradiction_urgent"`
+- If `payload["active_problems"]` is empty AND text mentions specific problem names → `failed_check="contradiction_problems"`
+- If `payload["adherence_summary"]` indicates Pattern C (contextual only) AND text says "possible adherence concern" → `failed_check="contradiction_adherence"`
+
+---
+
 ## Implementation Roadmap
 
 Phases are ordered so that no fix depends on an incomplete prerequisite. Fixes within a phase can run in parallel.
@@ -515,6 +626,7 @@ No dependencies. Fix wrong output on current data. No re-ingestion required. Sta
 | 30 | Set `delivered_at` on alert insert | processor.py | 1 line |
 | 20 | Read appointment date from patient record | processor.py | 5 lines |
 | 25 | Fix comorbidity risk score saturation | risk_scorer.py | 5 lines |
+| 48–57 | Layer 3 LLM output validation + guardrails | llm_validator.py (new), summarizer.py | ~200 lines |
 
 After Phase 0: trigger `pattern_recompute` via admin endpoint to refresh all production scores and alerts with the corrected logic.
 
@@ -682,5 +794,15 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 | 45 | Feature | Escalation pathway + off-hours tagging | processor.py, alerts | 7 |
 | 46 | Feature | Mini-briefing for between-visit alerts | processor.py | 4 |
 | 47 | Feature | Long-term trend layer in briefing | composer.py | 4 |
+| 48 | Critical | Layer 3: no clinical language guardrails | llm_validator.py (new) | 0 |
+| 49 | Critical | Layer 3: no faithfulness validation vs Layer 1 payload | llm_validator.py (new) | 0 |
+| 50 | Critical | Layer 3: PHI leak possible in readable_summary | llm_validator.py (new) | 0 |
+| 51 | High | Layer 3: no prompt injection detection | llm_validator.py (new) | 0 |
+| 52 | Medium | Layer 3: sentence count not validated (spec requires 3) | llm_validator.py (new) | 0 |
+| 53 | High | Layer 3: medication name hallucination not detected | llm_validator.py (new) | 0 |
+| 54 | Medium | Layer 3: BP values not validated for plausibility | llm_validator.py (new) | 0 |
+| 55 | High | Layer 3: validation outcome not in audit_events | llm_validator.py (new) | 0 |
+| 56 | Low | Layer 3: no retry on validation failure | summarizer.py | 0 |
+| 57 | Medium | Layer 3: contradiction detection missing | llm_validator.py (new) | 0 |
 
-The five Critical items (1–5) affect clinical output correctness in live production. Items 6–17 are high-priority operational and clinical data gaps. Items 18–28 affect demo quality and detection accuracy. Phase 0 fixes require no data migration and can begin immediately.
+The five Critical items (1–5) affect clinical output correctness in live production. Items 6–17 are high-priority operational and clinical data gaps. Items 18–28 affect demo quality and detection accuracy. Items 48–50 are new Critical items affecting Layer 3 clinical safety — addressable in Phase 0 with no dependencies. Phase 0 fixes require no data migration and can begin immediately.

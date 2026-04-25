@@ -93,6 +93,14 @@ Layer 2 — Weighted Risk Score (runs after Layer 1)
 Layer 3 — LLM Readable Summary (optional, on top of Layer 1)
   generate_llm_summary() — 3-sentence summary via claude-sonnet-4-20250514
   Skipped if ANTHROPIC_API_KEY not set. Briefing is complete without it.
+
+Layer 3 Output Validation (always runs after generate_llm_summary)
+  validate_llm_output() — guardrails + faithfulness check on LLM text
+  Guardrails: blocks forbidden clinical language, PHI leak, prompt injection
+  Faithfulness: validates output against the Layer 1 payload it was given
+  Retry: one retry on failure before setting readable_summary=None
+  Audit: writes audit_events row with outcome=success|failure every call
+  File: backend/app/services/briefing/llm_validator.py
 ```
 
 ---
@@ -217,7 +225,8 @@ backend/app/services/
   pattern_engine/ gap_detector.py, inertia_detector.py,
                   adherence_analyzer.py, deterioration_detector.py,
                   risk_scorer.py
-  briefing/       composer.py (Layer 1), summarizer.py (Layer 3)
+  briefing/       composer.py (Layer 1), summarizer.py (Layer 3),
+                  llm_validator.py (Layer 3 output validation + guardrails)
   worker/         processor.py (job runner), scheduler.py (7:30 AM trigger)
 ```
 
@@ -231,6 +240,8 @@ bundle_import       action="bundle_import"      resource_type="Bundle"
 reading_ingested    action="reading_ingested"    resource_type="Reading"
 briefing_viewed     action="briefing_viewed"     resource_type="Briefing"  + update briefings.read_at
 alert_acknowledged  action="alert_acknowledged"  resource_type="Alert"
+llm_validation      action="llm_validation"      resource_type="Briefing"
+                    outcome="success"|"failure", details=failed_check+reason on failure
 ```
 `outcome` is always `"success"` or `"failure"` — never omit.
 

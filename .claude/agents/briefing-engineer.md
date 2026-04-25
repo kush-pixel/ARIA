@@ -13,6 +13,13 @@ Strict execution order:
    trend_summary, medication_status, adherence_summary, active_problems,
    problem_assessments, overdue_labs, visit_agenda, urgent_flags, risk_score, data_limitations
 3. summarizer.py — optional Layer 3 LLM on top
+4. llm_validator.py — validate LLM output BEFORE storing readable_summary
+   Guardrails (absolute blocks): forbidden clinical language, PHI leak, prompt injection
+   Faithfulness (vs payload): sentence count=3, risk score ±10, adherence pattern match,
+     titration language, urgent flags, overdue labs, problem names, medication names,
+     BP plausibility, contradiction detection
+   On failure: retry once, then store readable_summary=None
+   Always write audit_events row: action="llm_validation", outcome="success"|"failure"
 
 Risk_score from Layer 2 must be included in briefing JSON.
 Visit agenda ordered by clinical priority (urgent first).

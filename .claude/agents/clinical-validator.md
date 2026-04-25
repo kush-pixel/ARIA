@@ -26,6 +26,14 @@ Pattern engine: runs async, inertia ALL 5 conditions (includes slope check), hed
 Briefing: all 10 fields (includes problem_assessments), priority order, Layer 3 after Layer 1 verified
   trend_summary uses adaptive window (not hardcoded "28-day")
   inertia consumed from Layer 1 dict (not re-implemented inline)
+  LLM output validation (llm_validator.py) runs after summarizer.py, before storing readable_summary
+    Guardrails block: non-adherent, non-compliant, hypertensive crisis, medication failure,
+      dosage recommendations, tell the patient, diagnos, emergency, PHI leak, prompt injection
+    Faithfulness checks: sentence count=3, risk score ±10, adherence pattern match,
+      titration language vs payload, medication name hallucination, BP value plausibility,
+      urgent flags contradiction, problem assessment grounding
+    On failure: retry once then readable_summary=None — Layer 1 briefing always primary
+    audit_events row written every call: action="llm_validation"
 Worker: midnight pattern_recompute sweep, cold-start suppression (< 21 days enrolled)
   appointment date from patients.next_appointment (not idempotency_key parsing)
 Audit: bundle_import + reading_ingested + briefing_viewed + alert_acknowledged

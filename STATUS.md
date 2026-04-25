@@ -1,5 +1,5 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-24 by Claude Code (audit expanded to 47 items; CLAUDE.md + all .claude agents/skills updated with every audit finding — see AUDIT.md)
+Last updated: 2026-04-24 by Sahil Khalsa (Layer 3 LLM output validation + guardrails implemented — llm_validator.py, updated summarizer.py, 51-test suite; AUDIT.md expanded to 57 items — see Fixes 48–57)
 
 ---
 
@@ -41,10 +41,12 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - scripts/run_generator.py — updated: independent idempotency checks for readings (source='generated') and confirmations (confidence='simulated'); both data types generated and reported in a single CLI run; prints adherence summary (total/confirmed/missed) when confirmations are inserted
 
 - backend/app/services/briefing/composer.py — compose_briefing() async function; queries DB for 28-day readings, unacknowledged alerts, medication confirmations, clinical context; assembles all 9 deterministic briefing fields (trend_summary, medication_status, adherence_summary, active_problems, overdue_labs, visit_agenda, urgent_flags, risk_score, data_limitations); persists Briefing row + audit_event row; clinical language enforced at code level ("possible adherence concern", "treatment review warranted"); Layer 1 only — no LLM. Data quality fix 2026-04-21: visit agenda item prefix changed from "Order overdue lab:" to "Pending follow-up:" because the overdue_labs field contains a mix of actual lab orders and clinical referrals/protocols.
-- backend/app/services/briefing/summarizer.py — generate_llm_summary() async function; loads prompt from prompts/briefing_summary_prompt.md; computes SHA-256 prompt_hash; calls claude-sonnet-4-20250514 for 3-sentence readable summary; writes readable_summary into llm_response JSONB; populates model_version, prompt_hash, generated_at on briefing row for audit; must only run after Layer 1 is verified
+- backend/app/services/briefing/summarizer.py — generate_llm_summary() async function; loads prompt from prompts/briefing_summary_prompt.md; computes SHA-256 prompt_hash; calls claude-sonnet-4-20250514 for 3-sentence readable summary; retry loop (max 2 attempts): calls validate_llm_output() after each attempt — on pass stores readable_summary, on fail retries once then stores None; populates model_version, prompt_hash, generated_at on briefing row for audit; must only run after Layer 1 is verified
+- backend/app/services/briefing/llm_validator.py — Layer 3 output validation and guardrails; ValidationResult dataclass; three check groups: Group A safety (check_phi_leak, check_prompt_injection), Group B guardrails (check_guardrails — 10 forbidden phrases), Group C faithfulness (check_sentence_count, check_risk_score_consistency, check_adherence_language, check_titration_window, check_urgent_flags, check_overdue_labs, check_problem_assessments, check_data_limitations, check_medication_hallucination, check_bp_plausibility, check_contradiction); validate_llm_output() runs all checks in order, returns on first failure; always writes audit_events row with action="llm_validation", outcome="success"|"failure"; ruff clean
 - backend/app/services/briefing/__init__.py — exports compose_briefing, generate_llm_summary
 - prompts/briefing_summary_prompt.md — Layer 3 system prompt; enforces 3-sentence output, clinical language rules, no medication recommendations
 - backend/tests/test_briefing_composer.py — 61 unit tests (all passing); covers all helper functions, all 9 briefing fields, clinical language enforcement, async compose_briefing with mocked session, error handling, summarizer helpers
+- backend/tests/test_llm_validator.py — 51 unit tests (all passing); fixture-based, no real DB or API calls; covers all 14 check functions individually + 4 full validate_llm_output integration tests; asyncio mode=auto; tests: 3 PHI leak, 3 prompt injection, 11 guardrail (9 parametrized + 2), 3 sentence count, 4 risk score, 4 adherence language, 3 titration window, 3 urgent flags, 3 overdue labs, 3 medication hallucination, 4 BP plausibility, 3 contradiction, 4 full pipeline (audit event on pass/fail, first-failed-check ordering, compliant summary)
 
 - backend/app/services/pattern_engine/risk_scorer.py — Layer 2 compute_risk_score(patient_id, session); verifies patient exists, queries 28-day readings, clinical_context, medication_confirmations directly; computes weighted 0.0–100.0 priority score from systolic-vs-baseline, medication inertia, inverted adherence, reading gap, and comorbidity count; handles missing data with neutral/default signals; rounds to 2 decimals and persists patients.risk_score; no audit_event required for this computation
 - backend/tests/test_risk_scorer.py — 14 unit tests passing with mocked AsyncSession; covers high/low risk scenarios, no readings, no confirmations, NULL last_med_change, clinic systolic fallback, patient not found, clamping, persistence, rounding/commit behavior, and per-signal weight verification
@@ -218,7 +220,7 @@ A full **47-item** system audit was conducted comparing production ARIA against 
 2. **Conversion fidelity** — iEMR fields silently discarded during adapter.py conversion: PULSE (all 53 BP visits), WEIGHT (12-lb loss over 14 months), TEMPERATURE, PULSEOXYGEN (includes 84% SpO2 for CHF patient Nov 2011), EXAM_TEXT, ROS_TEXT, PROBLEM_STATUS2_FLAG, PROBLEM_ASSESSMENT_TEXT, ALLERGY_REACTION; `social_context` DB column exists but is never populated
 3. **Hardcoded patient references** — `PATIENT_ID = "1091"` in run_shadow_mode.py, default bundle in run_ingestion.py, `_DEMO_PATIENT_ID` in reset_demo.py — none of these are acceptable for multi-patient operation
 
-The 47 audit items are categorised as: Critical (5), High (12), Medium (11), Low (6), Infrastructure (6), New clinical features (7). Phased roadmap (Phase 0–8) in AUDIT.md.
+The 57 audit items are categorised as: Critical (7), High (14), Medium (13), Low (7), Infrastructure (6), New clinical features (7), Layer 3 LLM safety (3 Critical, 4 High, 3 Medium, 1 Low). Phased roadmap (Phase 0–8) in AUDIT.md.
 
 **2026-04-23:** AUDIT.md revised — item count corrected from 25 to 47; "51 BP clinic visits" corrected to 53 unique dates; shadow mode result corrected from 91.4% (32/35, 1 FN) to 94.3% (33/35, 0 FN); new critical item added (Fix 5: comorbidity-adjusted threshold not in production).
 
@@ -226,6 +228,13 @@ The 47 audit items are categorised as: Critical (5), High (12), Medium (11), Low
 - CLAUDE.md: RISK SCORING updated with severity-weighted comorbidity model (Fix 25); PATTERN ENGINE QUERIES: adaptive window formula + white-coat exclusion added (Fix 27/28); BRIEFING JSON STRUCTURE: titration window notice added to medication_status (Fix 34)
 - Contradictions resolved: `clinical-validator.md` corrected from "ALL 4" to "ALL 5" inertia conditions; `briefing.md` and `briefing-engineer.md` corrected from 9 to 10 briefing fields
 - All 47 AUDIT.md fixes now documented in their owning .claude agent or skill: Fix 18/23/25/27/28/29/30/31/34/47 were previously missing from the instruction set
+
+**2026-04-24 (later):** Layer 3 LLM output validation and guardrails implemented (AUDIT.md Fixes 48–57).
+- New file: `backend/app/services/briefing/llm_validator.py` — 14 checks across 3 groups (PHI leak, prompt injection, 10 guardrails, 11 faithfulness checks); audit_events written on every call; ruff clean
+- Updated: `backend/app/services/briefing/summarizer.py` — retry loop (max 2 attempts) wraps LLM call + validation; readable_summary=None after two failures; Layer 1 briefing always primary
+- New file: `backend/tests/test_llm_validator.py` — 51 tests, all passing
+- AUDIT.md expanded to 57 items (Fixes 48–57 added); CLAUDE.md updated (briefings table, test list, audit_events action column); AGENTS.md, all .claude agents/skills verified complete
+- Groq/Gemini revert (earlier same day): summarizer.py and config.py reverted to Anthropic-only after branch merge introduced non-spec LLM keys
 
 ---
 

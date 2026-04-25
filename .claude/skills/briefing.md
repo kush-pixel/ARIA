@@ -5,6 +5,12 @@ Order — STRICT:
 1. composer.py produces complete deterministic briefing JSON (no LLM)
 2. Verify all 10 fields populated and clinically correct
 3. summarizer.py optionally adds Layer 3 LLM readable text
+4. llm_validator.py validates LLM output before readable_summary is stored
+   — guardrails: forbidden language, PHI leak, prompt injection (absolute blocks)
+   — faithfulness: sentence count, risk score, adherence pattern, medication names,
+     BP plausibility, titration language, urgent flags, contradiction detection
+   — retry once on failure, then readable_summary=None
+   — always writes audit_events: action="llm_validation"
 
 All 10 briefing JSON fields required:
 trend_summary, medication_status, adherence_summary,

@@ -72,6 +72,41 @@ Model: claude-sonnet-4-20250514
 Prompt: prompts/briefing_summary_prompt.md
 Log: model_version, prompt_hash, generated_at in briefing row.
 
+### Layer 3 Output Validation (runs immediately after Layer 3)
+Every LLM response must pass two checks before readable_summary is stored.
+If either check fails: log warning, retry once, then store readable_summary=None.
+Layer 1 briefing is always the authoritative output — Layer 3 is additive.
+File: backend/app/services/briefing/llm_validator.py
+
+Guardrails (absolute — payload irrelevant, phrase always blocked):
+  "non-adherent", "non-compliant"         — use "possible adherence concern"
+  "hypertensive crisis"                   — use "sustained elevated readings"
+  "medication failure"                    — use "treatment review warranted"
+  "increase.*mg" / "decrease.*mg" / "prescribe" — dosage recommendation forbidden
+  "tell the patient"                      — patient-facing language forbidden
+  "diagnos"                               — diagnostic claim forbidden
+  "emergency"                             — escalation language forbidden
+  Patient ID appearing verbatim           — PHI leak
+  Prompt injection patterns               — "[INST]", "system:", "ignore previous"
+
+Faithfulness validation (contextual — compared against Layer 1 payload):
+  Sentence count must be exactly 3 (spec requirement)
+  Risk score mentioned must match payload["risk_score"] ±10
+  "adherence concern" requires Pattern A in payload["adherence_summary"]
+  "treatment review" requires Pattern B in payload["adherence_summary"]
+  "titration" requires "titration window" in payload["medication_status"]
+  "urgent" requires non-empty payload["urgent_flags"]
+  "lab" / "overdue" requires non-empty payload["overdue_labs"]
+  Problem names mentioned must exist in payload["active_problems"] or payload["problem_assessments"]
+  "insufficient data" requires non-empty payload["data_limitations"]
+  Drug names mentioned must exist in payload["medication_status"]
+  BP values mentioned must be 60-250 mmHg and within ±20 of payload trend data
+  Urgent language with empty urgent_flags = contradiction → blocked
+
+Audit: every validation result writes to audit_events
+  action="llm_validation", resource_type="Briefing", outcome="success"|"failure"
+  details=failed_check + reason on failure
+
 ### MVP AI Features (build both)
 1. Risk scoring — Layer 2 weighted score
 2. LLM explanation — Layer 3 readable summary
@@ -206,6 +241,7 @@ aria-platform/
           __init__.py
           composer.py     <- deterministic briefing JSON (Layer 1 output)
           summarizer.py   <- optional LLM summary (Layer 3)
+          llm_validator.py <- Layer 3 output guardrails + faithfulness validation
         worker/
           __init__.py
           processor.py    <- processing_jobs polling loop (30s interval)
@@ -224,6 +260,7 @@ aria-platform/
       test_pattern_engine.py
       test_risk_scorer.py
       test_briefing_composer.py
+      test_llm_validator.py  <- Layer 3 output validation + guardrails (51 tests)
       test_api.py
       test_integration.py    <- @pytest.mark.integration
 
@@ -364,6 +401,8 @@ briefing_id         UUID PK DEFAULT gen_random_uuid()
 patient_id          TEXT REFERENCES patients
 appointment_date    DATE NOT NULL
 llm_response        JSONB NOT NULL          structured briefing payload
+model_version       TEXT                    Layer 3 model used (e.g. claude-sonnet-4-20250514)
+prompt_hash         TEXT                    SHA-256 of Layer 3 system prompt (audit traceability)
 generated_at        TIMESTAMPTZ DEFAULT NOW()
 delivered_at        TIMESTAMPTZ
 read_at             TIMESTAMPTZ
@@ -386,7 +425,7 @@ audit_id            UUID PK DEFAULT gen_random_uuid()
 actor_type          TEXT NOT NULL           system | clinician | admin
 actor_id            TEXT
 patient_id          TEXT REFERENCES patients
-action              TEXT NOT NULL           bundle_import | reading_ingested | briefing_viewed | alert_acknowledged
+action              TEXT NOT NULL           bundle_import | reading_ingested | briefing_viewed | alert_acknowledged | llm_validation
 resource_type       TEXT NOT NULL
 resource_id         TEXT
 outcome             TEXT NOT NULL           success | failure
@@ -729,6 +768,8 @@ Every action below MUST create an audit_events row:
   reading_ingested -> action="reading_ingested", resource_type="Reading"
   briefing_viewed -> action="briefing_viewed" + update briefings.read_at
   alert_acknowledged -> action="alert_acknowledged"
+  llm_validation -> action="llm_validation", resource_type="Briefing"
+                    outcome="success"|"failure", details=failed_check on failure
 outcome must be "success" or "failure" — never omit.
 
 ---

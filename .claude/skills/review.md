@@ -43,6 +43,11 @@ Briefing:
   [ ] risk_score included in briefing JSON
   [ ] Inertia in agenda from inertia_result dict (not re-implemented inline)
   [ ] trend_summary uses adaptive window (not hardcoded "28-day")
+  [ ] llm_validator.py called after summarizer.py, before storing readable_summary
+  [ ] Guardrails check: forbidden language, PHI leak, prompt injection
+  [ ] Faithfulness check: sentence count=3, risk score, adherence, medications, BP, contradictions
+  [ ] Retry once on validation failure, then readable_summary=None
+  [ ] audit_events written for every llm_validation call (success and failure)
 
 Audit:
   [ ] bundle_import -> audit_events
