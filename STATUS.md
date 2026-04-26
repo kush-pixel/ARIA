@@ -1,5 +1,5 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-25 by Kush (check_problem_assessments gap fixed — condition hallucination now caught even when active_problems is non-empty; synonym map added; test suite expanded 51→57)
+Last updated: 2026-04-26 by Prakriti (v5.0 pattern engine spec implemented — patient-adaptive threshold, Pattern B suppression, inertia 5th condition, deterioration absolute gate + step-change sub-detector, threshold_utils.py; test suite expanded 39→58)
 
 ---
 
@@ -51,11 +51,12 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - backend/app/services/pattern_engine/risk_scorer.py — Layer 2 compute_risk_score(patient_id, session); verifies patient exists, queries 28-day readings, clinical_context, medication_confirmations directly; computes weighted 0.0–100.0 priority score from systolic-vs-baseline, medication inertia, inverted adherence, reading gap, and comorbidity count; handles missing data with neutral/default signals; rounds to 2 decimals and persists patients.risk_score; no audit_event required for this computation
 - backend/tests/test_risk_scorer.py — 14 unit tests passing with mocked AsyncSession; covers high/low risk scenarios, no readings, no confirmations, NULL last_med_change, clinic systolic fallback, patient not found, clamping, persistence, rounding/commit behavior, and per-signal weight verification
 
-- backend/app/services/pattern_engine/gap_detector.py — Layer 1 run_gap_detector(session, patient_id) → GapResult; tier-aware thresholds (high: flag≥1d/urgent≥3d, medium: flag≥3d/urgent≥5d, low: flag≥7d/urgent≥14d); returns gap_days, flagged, urgent booleans; no readings → gap_days=None, flagged=False
-- backend/app/services/pattern_engine/inertia_detector.py — Layer 1 run_inertia_detector(session, patient_id) → InertiaResult; all 4 conditions required simultaneously: avg systolic≥140, ≥5 elevated readings, elevated span >7 days, no med change on/after first elevated reading; fail-safe: any unmet condition → detected=False
-- backend/app/services/pattern_engine/adherence_analyzer.py — Layer 1 run_adherence_analyzer(session, patient_id) → AdherenceResult; 28-day adherence rate from confirmations vs avg systolic; Pattern A (elevated+low adherence)="possible adherence concern", Pattern B (elevated+high adherence)="treatment review warranted", Pattern C (normal+low adherence)="contextual review", none=no concern; clinical language enforced at code level
-- backend/app/services/pattern_engine/deterioration_detector.py — Layer 1 run_deterioration_detector(session, patient_id) → DeteriorationResult; dual-signal: least-squares positive slope over 14 days AND recent 3-day avg > days 4–10 baseline avg; both signals required to reduce false positives; <7 readings → detected=False; pure Python slope (no numpy)
-- backend/tests/test_pattern_engine.py — 39 unit tests (all passing); covers all 4 Layer 1 detectors and their edge cases (no readings, sparse data, borderline thresholds, all pattern types)
+- backend/app/services/pattern_engine/threshold_utils.py — NEW shared utility module; compute_slope() (pure-Python least-squares, no numpy); compute_patient_threshold() (adaptive: max(130, mean+1.5×SD) capped at 145, fallback 140 if <3 readings); classify_comorbidity_concern() (ICD-10 prefix matching for cardio/metabolic groups); apply_comorbidity_adjustment() (−7 mmHg when BOTH cardio AND metabolic, floor 130); get_last_med_change_date() (med_history JSONB traversal with last_med_change fallback); all four detectors import from here
+- backend/app/services/pattern_engine/gap_detector.py — Layer 1 run_gap_detector(session, patient_id) → GapResult; tier-aware thresholds (high: flag≥1d/urgent≥3d, medium: flag≥3d/urgent≥5d, low: flag≥7d/urgent≥14d); returns gap_days, status, threshold_used; no readings → gap_days=inf, status=urgent
+- backend/app/services/pattern_engine/inertia_detector.py — Layer 1 run_inertia_detector(session, patient_id) → InertiaResult; all 5 conditions required: (1) avg systolic ≥ patient_threshold, (2) ≥5 elevated readings, (3) elevated span >7 days, (4) no med change on/after first elevated reading — uses med_history JSONB traversal (NOT last_med_change stale field), (5) 7-day recent avg ≥ patient_threshold (slope direction check: BP not declining); patient_threshold from threshold_utils (adaptive, comorbidity-adjusted); fail-safe: any unmet condition → detected=False
+- backend/app/services/pattern_engine/adherence_analyzer.py — Layer 1 run_adherence_analyzer(session, patient_id) → AdherenceResult; 28-day adherence rate from confirmations vs avg systolic; Pattern A="possible adherence concern", Pattern B="treatment review warranted", Pattern C="contextual review"; Pattern B suppression: if slope < −0.3 mmHg/day AND 7-day recent avg <140 AND days_since_med_change ≤14 → suppressed to "none" / "treatment appears effective — monitoring"; suppression MUST NOT apply when no recent med change recorded; clinical language enforced at code level
+- backend/app/services/pattern_engine/deterioration_detector.py — Layer 1 run_deterioration_detector(session, patient_id) → DeteriorationResult; three signals all required: (1) positive least-squares slope over 14 days, (2) recent 3-day avg > days 4–10 baseline, (3) recent_avg ≥ patient_threshold (absolute gate — prevents firing on normotensive 115→119 rise); step-change sub-detector (OR gate): 7-day rolling mean minus 3-weeks-ago 7-day mean ≥15 mmHg AND recent_7d ≥ patient_threshold flags deterioration regardless of linear slope; <7 readings → detected=False; _least_squares_slope kept as backward-compat alias to compute_slope for test imports
+- backend/tests/test_pattern_engine.py — 58 unit tests (all passing); covers all 4 Layer 1 detectors + threshold_utils; new tests: inertia med_history traversal, inertia 5th condition (slope direction), inertia CC fallback, Pattern B suppression (triggered / no med change / stale med change / med_history date used), deterioration absolute threshold gate, deterioration step-change sub-detector, threshold_utils adaptive/floor/ceiling, comorbidity adjustment, get_last_med_change_date variants
 - frontend/src/ — dashboard shell with mock data (Krishna)
   - All 24 components and pages created (PatientList, BriefingCard, SparklineChart, AdherenceSummary, VisitAgenda, AlertInbox, RiskTierBadge, RiskScoreBar, Sidebar, ThemeToggle, Admin page)
   - npm run build passing with 0 TypeScript errors, 0 lint errors
@@ -235,6 +236,41 @@ The 57 audit items are categorised as: Critical (7), High (14), Medium (13), Low
 - New file: `backend/tests/test_llm_validator.py` — 51 tests, all passing
 - AUDIT.md expanded to 57 items (Fixes 48–57 added); CLAUDE.md updated (briefings table, test list, audit_events action column); AGENTS.md, all .claude agents/skills verified complete
 - Groq/Gemini revert (earlier same day): summarizer.py and config.py reverted to Anthropic-only after branch merge introduced non-spec LLM keys
+
+---
+
+## Pattern Engine — v5.0 Spec Implementation — 2026-04-26
+
+**Author:** Prakriti Sharma  
+**Files changed:** `threshold_utils.py` (new), `inertia_detector.py`, `adherence_analyzer.py`, `deterioration_detector.py`, `tests/test_pattern_engine.py`  
+**Tests:** 39 → 58 unit tests, all passing. `ruff check app/services/pattern_engine/` — all checks passed.
+
+### threshold_utils.py (new file)
+Shared utility module imported by all four Layer 1 detectors. Centralises patient-adaptive threshold computation and comorbidity adjustment so no detector hardcodes 140 mmHg.
+
+Key functions:
+- `compute_slope()` — pure-Python least-squares (no numpy); moved from `deterioration_detector.py`; `_least_squares_slope` alias kept in that file for test compat
+- `compute_patient_threshold(historic_bp_systolic)` — returns `max(130, mean + 1.5×SD)` capped at 145; fallback 140 when <3 readings; returns `(threshold, mode_str)`
+- `classify_comorbidity_concern(problem_codes)` — ICD-10 prefix matching for cardio (I50/I63/G45) and metabolic (E11/N18) groups; degraded mode (presence = concern) until Phase 1 `problem_assessments` JSONB is available
+- `apply_comorbidity_adjustment(threshold, concern_state)` — −7 mmHg adjustment (floor 130) only when **both** cardio AND metabolic simultaneously in elevated concern; returns `(adjusted_threshold, mode_str)`
+- `get_last_med_change_date(med_history, last_med_change_fallback)` — traverses `med_history` JSONB list to find max date; falls back to `last_med_change` field if no JSONB history
+
+### inertia_detector.py — Phase 2 updates
+- **Query restructure:** added upfront `SELECT ClinicalContext WHERE patient_id=?` (scalar_one_or_none) before readings query; provides historic_bp_systolic, problem_codes, med_history, last_med_change in a single round-trip
+- **Patient-adaptive threshold:** calls `compute_patient_threshold` + `apply_comorbidity_adjustment` from threshold_utils; replaced all hardcoded 140 references
+- **Condition 4 — med_history traversal:** uses `get_last_med_change_date(med_history, last_med_change)` instead of querying `ClinicalContext.last_med_change` alone; any med_history entry with date ≥ first elevated reading blocks inertia (dose increases count as physician response)
+- **Condition 5 (new) — slope direction check:** computes 7-day recent avg from already-fetched readings; if recent_7d_avg < patient_threshold → BP is declining → do NOT flag inertia
+
+### adherence_analyzer.py — Phase 0 Fix #3+26
+- **Pattern B interpretation:** updated from "possible treatment-review case — elevated BP with high adherence signal" to "treatment review warranted" (per AGENTS.md clinical language spec)
+- **Pattern B suppression:** when Pattern B would fire, runs two additional queries (individual readings for slope + ClinicalContext for med change date); suppresses to `pattern="none"` / `"treatment appears effective — monitoring"` when slope < −0.3 AND 7-day avg < 140 AND days_since_med_change ≤ 14; suppression MUST NOT apply when no recent medication change is recorded (days_since = ∞ → gate fails)
+- Clinical language constraint still enforced: `_INTERPRETATIONS` contains no "non-adherent" or "medication failure" strings
+
+### deterioration_detector.py — Phase 0 Fix #2 + Phase 2
+- **Query restructure:** added upfront `SELECT ClinicalContext WHERE patient_id=?` for historic_bp_systolic + problem_codes; computes patient_threshold before readings query
+- **Signal 3 (absolute gate):** `recent_avg >= patient_threshold` added as third required signal; prevents firing when a normotensive patient rises from e.g. 115 → 119 mmHg
+- **Step-change sub-detector (OR gate):** `recent_7d_avg − old_7d_avg ≥ 15 mmHg AND recent_7d_avg ≥ patient_threshold` flags deterioration regardless of linear slope direction; catches acute BP step-changes that least-squares regression smooths over; only compares weeks that have data (if 14-day window, old_7d is empty → sub-detector never fires on existing tests)
+- `_least_squares_slope` kept as module-level alias (`= compute_slope`) for backward compat with test imports
 
 ---
 
