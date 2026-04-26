@@ -1,5 +1,5 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-25 by Kush (check_problem_assessments gap fixed — condition hallucination now caught even when active_problems is non-empty; synonym map added; test suite expanded 51→57)
+Last updated: 2026-04-26 by Yash (AUDIT.md Fixes 25, 58, 61 implemented — severity-weighted comorbidity score, adaptive gap/inertia normalization, risk_score_computed_at staleness indicator)
 
 ---
 
@@ -21,8 +21,8 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - backend/app/config.py — Pydantic v2 Settings, 7 fields (DATABASE_URL, ANTHROPIC_API_KEY, APP_SECRET_KEY, APP_ENV, APP_DEBUG, DEMO_MODE, BRIEFING_TRIGGER)
 - backend/app/db/base.py — async engine (auto-converts postgresql:// → postgresql+asyncpg://), AsyncSessionLocal factory, DeclarativeBase
 - backend/app/db/session.py — get_session() FastAPI dependency
-- backend/app/models/ — all 8 ORM models (patients, clinical_context, readings, medication_confirmations, alerts, briefings, processing_jobs, audit_events)
-- scripts/setup_db.py — creates 8 tables + 11 indexes; safe to re-run (IF NOT EXISTS)
+- backend/app/models/ — all 8 ORM models (patients, clinical_context, readings, medication_confirmations, alerts, briefings, processing_jobs, audit_events); patients model now includes risk_score_computed_at TIMESTAMPTZ column (Fix 61)
+- scripts/setup_db.py — creates 8 tables + 13 indexes/migrations; safe to re-run (IF NOT EXISTS / ADD COLUMN IF NOT EXISTS); includes risk_score_computed_at migration (Fix 61)
 - backend/app/utils/logging_utils.py — get_logger(name) returns a named stdlib Logger with ISO timestamp format; used by all backend modules
 - backend/app/services/fhir/adapter.py — iEMR JSON → FHIR R4 Bundle; 6 resource types (Patient, Condition, MedicationRequest, Observation, AllergyIntolerance, ServiceRequest); most-recent-wins deduplication keyed by iEMR code for all types except Observation; VITALS_DATETIME used for effectiveDateTime (never ADMIT_DATE); non-standard `_age` extension passes age to ingestion layer; _build_med_history() collects full medication timeline (104 events for patient 1091) deduplicated by (name, date, activity), passed as _aria_med_history metadata on bundle dict. Data quality fixes applied 2026-04-21: (1) Z00.xx encounter-type codes filtered from Conditions, (2) discontinued medications excluded via sentinel tombstone + cross-MED_CODE name propagation, (3) supplies/tests/device scripts filtered from MedicationRequests via _NON_DRUG_MARKERS/_NON_DRUG_EXACT, (4) secondary name-level deduplication collapses same drug appearing under multiple MED_CODEs, (5) non-clinical PLAN items (physician names, redacted vendors, patient education) filtered from ServiceRequests. Patient 1091: medications reduced from 38 → 14 (all actual drugs); conditions reduced from 18 → 17 (PREVENTIVE CARE removed); follow-up items reduced from 10 → 6 (admin/education entries removed).
 - backend/tests/test_fhir_adapter.py — 42 tests (41 unit + 1 integration); all passing; includes TestBuildMedHistory (7 cases), test_bundle_contains_aria_med_history_key, and 6 new tests covering Z00.xx filtering, discontinued medication exclusion, cross-MED_CODE discontinue propagation, and non-clinical service request filtering
@@ -48,8 +48,8 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - backend/tests/test_briefing_composer.py — 61 unit tests (all passing); covers all helper functions, all 9 briefing fields, clinical language enforcement, async compose_briefing with mocked session, error handling, summarizer helpers
 - backend/tests/test_llm_validator.py — 57 unit tests (all passing); fixture-based, no real DB or API calls; covers all 14 check functions individually + 4 full validate_llm_output integration tests; asyncio mode=auto; tests: 3 PHI leak, 3 prompt injection, 11 guardrail (9 parametrized + 2), 3 sentence count, 4 risk score, 4 adherence language, 3 titration window, 3 urgent flags, 3 overdue labs, 6 problem assessments (empty list, hallucinated condition with non-empty problems, synonym acceptance, known condition passes, no condition mention, grounding via problem_assessments keys), 3 medication hallucination, 4 BP plausibility, 3 contradiction, 4 full pipeline (audit event on pass/fail, first-failed-check ordering, compliant summary)
 
-- backend/app/services/pattern_engine/risk_scorer.py — Layer 2 compute_risk_score(patient_id, session); verifies patient exists, queries 28-day readings, clinical_context, medication_confirmations directly; computes weighted 0.0–100.0 priority score from systolic-vs-baseline, medication inertia, inverted adherence, reading gap, and comorbidity count; handles missing data with neutral/default signals; rounds to 2 decimals and persists patients.risk_score; no audit_event required for this computation
-- backend/tests/test_risk_scorer.py — 14 unit tests passing with mocked AsyncSession; covers high/low risk scenarios, no readings, no confirmations, NULL last_med_change, clinic systolic fallback, patient not found, clamping, persistence, rounding/commit behavior, and per-signal weight verification
+- backend/app/services/pattern_engine/risk_scorer.py — Layer 2 compute_risk_score(patient_id, session); fetches full Patient object (for next_appointment); queries 28-day readings, clinical_context, medication_confirmations; computes weighted 0.0–100.0 priority score from: systolic-vs-baseline (30%), medication inertia (25%, saturates at 180 days), inverted adherence (20%), reading gap (15%, normalised against adaptive window), severity-weighted comorbidity (10%); comorbidity uses ICD-10 prefix weights — CHF/Stroke/TIA=25pts each, Diabetes/CKD/CAD=15pts each, other=5pts, clamped to 100 (Fix 25); gap normalization uses _compute_window_days() — same adaptive window formula as Layer 1 detectors, min 14/max 90/fallback 28 (Fix 58); inertia saturates at 180 days not 90 (Fix 58); persists patients.risk_score AND patients.risk_score_computed_at=now() on every update (Fix 61); no audit_event required for this computation
+- backend/tests/test_risk_scorer.py — 14 unit tests passing with mocked AsyncSession; updated for Fix 25/58/61: _session_for() now returns Patient mock object (not string); test_signal_weights parametrize updated (inertia max at 180d, gap max at 28d with window fallback, comorbidity max uses ICD-10 codes); test_score_clamped_0_100 uses CHF+Stroke+TIA+DM+CKD+CAD codes to hit 100; test_persists_to_patients_table expected score updated 38.67→27.17 and UPDATE assertion extended to include risk_score_computed_at
 
 - backend/app/services/pattern_engine/gap_detector.py — Layer 1 run_gap_detector(session, patient_id) → GapResult; tier-aware thresholds (high: flag≥1d/urgent≥3d, medium: flag≥3d/urgent≥5d, low: flag≥7d/urgent≥14d); returns gap_days, flagged, urgent booleans; no readings → gap_days=None, flagged=False
 - backend/app/services/pattern_engine/inertia_detector.py — Layer 1 run_inertia_detector(session, patient_id) → InertiaResult; all 4 conditions required simultaneously: avg systolic≥140, ≥5 elevated readings, elevated span >7 days, no med change on/after first elevated reading; fail-safe: any unmet condition → detected=False
@@ -66,7 +66,7 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - frontend/src/components/dashboard/AlertInbox.tsx — acknowledge button calls acknowledgeAlert() in api.ts; no longer UI-only
 
 - backend/app/main.py — FastAPI app entry point; CORS (localhost:3000); all 7 routers registered; WorkerProcessor starts/stops on lifespan
-- backend/app/api/patients.py — GET /api/patients (sorted tier→score DESC), GET /api/patients/{id}
+- backend/app/api/patients.py — GET /api/patients (sorted tier→score DESC), GET /api/patients/{id}; _serialise() now includes risk_score_computed_at (Fix 61)
 - backend/app/api/briefings.py — GET /api/briefings/{patient_id}; marks read_at; writes audit event
 - backend/app/api/alerts.py — GET /api/alerts (unacknowledged only), POST /api/alerts/{id}/acknowledge + audit event
 - backend/app/api/readings.py — GET /api/readings?patient_id= (28-day window), POST /api/readings (manual entry + audit)
@@ -77,6 +77,8 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - backend/app/api/shadow_mode.py — GET /api/shadow-mode/results; serves pre-computed shadow mode results from data/shadow_mode_results.json; no DB dependency; returns 404 if results not yet generated
 - scripts/run_shadow_mode.py — shadow mode validation script; **COMPLETE, PASSING at 94.3%** (see Shadow Mode section below)
 - frontend/src/app/shadow-mode/page.tsx — shadow mode results page; shows visit-by-visit ARIA vs physician comparison, between-visit alert timeline, detector breakdowns, agreement metrics
+- frontend/src/lib/types.ts — Patient interface now includes risk_score_computed_at: string | null (Fix 61)
+- frontend/src/components/dashboard/PatientList.tsx — staleness badge: amber AlertTriangle icon + "Score stale" label shown beneath RiskScoreBar when risk_score_computed_at > 26 hours ago; isScoreStale() helper added (Fix 61)
 
 ### IN PROGRESS
 - None
@@ -90,6 +92,7 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - briefings table: added model_version TEXT (nullable) and prompt_hash TEXT (nullable) columns for Layer 3 LLM audit trail (per CLAUDE.md: "Log: model_version, prompt_hash, generated_at in briefing row")
 - readings rows inserted by ingestion.py for clinic BP readings from FHIR Observations use session="ad_hoc" and source="clinic" to distinguish them from home monitoring readings (source="generated" | "manual" | "ble_auto")
 - clinical_context table: added med_history JSONB column (ALTER TABLE … ADD COLUMN IF NOT EXISTS); stores full medication timeline as list[{name, rxnorm, date, activity}] sorted chronologically; 104 entries for patient 1091
+- patients table: added risk_score_computed_at TIMESTAMPTZ column (ALTER TABLE … ADD COLUMN IF NOT EXISTS); set on every risk_score update; frontend shows staleness badge when > 26 hours old (Fix 61)
 
 ---
 
@@ -235,6 +238,26 @@ The 57 audit items are categorised as: Critical (7), High (14), Medium (13), Low
 - New file: `backend/tests/test_llm_validator.py` — 51 tests, all passing
 - AUDIT.md expanded to 57 items (Fixes 48–57 added); CLAUDE.md updated (briefings table, test list, audit_events action column); AGENTS.md, all .claude agents/skills verified complete
 - Groq/Gemini revert (earlier same day): summarizer.py and config.py reverted to Anthropic-only after branch merge introduced non-spec LLM keys
+
+---
+
+## AUDIT.md Fixes Implemented — 2026-04-26
+
+### Fix 25 — Comorbidity risk score saturated at 5 problems
+**File:** `backend/app/services/pattern_engine/risk_scorer.py` line 161
+**Issue:** `_clamp(_comorbidity_count(context) / 5.0 * 100.0)` treated every patient with 5+ coded problems identically. Patient 1091 has 17 problems — the signal was maxed out and useless for differentiation within the high-risk cohort.
+**Fix:** Replaced `_comorbidity_count()` with `_comorbidity_severity_score()` using ICD-10 prefix matching. Weights: CHF (I50) / Stroke (I63, I64) / TIA (G45) = 25 pts each; Diabetes (E11) / CKD (N18) / CAD (I25) = 15 pts each; any other coded problem = 5 pts. Total clamped to 100. CHF + Diabetes now scores 40/100 vs CHF + Stroke at 50/100 — clinically meaningful differentiation.
+
+### Fix 58 — sig_gap saturated at 14 days; sig_inertia saturated at 90 days
+**File:** `backend/app/services/pattern_engine/risk_scorer.py` lines 150/159
+**Issue:** `sig_gap = _clamp(gap_days / 14.0 * 100.0)` — a 45-day gap and a 14-day gap both scored 100/100, making the signal useless for quarterly-schedule patients. `sig_inertia = _clamp(days / 90.0 * 100.0)` — saturated at 3 months, any patient without a med change for 91 days to 5 years was treated identically.
+**Fix:** Added `_compute_window_days(patient, context)` using the same adaptive window formula as Layer 1 detectors: `min(90, max(14, (next_appointment - last_visit_date).days))`, fallback 28. `sig_gap` now normalises against `window_days` instead of 14. `sig_inertia` divisor changed from 90.0 → 180.0 (saturates at 6 months). Patient query upgraded from `select(Patient.patient_id)` to `select(Patient)` to obtain `next_appointment`.
+
+### Fix 61 — No staleness indicator on patients.risk_score
+**Files:** `backend/app/models/patient.py`, `backend/app/services/pattern_engine/risk_scorer.py`, `scripts/setup_db.py`, `backend/app/api/patients.py`, `frontend/src/lib/types.ts`, `frontend/src/components/dashboard/PatientList.tsx`
+**Issue:** `patients.risk_score` had no timestamp. A stale score from a failed midnight sweep displayed with no visual warning — clinically misleading during active patient episodes.
+**Fix:** Added `risk_score_computed_at TIMESTAMPTZ` column to Patient ORM model and DB (migration in setup_db.py). `compute_risk_score()` now sets both `risk_score` and `risk_score_computed_at = now` in the same UPDATE. API `_serialise()` exposes the field. Frontend `PatientList.tsx` shows an amber AlertTriangle badge + "Score stale" label under RiskScoreBar when `risk_score_computed_at` is older than 26 hours (single missed sweep tolerable, second is not).
+**Tests:** All 14 risk scorer tests updated and passing — mock structure, expected scores, and UPDATE assertion corrected for all three fixes.
 
 ---
 
