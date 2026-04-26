@@ -58,6 +58,7 @@ def _serialise(p: Patient) -> dict:
         "risk_tier": p.risk_tier,
         "tier_override": p.tier_override,
         "risk_score": float(p.risk_score) if p.risk_score is not None else None,
+        "risk_score_computed_at": p.risk_score_computed_at.isoformat() if p.risk_score_computed_at else None,
         "monitoring_active": p.monitoring_active,
         "next_appointment": p.next_appointment.isoformat() if p.next_appointment else None,
         "enrolled_at": p.enrolled_at.isoformat() if p.enrolled_at else None,

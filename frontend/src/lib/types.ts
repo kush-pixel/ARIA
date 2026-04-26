@@ -7,6 +7,7 @@ export interface Patient {
   risk_tier: RiskTier
   tier_override: string | null
   risk_score: number | null
+  risk_score_computed_at: string | null
   monitoring_active: boolean
   next_appointment: string | null
   enrolled_at: string
