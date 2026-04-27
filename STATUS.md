@@ -1,5 +1,5 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-25 by Kush (check_problem_assessments gap fixed — condition hallucination now caught even when active_problems is non-empty; synonym map added; test suite expanded 51→57)
+Last updated: 2026-04-26 by Krishna (Phase 3 audit items 15/19/22 — per-observation idempotency in ingestion.py, parametric median baseline in reading_generator.py, full-timeline readings generator added)
 
 ---
 
@@ -77,6 +77,10 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - backend/app/api/shadow_mode.py — GET /api/shadow-mode/results; serves pre-computed shadow mode results from data/shadow_mode_results.json; no DB dependency; returns 404 if results not yet generated
 - scripts/run_shadow_mode.py — shadow mode validation script; **COMPLETE, PASSING at 94.3%** (see Shadow Mode section below)
 - frontend/src/app/shadow-mode/page.tsx — shadow mode results page; shows visit-by-visit ARIA vs physician comparison, between-visit alert timeline, detector breakdowns, agreement metrics
+
+- Item 22 COMPLETE: per-observation idempotency — ingestion.py uses ON CONFLICT DO NOTHING per reading; batch COUNT guard removed; setup_db.py adds idx_readings_patient_datetime_source UNIQUE index and idx_confirmations_patient_med_scheduled UNIQUE index (both IF NOT EXISTS); test_ingestion.py updated to match new execute call order
+- Item 19 COMPLETE: parametric baseline using median(historic_bp_systolic); _get_patient_baseline() async helper added to reading_generator.py; falls back to PATIENT_A_MORNING_MEAN=163.0 when <2 clinic readings; 3 new tests in TestGetPatientBaseline
+- Item 15 COMPLETE: generate_full_timeline_readings() added to reading_generator.py; interpolates between clinic visits; ON CONFLICT DO NOTHING per reading; run_generator.py --mode full-timeline; 4 new unit tests in TestFullTimelineReadings
 
 ### IN PROGRESS
 - None

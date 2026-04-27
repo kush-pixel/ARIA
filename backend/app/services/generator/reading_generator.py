@@ -20,9 +20,11 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.clinical_context import ClinicalContext
+from app.models.reading import Reading
 from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -128,6 +130,48 @@ def _compute_baseline(historic_bp: list[int]) -> tuple[float, float]:
     if len(historic_bp) == 1:
         return float(historic_bp[0]), PATIENT_A_MORNING_SD
     return PATIENT_A_MORNING_MEAN, PATIENT_A_MORNING_SD
+
+
+async def _get_patient_baseline(patient_id: str, session: AsyncSession) -> float:
+    """Return the parametric systolic baseline for a patient using median clinic BP.
+
+    Queries ``clinical_context.historic_bp_systolic`` and returns the median
+    of all clinic readings when at least two values exist.  Falls back to the
+    ``PATIENT_A_MORNING_MEAN`` constant (163.0) when fewer than two readings
+    are available so generation can still proceed without crashing.
+
+    Args:
+        patient_id: ARIA patient identifier.
+        session: SQLAlchemy async session.
+
+    Returns:
+        Median of historic clinic systolic readings, or ``PATIENT_A_MORNING_MEAN``
+        as a fallback float.
+    """
+    result = await session.execute(
+        select(ClinicalContext).where(ClinicalContext.patient_id == patient_id)
+    )
+    ctx = result.scalar_one_or_none()
+
+    historic_bp: list[int] = (ctx.historic_bp_systolic or []) if ctx else []
+
+    if len(historic_bp) >= 2:
+        baseline = float(statistics.median(historic_bp))
+        logger.info(
+            "Patient %s: parametric baseline (median) = %.1f from %d clinic readings",
+            patient_id,
+            baseline,
+            len(historic_bp),
+        )
+        return baseline
+
+    logger.warning(
+        "Patient %s: fewer than 2 clinic readings (%d) — using PATIENT_A_MORNING_MEAN=%.1f",
+        patient_id,
+        len(historic_bp),
+        PATIENT_A_MORNING_MEAN,
+    )
+    return PATIENT_A_MORNING_MEAN
 
 
 def _anti_round(value: float) -> float:
@@ -406,3 +450,251 @@ async def generate_readings(
         scenario,
     )
     return readings
+
+
+# ---------------------------------------------------------------------------
+# Full timeline generation (Item 15)
+# ---------------------------------------------------------------------------
+
+# Submitted-by constant for the full timeline generator
+FULL_TIMELINE_SUBMITTED_BY: str = "full_timeline_generator"
+
+# Miss probability per day type for full timeline
+FULL_TIMELINE_MISS_PROB_WEEKEND: float = 0.15
+FULL_TIMELINE_MISS_PROB_WEEKDAY: float = 0.08
+
+# Morning/evening offset for full timeline (morning 0-3 mmHg above day_mean)
+FULL_TIMELINE_MORNING_OFFSET_HIGH: float = 3.0
+# Evening is 6-9 mmHg below morning
+FULL_TIMELINE_EVENING_DROP_LOW: float = 6.0
+FULL_TIMELINE_EVENING_DROP_HIGH: float = 9.0
+
+# Gaussian SD for full timeline daily readings
+FULL_TIMELINE_GAUSSIAN_SD: float = 8.0
+
+# Clip bounds relative to day_mean
+FULL_TIMELINE_CLIP_OFFSET: float = 25.0
+
+# Batch commit size
+FULL_TIMELINE_BATCH_SIZE: int = 100
+
+
+async def generate_full_timeline_readings(
+    patient_id: str,
+    session: AsyncSession,
+) -> int:
+    """Generate synthetic home BP readings spanning the full care timeline.
+
+    For each consecutive pair of clinic readings, interpolates daily synthetic
+    readings between them using linear interpolation with Gaussian noise.
+    Applies morning/evening session splits, device outage/miss patterns,
+    and white-coat dip behaviour derived from the inter-visit BP trajectory.
+
+    Inserts with ON CONFLICT DO NOTHING on
+    ``(patient_id, effective_datetime, source)`` — safe to re-run.
+
+    Args:
+        patient_id: ARIA patient identifier (e.g. ``"1091"``).
+        session: SQLAlchemy async session.  The caller is responsible for
+            session lifecycle; this function commits in batches of
+            ``FULL_TIMELINE_BATCH_SIZE`` readings.
+
+    Returns:
+        Total number of new readings inserted (0 on a complete re-run due to
+        idempotent ON CONFLICT DO NOTHING).
+    """
+    # ── Step 1: Load clinic readings ordered chronologically ─────────────────
+    clinic_result = await session.execute(
+        select(
+            Reading.effective_datetime,
+            Reading.systolic_avg,
+            Reading.diastolic_avg,
+        )
+        .where(
+            Reading.patient_id == patient_id,
+            Reading.source == "clinic",
+        )
+        .order_by(Reading.effective_datetime.asc())
+    )
+    clinic_rows = clinic_result.all()
+
+    if len(clinic_rows) < 2:
+        logger.warning(
+            "Patient %s: fewer than 2 clinic readings — no full-timeline intervals to generate",
+            patient_id,
+        )
+        return 0
+
+    logger.info(
+        "Patient %s: generating full-timeline readings across %d inter-visit intervals",
+        patient_id,
+        len(clinic_rows) - 1,
+    )
+
+    total_inserted = 0
+    pending_batch = 0
+
+    for i in range(len(clinic_rows) - 1):
+        anchor_a = clinic_rows[i]
+        anchor_b = clinic_rows[i + 1]
+
+        # Convert timezone-aware datetimes to plain dates for day iteration
+        date_a: date = anchor_a.effective_datetime.date()
+        date_b: date = anchor_b.effective_datetime.date()
+
+        window_start = date_a + timedelta(days=1)
+        window_end = date_b - timedelta(days=1)
+
+        if window_end <= window_start:
+            logger.debug(
+                "Patient %s: skipping interval %s→%s (adjacent visits, no room for home readings)",
+                patient_id,
+                date_a.isoformat(),
+                date_b.isoformat(),
+            )
+            continue
+
+        gap_days = (date_b - date_a).days
+        sys_a = float(anchor_a.systolic_avg)
+        sys_b = float(anchor_b.systolic_avg)
+
+        # ── Step 3: Generate one row per day per session ─────────────────────
+        current_day = window_start
+        while current_day <= window_end:
+            progress = (current_day - date_a).days / gap_days
+            day_mean = sys_a + (sys_b - sys_a) * progress
+
+            # Miss pattern
+            is_weekend = current_day.weekday() >= 5  # Saturday=5, Sunday=6
+            miss_prob = (
+                FULL_TIMELINE_MISS_PROB_WEEKEND
+                if is_weekend
+                else FULL_TIMELINE_MISS_PROB_WEEKDAY
+            )
+            if random.random() < miss_prob:
+                current_day += timedelta(days=1)
+                continue
+
+            # ── Morning reading ───────────────────────────────────────────────
+            morning_raw = random.gauss(
+                day_mean + random.uniform(0.0, FULL_TIMELINE_MORNING_OFFSET_HIGH),
+                FULL_TIMELINE_GAUSSIAN_SD,
+            )
+            morning_raw = max(
+                day_mean - FULL_TIMELINE_CLIP_OFFSET,
+                min(day_mean + FULL_TIMELINE_CLIP_OFFSET, morning_raw),
+            )
+            # Anti-round
+            morning_sys = round(morning_raw + random.uniform(ANTI_ROUND_LOW, ANTI_ROUND_HIGH), 1)
+            if morning_sys % 1 == 0.0:
+                morning_sys = round(morning_sys + 0.1, 1)
+            morning_dia = round(
+                morning_sys * random.uniform(DIASTOLIC_RATIO_LOW, DIASTOLIC_RATIO_HIGH), 1
+            )
+
+            morning_jitter = random.randint(SESSION_JITTER_MINUTES_LOW, SESSION_JITTER_MINUTES_HIGH)
+            morning_dt = datetime(
+                current_day.year,
+                current_day.month,
+                current_day.day,
+                MORNING_HOUR_UTC,
+                0,
+                0,
+                tzinfo=UTC,
+            ) + timedelta(minutes=morning_jitter)
+
+            morning_dict: dict[str, Any] = {
+                "patient_id": patient_id,
+                "systolic_1": int(morning_sys),
+                "diastolic_1": int(morning_dia),
+                "systolic_avg": morning_sys,
+                "diastolic_avg": morning_dia,
+                "effective_datetime": morning_dt,
+                "session": GENERATED_SESSION_MORNING,
+                "source": GENERATED_SOURCE,
+                "submitted_by": FULL_TIMELINE_SUBMITTED_BY,
+                "bp_position": GENERATED_BP_POSITION,
+                "bp_site": GENERATED_BP_SITE,
+                "consent_version": GENERATED_CONSENT_VERSION,
+                "medication_taken": GENERATED_MEDICATION_TAKEN,
+            }
+
+            morning_stmt = (
+                pg_insert(Reading)
+                .values(**morning_dict)
+                .on_conflict_do_nothing(
+                    index_elements=["patient_id", "effective_datetime", "source"]
+                )
+            )
+            morning_result = await session.execute(morning_stmt)
+            total_inserted += morning_result.rowcount
+            pending_batch += 1
+
+            # ── Evening reading ───────────────────────────────────────────────
+            evening_raw = morning_sys - random.uniform(
+                FULL_TIMELINE_EVENING_DROP_LOW, FULL_TIMELINE_EVENING_DROP_HIGH
+            )
+            evening_sys = round(
+                evening_raw + random.uniform(ANTI_ROUND_LOW, ANTI_ROUND_HIGH), 1
+            )
+            if evening_sys % 1 == 0.0:
+                evening_sys = round(evening_sys + 0.1, 1)
+            evening_dia = round(
+                evening_sys * random.uniform(DIASTOLIC_RATIO_LOW, DIASTOLIC_RATIO_HIGH), 1
+            )
+
+            evening_jitter = random.randint(SESSION_JITTER_MINUTES_LOW, SESSION_JITTER_MINUTES_HIGH)
+            evening_dt = datetime(
+                current_day.year,
+                current_day.month,
+                current_day.day,
+                EVENING_HOUR_UTC,
+                0,
+                0,
+                tzinfo=UTC,
+            ) + timedelta(minutes=evening_jitter)
+
+            evening_dict: dict[str, Any] = {
+                "patient_id": patient_id,
+                "systolic_1": int(evening_sys),
+                "diastolic_1": int(evening_dia),
+                "systolic_avg": evening_sys,
+                "diastolic_avg": evening_dia,
+                "effective_datetime": evening_dt,
+                "session": GENERATED_SESSION_EVENING,
+                "source": GENERATED_SOURCE,
+                "submitted_by": FULL_TIMELINE_SUBMITTED_BY,
+                "bp_position": GENERATED_BP_POSITION,
+                "bp_site": GENERATED_BP_SITE,
+                "consent_version": GENERATED_CONSENT_VERSION,
+                "medication_taken": GENERATED_MEDICATION_TAKEN,
+            }
+
+            evening_stmt = (
+                pg_insert(Reading)
+                .values(**evening_dict)
+                .on_conflict_do_nothing(
+                    index_elements=["patient_id", "effective_datetime", "source"]
+                )
+            )
+            evening_result = await session.execute(evening_stmt)
+            total_inserted += evening_result.rowcount
+            pending_batch += 1
+
+            # Commit in batches to avoid holding an enormous transaction
+            if pending_batch >= FULL_TIMELINE_BATCH_SIZE:
+                await session.commit()
+                pending_batch = 0
+
+            current_day += timedelta(days=1)
+
+    # Commit any remaining pending rows
+    if pending_batch > 0:
+        await session.commit()
+
+    logger.info(
+        "Patient %s: full-timeline generation complete — %d readings inserted",
+        patient_id,
+        total_inserted,
+    )
+    return total_inserted

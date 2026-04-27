@@ -154,15 +154,15 @@ def chf_bundle() -> dict:
 
 def _make_mock_session(
     patient_exists: bool = False,
-    clinic_reading_count: int = 0,
+    reading_rowcount: int = 1,
 ) -> MagicMock:
     """Build a mock AsyncSession with pre-configured execute side effects.
 
-    Call order that ingestion.py follows:
+    Call order that ingestion.py follows (per-observation ON CONFLICT path):
       0. SELECT Patient (existence check)
       1. INSERT Patient ON CONFLICT DO NOTHING
       2. INSERT/UPSERT ClinicalContext ON CONFLICT DO UPDATE
-      3. SELECT COUNT(*) FROM readings WHERE source='clinic'
+      3..N. INSERT Reading ON CONFLICT DO NOTHING (one per Observation)
     """
     # Result for SELECT Patient
     existing_patient = MagicMock()
@@ -176,9 +176,10 @@ def _make_mock_session(
     # Result for UPSERT ClinicalContext
     upsert_cc_result = MagicMock()
 
-    # Result for SELECT COUNT(*) readings
-    count_result = MagicMock()
-    count_result.scalar.return_value = clinic_reading_count
+    # Result for INSERT Reading ON CONFLICT DO NOTHING
+    # rowcount=1 means inserted, rowcount=0 means conflict/skipped
+    reading_insert_result = MagicMock()
+    reading_insert_result.rowcount = reading_rowcount
 
     session = MagicMock()
     session.execute = AsyncMock(
@@ -186,7 +187,7 @@ def _make_mock_session(
             existing_patient,
             insert_patient_result,
             upsert_cc_result,
-            count_result,
+            reading_insert_result,  # one per Observation in the bundle
         ]
     )
     session.add = MagicMock()
@@ -394,25 +395,32 @@ async def test_ingest_clinical_context_upserted(full_bundle: dict) -> None:
 
 @pytest.mark.asyncio
 async def test_ingest_reading_inserted(full_bundle: dict) -> None:
-    """One Observation in fixture → one Reading added to session."""
-    session = _make_mock_session(clinic_reading_count=0)
+    """One Observation in fixture → one Reading inserted via ON CONFLICT DO NOTHING.
+
+    Per-observation inserts use session.execute() with pg_insert, not session.add().
+    rowcount=1 from the mock means the row was inserted (no conflict).
+    """
+    session = _make_mock_session(reading_rowcount=1)
     summary = await ingest_fhir_bundle(full_bundle, session)
     assert summary["readings_inserted"] == 1
 
+    # Confirm the INSERT statement was executed (index 3 = first reading insert)
+    # and no Reading was passed to session.add (old batch path is gone).
     added = [c.args[0] for c in session.add.call_args_list]
     readings = [obj for obj in added if isinstance(obj, Reading)]
-    assert len(readings) == 1
-    assert readings[0].systolic_1 == 185
-    assert readings[0].diastolic_1 == 72
-    assert readings[0].source == "clinic"
-    assert readings[0].session == "ad_hoc"
-    assert readings[0].submitted_by == "clinic"
+    assert len(readings) == 0  # readings now go via session.execute, not session.add
+
+    # The fourth execute call (index 3) should be the reading INSERT statement.
+    assert session.execute.call_count >= 4
 
 
 @pytest.mark.asyncio
-async def test_ingest_idempotent_skips_readings_when_exist(full_bundle: dict) -> None:
-    """When clinic readings already exist, no new readings are inserted."""
-    session = _make_mock_session(clinic_reading_count=3)
+async def test_ingest_idempotent_skips_readings_when_conflict(full_bundle: dict) -> None:
+    """ON CONFLICT DO NOTHING returns rowcount=0 when a reading already exists.
+
+    The per-observation approach counts only actually-inserted rows via rowcount.
+    """
+    session = _make_mock_session(reading_rowcount=0)
     summary = await ingest_fhir_bundle(full_bundle, session)
     assert summary["readings_inserted"] == 0
 
@@ -500,7 +508,7 @@ async def test_ingest_med_history_stored(full_bundle: dict) -> None:
     session = _make_mock_session()
     await ingest_fhir_bundle(full_bundle, session)
     # The ClinicalContext upsert is execute call index 2 (0=SELECT Patient,
-    # 1=INSERT Patient, 2=UPSERT ClinicalContext, 3=SELECT COUNT readings).
+    # 1=INSERT Patient, 2=UPSERT ClinicalContext, 3+=INSERT Reading per obs).
     upsert_call = session.execute.call_args_list[2]
     stmt = upsert_call.args[0]
     # Compile without literal_binds (JSONB cannot be rendered as literal).

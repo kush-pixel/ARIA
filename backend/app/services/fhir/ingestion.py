@@ -10,8 +10,9 @@ Idempotency strategy
 --------------------
 - patients:          INSERT … ON CONFLICT DO NOTHING on patient_id PK.
 - clinical_context:  INSERT … ON CONFLICT DO UPDATE — refreshes on re-run.
-- readings:          SELECT COUNT(*) first; skip all inserts if clinic readings
-                     already exist for this patient (batch-level idempotency).
+- readings:          Per-observation ON CONFLICT DO NOTHING on
+                     (patient_id, effective_datetime, source).  New readings
+                     are added on re-run without skipping the entire batch.
 - audit_events:      Always appended (one row per ingestion attempt).
 """
 
@@ -167,6 +168,11 @@ async def ingest_fhir_bundle(
     ``audit_events`` tables.  The operation is idempotent: re-running on
     the same bundle leaves the database unchanged (``patients_inserted=0``,
     ``readings_inserted=0`` on re-run).
+
+    Idempotency for readings uses per-observation ON CONFLICT DO NOTHING on
+    the unique index ``(patient_id, effective_datetime, source)``.  Each
+    Observation is inserted independently — new readings are added without
+    skipping the entire batch when any prior clinic reading already exists.
 
     Args:
         bundle: Parsed FHIR R4 Bundle dict, as produced by the iEMR adapter.
@@ -377,30 +383,21 @@ async def ingest_fhir_bundle(
         # ------------------------------------------------------------------ #
         # Step 3 — Readings (clinic Observations)                              #
         # ------------------------------------------------------------------ #
-        # Batch-level idempotency: if any clinic readings already exist for
-        # this patient, skip all inserts.  This avoids duplicates without
-        # requiring a unique constraint on the readings table.
-        count_result = await session.execute(
-            select(sa_func.count())
-            .select_from(Reading)
-            .where(
-                Reading.patient_id == patient_id,
-                Reading.source == "clinic",
-            )
-        )
-        clinic_count: int = count_result.scalar() or 0
-
+        # Per-observation idempotency: each Observation is inserted with
+        # ON CONFLICT DO NOTHING on (patient_id, effective_datetime, source).
+        # New readings are added on re-run without skipping the entire batch.
         readings_inserted = 0
-        if clinic_count == 0:
-            for eff_dt, obs in obs_with_dt:
-                sys_val, dia_val = _extract_obs_components(obs)
-                if sys_val is None or dia_val is None:
-                    logger.warning(
-                        "Skipping Observation at %s — missing systolic or diastolic component",
-                        eff_dt.isoformat(),
-                    )
-                    continue
-                reading = Reading(
+        for eff_dt, obs in obs_with_dt:
+            sys_val, dia_val = _extract_obs_components(obs)
+            if sys_val is None or dia_val is None:
+                logger.warning(
+                    "Skipping Observation at %s — missing systolic or diastolic component",
+                    eff_dt.isoformat(),
+                )
+                continue
+            stmt = (
+                pg_insert(Reading)
+                .values(
                     patient_id=patient_id,
                     systolic_1=sys_val,
                     diastolic_1=dia_val,
@@ -412,14 +409,12 @@ async def ingest_fhir_bundle(
                     submitted_by="clinic",
                     consent_version="1.0",
                 )
-                session.add(reading)
-                readings_inserted += 1
-        else:
-            logger.info(
-                "Skipping readings insert for patient %s — %d clinic readings already exist",
-                patient_id,
-                clinic_count,
+                .on_conflict_do_nothing(
+                    index_elements=["patient_id", "effective_datetime", "source"]
+                )
             )
+            result = await session.execute(stmt)
+            readings_inserted += result.rowcount
 
         summary["readings_inserted"] = readings_inserted
 
