@@ -131,6 +131,33 @@ INDEXES: list[tuple[str, str]] = [
         "CREATE INDEX IF NOT EXISTS idx_alert_feedback_alert "
         "ON alert_feedback (alert_id)",
     ),
+    # Fix 45 — escalation + off-hours columns on alerts
+    (
+        "alerts_off_hours_col",
+        "ALTER TABLE alerts ADD COLUMN IF NOT EXISTS off_hours BOOLEAN DEFAULT FALSE",
+    ),
+    (
+        "alerts_escalated_col",
+        "ALTER TABLE alerts ADD COLUMN IF NOT EXISTS escalated BOOLEAN DEFAULT FALSE",
+    ),
+    # Fix 42 L2 — calibration_rules index
+    (
+        "idx_calibration_rules_patient_detector",
+        "CREATE INDEX IF NOT EXISTS idx_calibration_rules_patient_detector "
+        "ON calibration_rules (patient_id, detector_type, active)",
+    ),
+    # Fix 42 L3 — outcome_verifications indexes
+    (
+        "idx_outcome_verifications_pending",
+        "CREATE INDEX IF NOT EXISTS idx_outcome_verifications_pending "
+        "ON outcome_verifications (outcome_type, check_after) "
+        "WHERE outcome_type = 'pending'",
+    ),
+    (
+        "idx_outcome_verifications_patient",
+        "CREATE INDEX IF NOT EXISTS idx_outcome_verifications_patient "
+        "ON outcome_verifications (patient_id, prompted_at DESC)",
+    ),
 ]
 
 

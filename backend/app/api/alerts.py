@@ -109,15 +109,28 @@ async def acknowledge_alert(
 
     feedback_recorded = False
     if payload is not None and payload.disposition is not None:
-        session.add(AlertFeedback(
+        feedback = AlertFeedback(
             alert_id=alert_id,
             patient_id=alert.patient_id,
             detector_type=_DETECTOR_TYPE_MAP.get(alert.alert_type, alert.alert_type),
             disposition=payload.disposition,
             reason_text=payload.reason_text,
             clinician_id=payload.clinician_id,
-        ))
+        )
+        session.add(feedback)
+        await session.flush()  # materialise feedback_id before outcome scheduling
         feedback_recorded = True
+
+        # Fix 42 L3: schedule 30-day outcome check when clinician disagrees
+        if payload.disposition == "disagree":
+            from app.services.feedback.outcome_tracker import schedule_outcome_check
+            await schedule_outcome_check(
+                session,
+                feedback_id=feedback.feedback_id,
+                alert_id=alert_id,
+                patient_id=alert.patient_id,
+                dismissed_at=now,
+            )
 
     await session.commit()
 
@@ -138,4 +151,6 @@ def _serialise(a: Alert) -> dict:
         "triggered_at": a.triggered_at.isoformat() if a.triggered_at else None,
         "delivered_at": a.delivered_at.isoformat() if a.delivered_at else None,
         "acknowledged_at": a.acknowledged_at.isoformat() if a.acknowledged_at else None,
+        "off_hours": a.off_hours,
+        "escalated": a.escalated,
     }

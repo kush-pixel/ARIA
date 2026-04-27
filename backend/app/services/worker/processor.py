@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import func, select, update
@@ -45,8 +45,28 @@ logger = get_logger(__name__)
 _POLL_INTERVAL_SECONDS: int = 30
 _BATCH_SIZE: int = 10
 
+# Off-hours window: 6 PM (18) to 8 AM (8) local UTC, or weekends
+_OFF_HOURS_START: int = 18
+_OFF_HOURS_END: int = 8
+# Alert types eligible for escalation after 24h unacknowledged
+_ESCALATION_ALERT_TYPES: tuple[str, ...] = ("gap_urgent", "deterioration")
+
 # Type alias for async job handler functions
 _JobHandler = Callable[[ProcessingJob, AsyncSession], Awaitable[None]]
+
+
+# ---------------------------------------------------------------------------
+# Off-hours helper
+# ---------------------------------------------------------------------------
+
+
+def _is_off_hours(dt: datetime) -> bool:
+    """Return True if dt falls between 6 PM–8 AM UTC or on a weekend."""
+    hour = dt.hour
+    weekday = dt.weekday()  # 5=Saturday, 6=Sunday
+    if weekday >= 5:
+        return True
+    return hour >= _OFF_HOURS_START or hour < _OFF_HOURS_END
 
 
 # ---------------------------------------------------------------------------
@@ -82,12 +102,14 @@ async def _upsert_alert(
         .limit(1)
     )
     if existing.scalar_one_or_none() is None:
+        now = datetime.now(UTC)
         session.add(
             Alert(
                 patient_id=patient_id,
                 alert_type=alert_type,
                 gap_days=gap_days,
-                triggered_at=datetime.now(UTC),
+                triggered_at=now,
+                off_hours=_is_off_hours(now),
             )
         )
 
@@ -276,6 +298,38 @@ async def _handle_briefing_generation(job: ProcessingJob, session: AsyncSession)
         )
 
 
+# ---------------------------------------------------------------------------
+# Periodic sweeps (run every poll cycle regardless of job queue state)
+# ---------------------------------------------------------------------------
+
+
+async def _run_escalation_sweep(session: AsyncSession) -> int:
+    """Escalate gap_urgent/deterioration alerts unacknowledged for > 24 hours.
+
+    Sets escalated=True on qualifying alerts. Runs once per poll cycle so the
+    24-hour window is checked with ~30-second precision.
+
+    Returns:
+        Number of alerts newly escalated.
+    """
+    cutoff = datetime.now(UTC) - timedelta(hours=24)
+    result = await session.execute(
+        update(Alert)
+        .where(
+            Alert.alert_type.in_(_ESCALATION_ALERT_TYPES),
+            Alert.acknowledged_at.is_(None),
+            Alert.escalated.is_(False),
+            Alert.triggered_at <= cutoff,
+        )
+        .values(escalated=True)
+    )
+    count = result.rowcount
+    if count:
+        await session.commit()
+        logger.info("escalation_sweep: %d alert(s) escalated", count)
+    return count
+
+
 # Registry of all supported job_type values → handler functions.
 # Add new handlers here when new job types are introduced.
 _HANDLERS: dict[str, _JobHandler] = {
@@ -342,6 +396,7 @@ class WorkerProcessor:
         while self._running:
             try:
                 processed = await self._process_batch()
+                await self._run_periodic_sweeps()
                 if processed == 0:
                     # Queue was empty — sleep before next poll
                     await asyncio.sleep(self._poll_interval)
@@ -366,6 +421,24 @@ class WorkerProcessor:
         """
         self._running = False
         logger.info("WorkerProcessor stop requested")
+
+    async def _run_periodic_sweeps(self) -> None:
+        """Run escalation sweep and outcome checks once per poll cycle."""
+        from app.services.feedback.outcome_tracker import run_outcome_checks
+
+        try:
+            async with self._session_factory() as session:
+                await _run_escalation_sweep(session)
+        except Exception as exc:
+            logger.warning("escalation_sweep error: %s", exc)
+
+        try:
+            async with self._session_factory() as session:
+                resolved = await run_outcome_checks(session)
+                if resolved:
+                    await session.commit()
+        except Exception as exc:
+            logger.warning("outcome_checks error: %s", exc)
 
     async def _process_batch(self) -> int:
         """Fetch up to _BATCH_SIZE queued jobs and dispatch each one.
