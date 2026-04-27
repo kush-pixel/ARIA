@@ -200,14 +200,13 @@ aria-platform/
         __init__.py
         base.py         <- SQLAlchemy Base, async engine, session factory
         session.py      <- get_session FastAPI dependency
-      models/           <- SQLAlchemy ORM models (9 tables)
+      models/           <- SQLAlchemy ORM models (8 tables)
         __init__.py
         patient.py
         clinical_context.py
         reading.py
         medication_confirmation.py
         alert.py
-        alert_feedback.py <- AlertFeedback (Fix 42 L1 — clinician disposition on acknowledge)
         briefing.py
         processing_job.py
         audit_event.py
@@ -308,7 +307,7 @@ aria-platform/
 
 ---
 
-## DATABASE — 9 TABLES (PostgreSQL via Supabase)
+## DATABASE — 8 TABLES (PostgreSQL via Supabase)
 
 ### patients
 patient_id          TEXT PRIMARY KEY        FHIR Patient.id / iEMR MED_REC_NO
@@ -401,16 +400,6 @@ triggered_at        TIMESTAMPTZ DEFAULT NOW()
 delivered_at        TIMESTAMPTZ
 acknowledged_at     TIMESTAMPTZ
 
-### alert_feedback (Fix 42 L1 — clinician disposition on acknowledge)
-feedback_id         UUID PK DEFAULT gen_random_uuid()
-alert_id            UUID REFERENCES alerts (alert_id)
-patient_id          TEXT NOT NULL
-detector_type       TEXT NOT NULL           gap | inertia | deterioration | adherence
-disposition         TEXT NOT NULL           agree_acting | agree_monitoring | disagree
-reason_text         TEXT
-clinician_id        TEXT
-created_at          TIMESTAMPTZ DEFAULT NOW()
-
 ### briefings
 briefing_id         UUID PK DEFAULT gen_random_uuid()
 patient_id          TEXT REFERENCES patients
@@ -493,12 +482,6 @@ CREATE UNIQUE INDEX idx_readings_patient_datetime_source
 
 CREATE UNIQUE INDEX idx_confirmations_patient_med_scheduled
   ON medication_confirmations (patient_id, medication_name, scheduled_time);
-
-CREATE INDEX idx_alert_feedback_patient_detector
-  ON alert_feedback (patient_id, detector_type, created_at DESC);
-
-CREATE INDEX idx_alert_feedback_alert
-  ON alert_feedback (alert_id);
 
 -- Migrations (added after initial schema) — run via setup_db.py ADD COLUMN IF NOT EXISTS, safe to re-run:
 ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS med_history JSONB;
