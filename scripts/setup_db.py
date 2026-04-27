@@ -103,6 +103,7 @@ INDEXES: list[tuple[str, str]] = [
         "CREATE INDEX IF NOT EXISTS idx_patients_risk_score "
         "ON patients (risk_tier, risk_score DESC)",
     ),
+    # Phase 1 — clinical_context column migrations (Fix 6, 7, 8, 9)
     (
         "clinical_context_med_history_col",
         "ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS med_history JSONB",
@@ -135,10 +136,12 @@ INDEXES: list[tuple[str, str]] = [
         "clinical_context_recent_labs_col",
         "ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS recent_labs JSONB",
     ),
+    # Phase 0 — patients column migration (Fix 61)
     (
         "patients_risk_score_computed_at_col",
         "ALTER TABLE patients ADD COLUMN IF NOT EXISTS risk_score_computed_at TIMESTAMPTZ",
     ),
+    # Generator prerequisite unique indexes
     (
         "idx_readings_patient_datetime_source",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_readings_patient_datetime_source "
@@ -148,6 +151,50 @@ INDEXES: list[tuple[str, str]] = [
         "idx_confirmations_patient_med_scheduled",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_confirmations_patient_med_scheduled "
         "ON medication_confirmations (patient_id, medication_name, scheduled_time)",
+    ),
+    # Fix 42 — alert_feedback indexes
+    (
+        "idx_alert_feedback_patient_detector",
+        "CREATE INDEX IF NOT EXISTS idx_alert_feedback_patient_detector "
+        "ON alert_feedback (patient_id, detector_type, created_at DESC)",
+    ),
+    (
+        "idx_alert_feedback_alert",
+        "CREATE INDEX IF NOT EXISTS idx_alert_feedback_alert "
+        "ON alert_feedback (alert_id)",
+    ),
+    # Fix 45 — escalation + off-hours columns on alerts
+    (
+        "alerts_off_hours_col",
+        "ALTER TABLE alerts ADD COLUMN IF NOT EXISTS off_hours BOOLEAN DEFAULT FALSE",
+    ),
+    (
+        "alerts_escalated_col",
+        "ALTER TABLE alerts ADD COLUMN IF NOT EXISTS escalated BOOLEAN DEFAULT FALSE",
+    ),
+    # Fix 42 L2 — calibration_rules index
+    (
+        "idx_calibration_rules_patient_detector",
+        "CREATE INDEX IF NOT EXISTS idx_calibration_rules_patient_detector "
+        "ON calibration_rules (patient_id, detector_type, active)",
+    ),
+    # Fix 42 L3 — outcome_verifications indexes
+    (
+        "idx_outcome_verifications_pending",
+        "CREATE INDEX IF NOT EXISTS idx_outcome_verifications_pending "
+        "ON outcome_verifications (outcome_type, check_after) "
+        "WHERE outcome_type = 'pending'",
+    ),
+    (
+        "idx_outcome_verifications_patient",
+        "CREATE INDEX IF NOT EXISTS idx_outcome_verifications_patient "
+        "ON outcome_verifications (patient_id, prompted_at DESC)",
+    ),
+    # Fix 41 — gap_explanations indexes
+    (
+        "idx_gap_explanations_patient",
+        "CREATE INDEX IF NOT EXISTS idx_gap_explanations_patient "
+        "ON gap_explanations (patient_id, gap_start DESC)",
     ),
 ]
 
