@@ -11,12 +11,12 @@ POST /api/gap-explanations               — record a new gap explanation
 from __future__ import annotations
 
 from datetime import date
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Literal
 
 from app.db.session import get_session
 from app.models.gap_explanation import GapExplanation
@@ -38,7 +38,7 @@ class GapExplanationRequest(BaseModel):
     reporter_id: str | None = None
 
     @model_validator(mode="after")
-    def gap_end_after_start(self) -> "GapExplanationRequest":
+    def gap_end_after_start(self) -> GapExplanationRequest:
         if self.gap_end < self.gap_start:
             raise ValueError("gap_end must be on or after gap_start")
         return self
