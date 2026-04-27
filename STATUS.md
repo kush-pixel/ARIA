@@ -1,5 +1,5 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-26 by Kush (pattern engine hardcode audit — comorbidity adjustment extended to severe-single comorbidity, TITRATION_WINDOWS drug-class-aware Pattern B gate, adherence analyzer uses patient-adaptive threshold; test suite expanded 58→64)
+Last updated: 2026-04-26 by Krishna (Phase 3 audit items 15/19/22 — per-observation idempotency in ingestion.py, parametric median baseline in reading_generator.py, full-timeline readings generator added)
 
 ---
 
@@ -80,6 +80,10 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - frontend/src/app/shadow-mode/page.tsx — shadow mode results page; shows visit-by-visit ARIA vs physician comparison, between-visit alert timeline, detector breakdowns, agreement metrics
 - frontend/src/lib/types.ts — Patient interface now includes risk_score_computed_at: string | null (Fix 61)
 - frontend/src/components/dashboard/PatientList.tsx — staleness badge: amber AlertTriangle icon + "Score stale" label shown beneath RiskScoreBar when risk_score_computed_at > 26 hours ago; isScoreStale() helper added (Fix 61)
+
+- Item 22 COMPLETE: per-observation idempotency — ingestion.py uses ON CONFLICT DO NOTHING per reading; batch COUNT guard removed; setup_db.py adds idx_readings_patient_datetime_source UNIQUE index and idx_confirmations_patient_med_scheduled UNIQUE index (both IF NOT EXISTS); test_ingestion.py updated to match new execute call order
+- Item 19 COMPLETE: parametric baseline using median(historic_bp_systolic); _get_patient_baseline() async helper added to reading_generator.py; falls back to PATIENT_A_MORNING_MEAN=163.0 when <2 clinic readings; 3 new tests in TestGetPatientBaseline
+- Item 15 COMPLETE: generate_full_timeline_readings() added to reading_generator.py; interpolates between clinic visits; ON CONFLICT DO NOTHING per reading; run_generator.py --mode full-timeline; 4 new unit tests in TestFullTimelineReadings
 
 ### IN PROGRESS
 - None
