@@ -24,12 +24,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.models.alert import Alert
 from app.models.processing_job import ProcessingJob
 from app.services.worker.processor import (
     WorkerProcessor,
     _handle_briefing_generation,
     _handle_bundle_import,
     _handle_pattern_recompute,
+    _upsert_alert,
 )
 from app.services.worker.scheduler import _briefing_idempotency_key, enqueue_briefing_jobs
 
@@ -325,6 +327,38 @@ async def test_handle_pattern_recompute_calls_all_detectors_and_scorer() -> None
     scorer_mock.assert_awaited_once_with("1091", session)
 
 
+async def test_handle_pattern_recompute_writes_adherence_alert_for_pattern_a() -> None:
+    """_handle_pattern_recompute calls _upsert_alert with 'adherence' when pattern == 'A' (Fix 11)."""
+    job = _make_job(job_type="pattern_recompute")
+    session = AsyncMock()
+    session.add = MagicMock()
+
+    gap_result = {"gap_days": 0.5, "status": "ok", "threshold_used": {"flag": 1, "urgent": 3}}
+    inertia_result = {"inertia_detected": False}
+    adherence_result = {"pattern": "A", "adherence_pct": 60.0, "interpretation": "possible adherence concern"}
+    deterioration_result = {"deterioration": False, "slope": 0.1, "recent_avg": 148.0, "baseline_avg": 145.0}
+
+    # scalar_one_or_none returns None → no existing alert → upsert proceeds to session.add
+    no_existing = MagicMock()
+    no_existing.scalar_one_or_none.return_value = None
+    session.execute.return_value = no_existing
+
+    added_alerts: list = []
+    session.add = MagicMock(side_effect=added_alerts.append)
+
+    with (
+        patch("app.services.pattern_engine.gap_detector.run_gap_detector", AsyncMock(return_value=gap_result)),
+        patch("app.services.pattern_engine.inertia_detector.run_inertia_detector", AsyncMock(return_value=inertia_result)),
+        patch("app.services.pattern_engine.adherence_analyzer.run_adherence_analyzer", AsyncMock(return_value=adherence_result)),
+        patch("app.services.pattern_engine.deterioration_detector.run_deterioration_detector", AsyncMock(return_value=deterioration_result)),
+        patch("app.services.pattern_engine.risk_scorer.compute_risk_score", AsyncMock(return_value=55.0)),
+    ):
+        await _handle_pattern_recompute(job, session)
+
+    alert_types = [a.alert_type for a in added_alerts]
+    assert "adherence" in alert_types
+
+
 async def test_handle_pattern_recompute_raises_without_patient_id() -> None:
     """_handle_pattern_recompute raises ValueError when patient_id is absent."""
     job = _make_job(job_type="pattern_recompute", patient_id=None)  # type: ignore[arg-type]
@@ -338,7 +372,16 @@ async def test_handle_briefing_generation_calls_composer_and_summarizer() -> Non
     """_handle_briefing_generation calls compose_briefing then generate_llm_summary."""
     job = _make_job(job_type="briefing_generation")
     job.idempotency_key = "briefing_generation:1091:2026-04-18"
+
+    # Fix 20: appointment date comes from patients.next_appointment
+    mock_patient = MagicMock()
+    mock_patient.next_appointment = datetime(2026, 4, 18, 7, 30, tzinfo=UTC)
+
     session = AsyncMock()
+    exec_result = MagicMock()
+    exec_result.scalar_one_or_none.return_value = mock_patient
+    session.execute.return_value = exec_result
+
     mock_briefing = MagicMock()
 
     with (
@@ -355,7 +398,15 @@ async def test_handle_briefing_generation_layer3_failure_does_not_fail_job() -> 
     """Layer 3 LLM failure is caught and logged — job still succeeds."""
     job = _make_job(job_type="briefing_generation")
     job.idempotency_key = "briefing_generation:1091:2026-04-18"
+
+    mock_patient = MagicMock()
+    mock_patient.next_appointment = datetime(2026, 4, 18, 7, 30, tzinfo=UTC)
+
     session = AsyncMock()
+    exec_result = MagicMock()
+    exec_result.scalar_one_or_none.return_value = mock_patient
+    session.execute.return_value = exec_result
+
     mock_briefing = MagicMock()
 
     with (
@@ -375,14 +426,51 @@ async def test_handle_briefing_generation_raises_without_patient_id() -> None:
         await _handle_briefing_generation(job, session)
 
 
-async def test_handle_briefing_generation_raises_on_bad_date_in_key() -> None:
-    """_handle_briefing_generation raises ValueError when idempotency_key date is invalid."""
+async def test_handle_briefing_generation_falls_back_to_today_when_no_appointment() -> None:
+    """_handle_briefing_generation uses date.today() when next_appointment is None (Fix 20)."""
     job = _make_job(job_type="briefing_generation")
-    job.idempotency_key = "briefing_generation:1091:not-a-date"
-    session = AsyncMock()
+    job.idempotency_key = "briefing_generation:1091:2026-04-27"
 
-    with pytest.raises(ValueError, match="Cannot parse appointment date"):
+    mock_patient = MagicMock()
+    mock_patient.next_appointment = None
+
+    session = AsyncMock()
+    exec_result = MagicMock()
+    exec_result.scalar_one_or_none.return_value = mock_patient
+    session.execute.return_value = exec_result
+
+    mock_briefing = MagicMock()
+    today = date.today()
+
+    with (
+        patch("app.services.briefing.composer.compose_briefing", AsyncMock(return_value=mock_briefing)) as composer_mock,
+        patch("app.services.briefing.summarizer.generate_llm_summary", AsyncMock(return_value=mock_briefing)),
+    ):
         await _handle_briefing_generation(job, session)
+
+    composer_mock.assert_awaited_once_with(session, "1091", today)
+
+
+async def test_handle_briefing_generation_falls_back_to_today_when_patient_not_found() -> None:
+    """_handle_briefing_generation uses date.today() when patient row is absent (Fix 20)."""
+    job = _make_job(job_type="briefing_generation")
+    job.idempotency_key = "briefing_generation:1091:2026-04-27"
+
+    session = AsyncMock()
+    exec_result = MagicMock()
+    exec_result.scalar_one_or_none.return_value = None
+    session.execute.return_value = exec_result
+
+    mock_briefing = MagicMock()
+    today = date.today()
+
+    with (
+        patch("app.services.briefing.composer.compose_briefing", AsyncMock(return_value=mock_briefing)) as composer_mock,
+        patch("app.services.briefing.summarizer.generate_llm_summary", AsyncMock(return_value=mock_briefing)),
+    ):
+        await _handle_briefing_generation(job, session)
+
+    composer_mock.assert_awaited_once_with(session, "1091", today)
 
 
 async def test_handle_bundle_import_raises_when_payload_ref_missing() -> None:
@@ -401,6 +489,47 @@ async def test_handle_bundle_import_raises_when_file_not_found(tmp_path: pytest.
 
     with pytest.raises(FileNotFoundError):
         await _handle_bundle_import(job, session)
+
+
+# ---------------------------------------------------------------------------
+# processor.py — _upsert_alert (Fix 30: delivered_at set on insert)
+# ---------------------------------------------------------------------------
+
+
+async def test_upsert_alert_sets_delivered_at_on_insert() -> None:
+    """_upsert_alert sets delivered_at to now() on the newly created Alert (Fix 30)."""
+    session = AsyncMock()
+    # No existing alert found — scalar_one_or_none returns None
+    no_existing = MagicMock()
+    no_existing.scalar_one_or_none.return_value = None
+    session.execute.return_value = no_existing
+
+    # session.add() is synchronous in SQLAlchemy — use MagicMock so side_effect fires
+    added_alerts: list[Alert] = []
+    session.add = MagicMock(side_effect=added_alerts.append)
+
+    await _upsert_alert(session, "1091", "inertia")
+
+    assert len(added_alerts) == 1
+    alert = added_alerts[0]
+    assert alert.delivered_at is not None
+    assert alert.triggered_at is not None
+    # delivered_at and triggered_at should be essentially the same instant
+    delta = abs((alert.delivered_at - alert.triggered_at).total_seconds())
+    assert delta < 1.0
+
+
+async def test_upsert_alert_skips_insert_when_alert_already_exists() -> None:
+    """_upsert_alert does not add a second Alert row when one already exists today."""
+    session = AsyncMock()
+    existing_alert = MagicMock(spec=Alert)
+    existing = MagicMock()
+    existing.scalar_one_or_none.return_value = existing_alert
+    session.execute.return_value = existing
+
+    await _upsert_alert(session, "1091", "inertia")
+
+    session.add.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
