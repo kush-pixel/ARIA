@@ -12,7 +12,8 @@ Pattern matrix:
 Pattern B suppression (treatment is working — do NOT fire Pattern B if ALL true):
   slope < -0.3 mmHg/day  AND
   7-day recent avg < elevated BP threshold  AND
-  days_since_med_change <= 14
+  days_since_med_change <= titration_window  (drug-class-aware via TITRATION_WINDOWS:
+    diuretics/beta-blockers → 14d, ACE/ARBs → 28d, amlodipine → 56d, default → 42d)
   → suppressed to "none" with interpretation "treatment appears effective — monitoring"
   Suppression MUST NOT apply when no recent medication change is recorded.
 
@@ -33,8 +34,12 @@ from app.models.clinical_context import ClinicalContext
 from app.models.medication_confirmation import MedicationConfirmation
 from app.models.reading import Reading
 from app.services.pattern_engine.threshold_utils import (
+    apply_comorbidity_adjustment,
+    classify_comorbidity_concern,
+    compute_patient_threshold,
     compute_slope,
     get_last_med_change_date,
+    get_titration_window,
 )
 from app.utils.logging_utils import get_logger
 
@@ -46,10 +51,10 @@ logger = get_logger(__name__)
 
 _WINDOW_DAYS = 28
 _LOW_ADHERENCE_THRESHOLD = 80.0       # adherence_pct below this = low adherence
-_HIGH_BP_SYSTOLIC_THRESHOLD = 140     # avg systolic >= this = elevated
 _SUPPRESSION_SLOPE_THRESHOLD = -0.3   # mmHg/day — must be more negative to suppress
 _SUPPRESSION_RECENT_DAYS = 7
-_SUPPRESSION_MED_CHANGE_DAYS = 14     # med change must be within this many days
+# Titration window is drug-class-aware — derived at runtime via get_titration_window()
+# BP threshold is patient-adaptive — derived at runtime via compute_patient_threshold()
 
 _SUPPRESSED_B_INTERPRETATION = "treatment appears effective — monitoring"
 
@@ -107,7 +112,25 @@ async def run_adherence_analyzer(session: AsyncSession, patient_id: str) -> Adhe
     now = datetime.now(tz=UTC)
     window_start = now - timedelta(days=_WINDOW_DAYS)
 
-    # --- Query 1: medication confirmation counts ---
+    # --- Query 1: clinical context for patient-adaptive threshold + med history ---
+    cc_result = await session.execute(
+        select(ClinicalContext).where(ClinicalContext.patient_id == patient_id)
+    )
+    cc: ClinicalContext | None = cc_result.scalar_one_or_none()
+    historic_bp = cc.historic_bp_systolic if cc else None
+    problem_codes = cc.problem_codes if cc else None
+    med_history = cc.med_history if cc else None
+    last_med_change_field = cc.last_med_change if cc else None
+
+    patient_threshold, threshold_mode = compute_patient_threshold(historic_bp)
+    concern_state = classify_comorbidity_concern(problem_codes)
+    patient_threshold, adj_mode = apply_comorbidity_adjustment(patient_threshold, concern_state)
+    logger.debug(
+        "patient=%s adherence threshold=%.1f mode=%s adj=%s",
+        patient_id, patient_threshold, threshold_mode, adj_mode,
+    )
+
+    # --- Query 2: medication confirmation counts ---
     conf_row = await session.execute(
         select(
             func.count(MedicationConfirmation.confirmation_id),
@@ -147,7 +170,7 @@ async def run_adherence_analyzer(session: AsyncSession, patient_id: str) -> Adhe
     avg_systolic: float | None = (
         float(avg_systolic_raw) if avg_systolic_raw is not None else None
     )
-    high_bp = avg_systolic is not None and avg_systolic >= _HIGH_BP_SYSTOLIC_THRESHOLD
+    high_bp = avg_systolic is not None and avg_systolic >= patient_threshold
 
     if high_bp and low_adherence:
         pattern: Literal["A", "B", "C", "none"] = "A"
@@ -161,7 +184,8 @@ async def run_adherence_analyzer(session: AsyncSession, patient_id: str) -> Adhe
     # --- Pattern B suppression check ---
     if pattern == "B":
         pattern, interpretation = await _check_pattern_b_suppression(
-            session, patient_id, now, window_start
+            session, patient_id, now, window_start,
+            patient_threshold, med_history, last_med_change_field,
         )
     else:
         interpretation = _INTERPRETATIONS[pattern]
@@ -185,13 +209,16 @@ async def _check_pattern_b_suppression(
     patient_id: str,
     now: datetime,
     window_start: datetime,
+    patient_threshold: float,
+    med_history: list[dict] | None,
+    last_med_change_field: object,
 ) -> tuple[Literal["A", "B", "C", "none"], str]:
     """Return (pattern, interpretation) after applying Pattern B suppression logic.
 
     Suppression requires ALL of:
       1. Slope < -0.3 mmHg/day over the 28-day window
-      2. 7-day recent average < elevated BP threshold
-      3. days_since_med_change <= 14
+      2. 7-day recent average < patient_threshold (patient-adaptive)
+      3. days_since_med_change <= titration_window (drug-class-aware)
 
     If no recent medication change exists, suppression MUST NOT apply.
     """
@@ -225,27 +252,20 @@ async def _check_pattern_b_suppression(
         sum(recent_vals) / len(recent_vals) if recent_vals else float("inf")
     )
 
-    # --- Query 4: medication change date for suppression 14-day gate ---
-    cc_result = await session.execute(
-        select(ClinicalContext).where(ClinicalContext.patient_id == patient_id)
-    )
-    cc: ClinicalContext | None = cc_result.scalar_one_or_none()
-
-    med_history = cc.med_history if cc else None
-    last_med_change_field = cc.last_med_change if cc else None
-    last_med_date = get_last_med_change_date(med_history, last_med_change_field)
+    last_med_date = get_last_med_change_date(med_history, last_med_change_field)  # type: ignore[arg-type]
     days_since = _days_since(last_med_date, now)
+    titration_window = get_titration_window(med_history)
 
     should_suppress = (
         slope < _SUPPRESSION_SLOPE_THRESHOLD
-        and recent_7d_avg < _HIGH_BP_SYSTOLIC_THRESHOLD
-        and days_since <= _SUPPRESSION_MED_CHANGE_DAYS
+        and recent_7d_avg < patient_threshold
+        and days_since <= titration_window
     )
 
     logger.debug(
         "patient=%s pattern_b_suppression: slope=%.3f recent_7d=%.1f days_since_med=%.1f "
-        "suppress=%s",
-        patient_id, slope, recent_7d_avg, days_since, should_suppress,
+        "titration_window=%d suppress=%s",
+        patient_id, slope, recent_7d_avg, days_since, titration_window, should_suppress,
     )
 
     if should_suppress:

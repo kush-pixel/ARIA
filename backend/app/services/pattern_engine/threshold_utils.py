@@ -19,8 +19,24 @@ _THRESHOLD_CEILING = 145.0
 _COMORBIDITY_ADJUSTMENT = -7.0
 
 # ICD-10 prefix groups (lowercased, dots/hyphens stripped)
-_CARDIO_PREFIXES = ("i50", "i63", "g45")    # CHF, stroke, TIA
+_CARDIO_PREFIXES = ("i50", "i63", "g45")    # CHF, stroke, TIA  (all severe-weight)
 _METABOLIC_PREFIXES = ("e11", "n18")        # T2DM, CKD
+
+# Drug-class-aware titration window (days after a medication change before full response expected)
+# Source: AUDIT.md Fix 3/26; aligned with CLAUDE.md TITRATION_WINDOWS spec
+_TITRATION_WINDOWS: dict[str, int] = {
+    "diuretic":      14,
+    "beta_blocker":  14,
+    "ace_inhibitor": 28,
+    "arb":           28,
+    "amlodipine":    56,
+    "default":       42,
+}
+
+_DIURETIC_NAMES = frozenset({
+    "furosemide", "lasix", "hydrochlorothiazide", "hctz", "chlorthalidone",
+    "indapamide", "torsemide", "spironolactone", "eplerenone", "metolazone",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -139,8 +155,13 @@ def apply_comorbidity_adjustment(
     patient_threshold: float,
     concern_state: dict,
 ) -> tuple[float, str]:
-    """Lower the threshold by 7 mmHg (floor 130) when BOTH cardio AND metabolic
-    comorbidities are simultaneously in elevated concern state.
+    """Lower the threshold by 7 mmHg (floor 130) when EITHER:
+      (a) cardiovascular AND metabolic comorbidities both in elevated concern, OR
+      (b) any single severe-weight comorbidity (CHF/Stroke/TIA) in elevated concern.
+
+    Rule (b) covers CHF-only and stroke-only patients missed by the original
+    cardio+metabolic rule (AUDIT.md Fix 5).  Since _CARDIO_PREFIXES already maps
+    only to CHF/Stroke/TIA, cardio=True is sufficient to trigger the adjustment.
 
     Args:
         patient_threshold: Unadjusted threshold in mmHg.
@@ -150,13 +171,69 @@ def apply_comorbidity_adjustment(
         (adjusted_threshold, threshold_adjustment_mode).
     """
     cardio = concern_state.get("cardio", False)
-    metabolic = concern_state.get("metabolic", False)
     concern_mode = concern_state.get("mode", "unknown")
 
-    if cardio and metabolic:
+    if cardio:
         adjusted = max(_THRESHOLD_FLOOR, patient_threshold + _COMORBIDITY_ADJUSTMENT)
         return (round(adjusted, 1), f"comorbidity_adjusted_{concern_mode}")
     return (patient_threshold, concern_mode)
+
+
+# ---------------------------------------------------------------------------
+# Drug-class inference and titration window
+# ---------------------------------------------------------------------------
+
+
+def _infer_drug_class(drug_name: str) -> str:
+    """Infer drug class from medication name using suffix and exact-match patterns."""
+    name = drug_name.lower().strip()
+    if "amlodipine" in name:
+        return "amlodipine"
+    if name.endswith("olol"):
+        return "beta_blocker"
+    if name.endswith("pril"):
+        return "ace_inhibitor"
+    if name.endswith("sartan"):
+        return "arb"
+    if any(d in name for d in _DIURETIC_NAMES):
+        return "diuretic"
+    return "default"
+
+
+def get_titration_window(
+    med_history: list[dict] | None,
+    last_med_change_fallback: date | None = None,
+) -> int:
+    """Return drug-class-aware titration window (days) for the most recently changed drug.
+
+    Derives the window from the most recent med_history entry's drug class using
+    _TITRATION_WINDOWS.  Falls back to default (42 days) when history is absent
+    or the drug class cannot be inferred.
+
+    Args:
+        med_history: JSONB medication history from clinical_context.
+        last_med_change_fallback: Unused — kept for API symmetry with
+            get_last_med_change_date().
+
+    Returns:
+        Titration window in days.
+    """
+    if not med_history:
+        return _TITRATION_WINDOWS["default"]
+
+    best_date = ""
+    best_name = ""
+    for entry in med_history:
+        d = entry.get("date") or ""
+        if d > best_date:
+            best_date = d
+            best_name = entry.get("name") or ""
+
+    if not best_name:
+        return _TITRATION_WINDOWS["default"]
+
+    drug_class = _infer_drug_class(best_name)
+    return _TITRATION_WINDOWS.get(drug_class, _TITRATION_WINDOWS["default"])
 
 
 # ---------------------------------------------------------------------------

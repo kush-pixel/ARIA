@@ -344,8 +344,8 @@ def _no_recent_med_change_cc() -> MagicMock:
 
 
 async def test_adherence_pattern_a_high_bp_low_adherence() -> None:
-    """High BP + low adherence → Pattern A (no extra queries for non-B pattern)."""
-    session = _session(_one(20, 14), _scalar(155.0))   # 70% adherence, avg sys=155
+    """High BP + low adherence → Pattern A."""
+    session = _session(_cc_scalar(_cc()), _one(20, 14), _scalar(155.0))
     result = await run_adherence_analyzer(session, "1091")
     assert result["pattern"] == "A"
     assert result["interpretation"] == "possible adherence concern"
@@ -355,10 +355,11 @@ async def test_adherence_pattern_a_high_bp_low_adherence() -> None:
 async def test_adherence_pattern_b_high_bp_high_adherence() -> None:
     """High BP + high adherence → Pattern B (not suppressed: flat slope, no med change)."""
     session = _session(
-        _one(20, 20),                           # 100% adherence
+        _cc_scalar(_cc()),                       # no historic_bp → threshold=140
+        _one(20, 20),                            # 100% adherence
         _scalar(155.0),                          # avg systolic >= 140
         _flat_readings_for_b_suppression_check(),# flat slope → no suppression
-        _no_recent_med_change_cc(),              # no med change → suppression MUST NOT apply
+        _no_recent_med_change_cc(),              # unused — med data now from first cc query
     )
     result = await run_adherence_analyzer(session, "1091")
     assert result["pattern"] == "B"
@@ -366,16 +367,16 @@ async def test_adherence_pattern_b_high_bp_high_adherence() -> None:
 
 
 async def test_adherence_pattern_c_normal_bp_low_adherence() -> None:
-    """Normal BP + low adherence → Pattern C (no extra queries)."""
-    session = _session(_one(20, 14), _scalar(128.0))   # 70% adherence, normal BP
+    """Normal BP + low adherence → Pattern C."""
+    session = _session(_cc_scalar(_cc()), _one(20, 14), _scalar(128.0))
     result = await run_adherence_analyzer(session, "1091")
     assert result["pattern"] == "C"
     assert result["interpretation"] == "contextual review"
 
 
 async def test_adherence_pattern_none_normal_bp_high_adherence() -> None:
-    """Normal BP + high adherence → no concern (no extra queries)."""
-    session = _session(_one(20, 20), _scalar(128.0))
+    """Normal BP + high adherence → no concern."""
+    session = _session(_cc_scalar(_cc()), _one(20, 20), _scalar(128.0))
     result = await run_adherence_analyzer(session, "1091")
     assert result["pattern"] == "none"
     assert result["interpretation"] == "no adherence concern identified"
@@ -383,16 +384,16 @@ async def test_adherence_pattern_none_normal_bp_high_adherence() -> None:
 
 async def test_adherence_no_doses_returns_none_pct() -> None:
     """Zero scheduled doses → adherence_pct=None, pattern=none (no div-by-zero)."""
-    session = _session(_one(0, 0))
+    session = _session(_cc_scalar(_cc()), _one(0, 0))
     result = await run_adherence_analyzer(session, "1091")
     assert result["adherence_pct"] is None
     assert result["pattern"] == "none"
-    assert session.execute.call_count == 1
+    assert session.execute.call_count == 2   # cc + confirmations
 
 
 async def test_adherence_no_bp_readings_pattern_c_when_low_adherence() -> None:
     """No readings → avg_systolic=None → treated as normal BP → Pattern C if low adherence."""
-    session = _session(_one(20, 14), _scalar(None))    # 70% adherence, no BP
+    session = _session(_cc_scalar(_cc()), _one(20, 14), _scalar(None))
     result = await run_adherence_analyzer(session, "1091")
     assert result["pattern"] == "C"
 
@@ -400,6 +401,7 @@ async def test_adherence_no_bp_readings_pattern_c_when_low_adherence() -> None:
 async def test_adherence_boundary_exactly_80_pct_is_not_low() -> None:
     """Exactly 80% adherence is NOT classified as low adherence → Pattern B."""
     session = _session(
+        _cc_scalar(_cc()),
         _one(10, 8),                             # 80% adherence
         _scalar(155.0),                          # high BP → Pattern B candidate
         _flat_readings_for_b_suppression_check(),
@@ -418,8 +420,7 @@ async def test_adherence_language_never_says_non_adherent() -> None:
 
 
 async def test_adherence_pattern_b_suppressed_when_treatment_working() -> None:
-    """Pattern B suppressed when slope < -0.3, 7d avg < 140, med change within 14 days."""
-    # Declining readings: 158 → 135 over 28 days — slope ≈ -0.85 mmHg/day
+    """Pattern B suppressed when slope < -0.3, 7d avg < threshold, med change within window."""
     readings = [
         _reading_row(_days_ago(28), 158.0),
         _reading_row(_days_ago(21), 153.0),
@@ -428,13 +429,13 @@ async def test_adherence_pattern_b_suppressed_when_treatment_working() -> None:
         _reading_row(_days_ago(3),  137.0),
         _reading_row(_days_ago(1),  135.0),
     ]
-    recent_change = date.today() - timedelta(days=7)   # within 14-day gate
+    recent_change = date.today() - timedelta(days=7)
     cc_obj = _cc(med_history=None, last_med_change=recent_change)
     session = _session(
-        _one(20, 20),            # 100% adherence
-        _scalar(148.0),          # avg 28d ≥ 140 → would be Pattern B
-        _rows(*readings),        # declining slope → suppression candidate
-        _cc_scalar(cc_obj),      # med change 7 days ago → within gate
+        _cc_scalar(cc_obj),      # cc first: threshold=140 (no historic_bp), med change 7d ago
+        _one(20, 20),
+        _scalar(148.0),
+        _rows(*readings),
     )
     result = await run_adherence_analyzer(session, "1091")
     assert result["pattern"] == "none"
@@ -449,13 +450,12 @@ async def test_adherence_pattern_b_not_suppressed_when_no_med_change() -> None:
         _reading_row(_days_ago(7),  138.0),
         _reading_row(_days_ago(1),  135.0),
     ]
-    # No medication change recorded — suppression MUST NOT apply
     cc_obj = _cc(med_history=None, last_med_change=None)
     session = _session(
+        _cc_scalar(cc_obj),
         _one(20, 20),
         _scalar(148.0),
         _rows(*readings),
-        _cc_scalar(cc_obj),
     )
     result = await run_adherence_analyzer(session, "1091")
     assert result["pattern"] == "B"
@@ -463,27 +463,27 @@ async def test_adherence_pattern_b_not_suppressed_when_no_med_change() -> None:
 
 
 async def test_adherence_pattern_b_not_suppressed_when_med_change_too_old() -> None:
-    """Pattern B NOT suppressed when med change is older than 14 days."""
+    """Pattern B NOT suppressed when med change is older than the default 42-day window."""
     readings = [
         _reading_row(_days_ago(28), 158.0),
         _reading_row(_days_ago(14), 147.0),
         _reading_row(_days_ago(7),  138.0),
         _reading_row(_days_ago(1),  135.0),
     ]
-    old_change = date.today() - timedelta(days=30)  # 30 days ago → outside 14-day gate
+    old_change = date.today() - timedelta(days=50)
     cc_obj = _cc(med_history=None, last_med_change=old_change)
     session = _session(
+        _cc_scalar(cc_obj),
         _one(20, 20),
         _scalar(148.0),
         _rows(*readings),
-        _cc_scalar(cc_obj),
     )
     result = await run_adherence_analyzer(session, "1091")
     assert result["pattern"] == "B"
 
 
 async def test_adherence_pattern_b_med_history_used_for_suppression() -> None:
-    """med_history JSONB most recent date used for days_since calculation."""
+    """med_history JSONB most recent date used for days_since + drug-class window."""
     readings = [
         _reading_row(_days_ago(28), 158.0),
         _reading_row(_days_ago(21), 152.0),
@@ -498,10 +498,10 @@ async def test_adherence_pattern_b_med_history_used_for_suppression() -> None:
     ]
     cc_obj = _cc(med_history=med_history, last_med_change=None)
     session = _session(
+        _cc_scalar(cc_obj),      # cc first: amlodipine → 56d window, med change 5d ago
         _one(20, 20),
         _scalar(148.0),
         _rows(*readings),
-        _cc_scalar(cc_obj),
     )
     result = await run_adherence_analyzer(session, "1091")
     # slope ≈ -0.93 mmHg/day, 7d avg ≈ 135, med change 5d ago → suppressed
@@ -722,8 +722,8 @@ def test_threshold_adaptive_floored_at_130() -> None:
     assert mode == "adaptive"
 
 
-def test_comorbidity_no_adjustment_when_cardio_only() -> None:
-    """Cardio alone (no metabolic) → NO threshold adjustment (both required)."""
+def test_comorbidity_adjustment_when_severe_cardio_only() -> None:
+    """CHF alone (severe-weight cardio, no metabolic) → -7 mmHg adjustment (Fix 5)."""
     from app.services.pattern_engine.threshold_utils import (
         apply_comorbidity_adjustment,
         classify_comorbidity_concern,
@@ -731,7 +731,20 @@ def test_comorbidity_no_adjustment_when_cardio_only() -> None:
 
     state = classify_comorbidity_concern(["I50.1"])  # CHF only
     adjusted, mode = apply_comorbidity_adjustment(140.0, state)
-    assert adjusted == 140.0   # no adjustment, cardio alone not enough
+    assert adjusted == 133.0   # -7 mmHg: CHF alone is sufficient
+    assert "comorbidity_adjusted" in mode
+
+
+def test_comorbidity_no_adjustment_when_metabolic_only() -> None:
+    """Metabolic alone (no severe cardio) → NO threshold adjustment."""
+    from app.services.pattern_engine.threshold_utils import (
+        apply_comorbidity_adjustment,
+        classify_comorbidity_concern,
+    )
+
+    state = classify_comorbidity_concern(["E11.9"])  # T2DM only, no CHF/Stroke/TIA
+    adjusted, _mode = apply_comorbidity_adjustment(140.0, state)
+    assert adjusted == 140.0   # no adjustment — metabolic alone not sufficient
 
 
 def test_comorbidity_adjustment_when_cardio_and_metabolic() -> None:
@@ -784,3 +797,45 @@ def test_get_last_med_change_date_returns_none_when_both_empty() -> None:
     from app.services.pattern_engine.threshold_utils import get_last_med_change_date
 
     assert get_last_med_change_date(None, None) is None
+
+
+def test_titration_window_beta_blocker() -> None:
+    """Beta-blocker (-olol suffix) → 14-day window."""
+    from app.services.pattern_engine.threshold_utils import get_titration_window
+
+    history = [{"name": "Metoprolol", "date": "2026-04-10", "activity": "Refill"}]
+    assert get_titration_window(history) == 14
+
+
+def test_titration_window_ace_inhibitor() -> None:
+    """ACE inhibitor (-pril suffix) → 28-day window."""
+    from app.services.pattern_engine.threshold_utils import get_titration_window
+
+    history = [{"name": "Lisinopril", "date": "2026-04-10", "activity": "add"}]
+    assert get_titration_window(history) == 28
+
+
+def test_titration_window_amlodipine() -> None:
+    """Amlodipine → 56-day window (long-acting CCB)."""
+    from app.services.pattern_engine.threshold_utils import get_titration_window
+
+    history = [{"name": "Amlodipine 5mg", "date": "2026-04-10", "activity": "add"}]
+    assert get_titration_window(history) == 56
+
+
+def test_titration_window_default_when_no_history() -> None:
+    """No med_history → default 42-day window."""
+    from app.services.pattern_engine.threshold_utils import get_titration_window
+
+    assert get_titration_window(None) == 42
+
+
+def test_titration_window_uses_most_recent_drug() -> None:
+    """Uses most recent entry's drug class, not earliest."""
+    from app.services.pattern_engine.threshold_utils import get_titration_window
+
+    history = [
+        {"name": "Lisinopril", "date": "2025-01-01", "activity": "add"},   # ACE → 28d
+        {"name": "Amlodipine", "date": "2026-04-10", "activity": "add"},   # CCB → 56d
+    ]
+    assert get_titration_window(history) == 56
