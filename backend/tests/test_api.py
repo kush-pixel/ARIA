@@ -369,6 +369,105 @@ async def test_acknowledge_alert_already_acknowledged(client: AsyncClient):
 
 
 # ---------------------------------------------------------------------------
+# Phase 5 — alerts.py extensions (Fix 24, Fix 42 L1)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_list_alerts_filtered_by_patient_id(client: AsyncClient):
+    """Fix 24 — ?patient_id= adds Alert.patient_id filter."""
+    alert = _make_alert()
+    session = _mock_session()
+    session.execute.return_value = _scalars_result(alert)
+
+    app.dependency_overrides[get_session] = lambda: session
+    resp = await client.get("/api/alerts", params={"patient_id": "1091"})
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["patient_id"] == "1091"
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_alert_with_disposition_writes_feedback(client: AsyncClient):
+    """Fix 42 L1 — disposition payload writes AlertFeedback row + audit event."""
+    from app.models.alert_feedback import AlertFeedback
+
+    alert = _make_alert()
+    session = _mock_session()
+    session.execute.side_effect = [
+        _scalar_result(alert),  # fetch alert
+        MagicMock(),            # update acknowledged_at
+    ]
+    added: list = []
+    session.add = added.append
+
+    app.dependency_overrides[get_session] = lambda: session
+    resp = await client.post(
+        "/api/alerts/a001/acknowledge",
+        json={
+            "disposition": "agree_acting",
+            "reason_text": "Adjusting medication today",
+            "clinician_id": "dr_smith",
+        },
+    )
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "acknowledged"
+    assert data["feedback_recorded"] is True
+
+    feedback_rows = [a for a in added if isinstance(a, AlertFeedback)]
+    assert len(feedback_rows) == 1
+    fb = feedback_rows[0]
+    assert fb.alert_id == "a001"
+    assert fb.patient_id == "1091"
+    assert fb.detector_type == "inertia"
+    assert fb.disposition == "agree_acting"
+    assert fb.reason_text == "Adjusting medication today"
+    assert fb.clinician_id == "dr_smith"
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_alert_without_disposition_no_feedback(client: AsyncClient):
+    """No payload → backwards-compatible behaviour, no AlertFeedback row written."""
+    from app.models.alert_feedback import AlertFeedback
+
+    alert = _make_alert()
+    session = _mock_session()
+    session.execute.side_effect = [
+        _scalar_result(alert),
+        MagicMock(),
+    ]
+    added: list = []
+    session.add = added.append
+
+    app.dependency_overrides[get_session] = lambda: session
+    resp = await client.post("/api/alerts/a001/acknowledge")
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert resp.json()["feedback_recorded"] is False
+    assert not any(isinstance(a, AlertFeedback) for a in added)
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_alert_invalid_disposition_rejected(client: AsyncClient):
+    """Pydantic Literal validation rejects unknown disposition values."""
+    session = _mock_session()
+    app.dependency_overrides[get_session] = lambda: session
+    resp = await client.post(
+        "/api/alerts/a001/acknowledge",
+        json={"disposition": "ignored"},
+    )
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 422  # Pydantic validation failure
+
+
+# ---------------------------------------------------------------------------
 # GET /api/readings
 # ---------------------------------------------------------------------------
 

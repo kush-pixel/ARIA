@@ -117,6 +117,20 @@ INDEXES: list[tuple[str, str]] = [
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_confirmations_patient_med_scheduled "
         "ON medication_confirmations (patient_id, medication_name, scheduled_time)",
     ),
+    (
+        "patients_risk_score_computed_at_col",
+        "ALTER TABLE patients ADD COLUMN IF NOT EXISTS risk_score_computed_at TIMESTAMPTZ",
+    ),
+    (
+        "idx_alert_feedback_patient_detector",
+        "CREATE INDEX IF NOT EXISTS idx_alert_feedback_patient_detector "
+        "ON alert_feedback (patient_id, detector_type, created_at DESC)",
+    ),
+    (
+        "idx_alert_feedback_alert",
+        "CREATE INDEX IF NOT EXISTS idx_alert_feedback_alert "
+        "ON alert_feedback (alert_id)",
+    ),
 ]
 
 

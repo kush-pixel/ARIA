@@ -6,6 +6,7 @@ Imports all 8 models so that:
 """
 
 from app.models.alert import Alert
+from app.models.alert_feedback import AlertFeedback
 from app.models.audit_event import AuditEvent
 from app.models.briefing import Briefing
 from app.models.clinical_context import ClinicalContext
@@ -16,6 +17,7 @@ from app.models.reading import Reading
 
 __all__ = [
     "Alert",
+    "AlertFeedback",
     "AuditEvent",
     "Briefing",
     "ClinicalContext",

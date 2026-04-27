@@ -1,5 +1,5 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-26 by Kush (AUDIT.md Fix 15 confirmations half complete — generate_full_timeline_confirmations() added; Fix 15 fully done)
+Last updated: 2026-04-26 by Sahil (Phase 5 complete — Fixes 13, 14, 24, 33, 42 L1 implemented; 388 unit tests passing, ruff clean)
 
 ---
 
@@ -69,14 +69,16 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - backend/app/main.py — FastAPI app entry point; CORS (localhost:3000); all 7 routers registered; WorkerProcessor starts/stops on lifespan
 - backend/app/api/patients.py — GET /api/patients (sorted tier→score DESC), GET /api/patients/{id}; _serialise() now includes risk_score_computed_at (Fix 61)
 - backend/app/api/briefings.py — GET /api/briefings/{patient_id}; marks read_at; writes audit event
-- backend/app/api/alerts.py — GET /api/alerts (unacknowledged only), POST /api/alerts/{id}/acknowledge + audit event
+- backend/app/api/alerts.py — GET /api/alerts[?patient_id=] (unacknowledged only, optional patient filter — Fix 24), POST /api/alerts/{id}/acknowledge accepts optional `AcknowledgeRequest` body (disposition/reason_text/clinician_id) and writes AlertFeedback row in addition to audit event when disposition supplied (Fix 42 L1); response includes `feedback_recorded` boolean
+- backend/app/models/alert_feedback.py — AlertFeedback ORM (Fix 42 L1); FK alert_id → alerts; columns: feedback_id (UUID PK), patient_id, detector_type, disposition, reason_text, clinician_id, created_at; one row per acknowledgement that includes a disposition
 - backend/app/api/readings.py — GET /api/readings?patient_id= (28-day window), POST /api/readings (manual entry + audit)
 - backend/app/api/ingest.py — POST /api/ingest; validates FHIR Bundle then calls ingest_fhir_bundle()
 - backend/app/api/admin.py — POST /api/admin/trigger-scheduler; guarded by DEMO_MODE=true
 - backend/app/api/adherence.py — GET /api/adherence/{patient_id}; per-medication adherence breakdown from medication_confirmations (28-day window); matches frontend AdherenceData type exactly
 - backend/tests/test_api.py — 24 unit tests (all passing); covers all 11 API routes; uses httpx.AsyncClient + mocked sessions; no live DB required
 - backend/app/api/shadow_mode.py — GET /api/shadow-mode/results; serves pre-computed shadow mode results from data/shadow_mode_results.json; no DB dependency; returns 404 if results not yet generated
-- scripts/run_shadow_mode.py — shadow mode validation script; **COMPLETE, PASSING at 94.3%** (see Shadow Mode section below)
+- scripts/run_shadow_mode.py — shadow mode validation script; **COMPLETE, PASSING at 94.3%** (see Shadow Mode section below); Phase 5 Fix 13: PATIENT_ID/IEMR_PATH/OUTPUT_PATH replaced with `--patient`, `--iemr`, `--output` argparse flags (defaults preserve patient 1091 behaviour); Phase 5 Fix 33: output JSON now includes `agreement_ci_95_lower_pct`, `agreement_ci_95_upper_pct`, `fully_independent_eval_points`, `overlapping_eval_points`, and `detector_breakdown` per-detector FP/FN counts; `_wilson_ci()` and `_per_detector_breakdown()` helpers added
+- scripts/run_pipeline_tests.py — end-to-end ARIA pipeline test (Phase 5 Fix 14); accepts `--patients` comma-separated list (default `1091,1015269`); per-patient tests refactored to take patient_id parameter; pre-flight `_patient_exists()` skips missing patients with clear FAIL record; exits 0 only when all tests pass
 - frontend/src/app/shadow-mode/page.tsx — shadow mode results page; shows visit-by-visit ARIA vs physician comparison, between-visit alert timeline, detector breakdowns, agreement metrics
 - frontend/src/lib/types.ts — Patient interface now includes risk_score_computed_at: string | null (Fix 61)
 - frontend/src/components/dashboard/PatientList.tsx — staleness badge: amber AlertTriangle icon + "Score stale" label shown beneath RiskScoreBar when risk_score_computed_at > 26 hours ago; isScoreStale() helper added (Fix 61)
@@ -99,6 +101,7 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - readings rows inserted by ingestion.py for clinic BP readings from FHIR Observations use session="ad_hoc" and source="clinic" to distinguish them from home monitoring readings (source="generated" | "manual" | "ble_auto")
 - clinical_context table: added med_history JSONB column (ALTER TABLE … ADD COLUMN IF NOT EXISTS); stores full medication timeline as list[{name, rxnorm, date, activity}] sorted chronologically; 104 entries for patient 1091
 - patients table: added risk_score_computed_at TIMESTAMPTZ column (ALTER TABLE … ADD COLUMN IF NOT EXISTS); set on every risk_score update; frontend shows staleness badge when > 26 hours old (Fix 61)
+- new table alert_feedback (Phase 5 Fix 42 L1): feedback_id UUID PK, alert_id UUID FK → alerts.alert_id, patient_id TEXT, detector_type TEXT (gap|inertia|deterioration|adherence), disposition TEXT (agree_acting|agree_monitoring|disagree), reason_text TEXT NULL, clinician_id TEXT NULL, created_at TIMESTAMPTZ DEFAULT now(); two indexes: idx_alert_feedback_patient_detector for Layer 2 calibration queries, idx_alert_feedback_alert for joining back to alerts
 
 ---
 
@@ -117,8 +120,8 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 | GET /api/briefings/{patient_id} | DONE | marks read_at, writes audit |
 | GET /api/readings?patient_id= | DONE | 28-day window |
 | POST /api/readings | DONE | manual entry |
-| GET /api/alerts | DONE | unacknowledged only |
-| POST /api/alerts/{id}/acknowledge | DONE | writes audit |
+| GET /api/alerts | DONE | unacknowledged only; optional ?patient_id= filter (Fix 24) |
+| POST /api/alerts/{id}/acknowledge | DONE | writes audit; optional disposition payload writes alert_feedback (Fix 42 L1) |
 | GET /api/adherence/{patient_id} | DONE | per-medication breakdown |
 | POST /api/ingest | DONE | validates then ingests |
 | POST /api/admin/trigger-scheduler | DONE | DEMO_MODE guard |
@@ -318,6 +321,62 @@ Key functions:
 - **Signal 3 (absolute gate):** `recent_avg >= patient_threshold` added as third required signal; prevents firing when a normotensive patient rises from e.g. 115 → 119 mmHg
 - **Step-change sub-detector (OR gate):** `recent_7d_avg − old_7d_avg ≥ 15 mmHg AND recent_7d_avg ≥ patient_threshold` flags deterioration regardless of linear slope direction; catches acute BP step-changes that least-squares regression smooths over; only compares weeks that have data (if 14-day window, old_7d is empty → sub-detector never fires on existing tests)
 - `_least_squares_slope` kept as module-level alias (`= compute_slope`) for backward compat with test imports
+## Phase 5 — API and Alert Improvements — 2026-04-26
+
+**Author:** Sahil Khalsa
+**Files changed:** `backend/app/api/alerts.py`, `backend/app/models/alert_feedback.py` (new), `backend/app/models/__init__.py`, `scripts/setup_db.py`, `scripts/run_shadow_mode.py`, `scripts/run_pipeline_tests.py`, `backend/tests/test_api.py`
+**Tests:** 384 → 388 unit tests, all passing. `ruff check app/` — all checks passed.
+
+### Fix 24 — Alert API patient_id filter
+`GET /api/alerts` now accepts an optional `?patient_id=` query parameter. When supplied, results are restricted to a single patient (`Alert.patient_id == patient_id`); when omitted, the original system-wide inbox behaviour is preserved. Required once a multi-patient panel is loaded — without it the inbox is a firehose with no scope.
+
+### Fix 42 L1 — Alert disposition feedback (feedback loop layer 1)
+New ORM model `AlertFeedback` and `alert_feedback` table:
+- `feedback_id` UUID PK, `alert_id` FK → alerts, `patient_id`, `detector_type` (gap/inertia/deterioration/adherence), `disposition` (agree_acting/agree_monitoring/disagree), `reason_text` TEXT, `clinician_id`, `created_at` TIMESTAMPTZ
+- Two new indexes: `idx_alert_feedback_patient_detector` (for the Layer 2 "4+ dismissals same type same patient" calibration query) and `idx_alert_feedback_alert`
+
+`POST /api/alerts/{alert_id}/acknowledge` now accepts an optional JSON body via Pydantic `AcknowledgeRequest` model (`disposition`, `reason_text`, `clinician_id`). When `disposition` is provided, an `AlertFeedback` row is inserted alongside the audit event. Empty body → backwards-compatible acknowledge-only behaviour. The detector_type is derived from `Alert.alert_type` via `_DETECTOR_TYPE_MAP` (`gap_urgent`/`gap_briefing` → `gap`, others → identity). Pydantic `Literal` validation rejects unknown disposition values with HTTP 422.
+
+Response now includes `feedback_recorded: bool` so the frontend knows whether the disposition was captured.
+
+### Fix 13 — Shadow mode CLI arguments
+`scripts/run_shadow_mode.py` previously had `PATIENT_ID = "1091"`, `IEMR_PATH`, and `OUTPUT_PATH` hardcoded as module-level constants. Replaced with `argparse`:
+- `--patient` (default `1091`)
+- `--iemr` (default `data/raw/iemr/<patient>_data.json`)
+- `--output` (default `data/shadow_mode_results.json` for 1091, `data/shadow_mode_<patient>.json` otherwise)
+
+Module-level globals are still used internally so the 1100+ helper functions don't all need their signatures changed — `main()` parses args and overrides them before `_run()` executes. Validation rejects missing iEMR files with exit code 2 and a clear error message.
+
+### Fix 33 — Shadow mode statistics — Wilson CI + window overlap + per-detector breakdown
+Added three pure summary additions to the shadow mode output (no algorithm change):
+
+1. **Window-overlap independence** — counts evaluation points where `days_since_prior_visit >= 28` ("fully independent") vs those that overlap with a prior 28-day window. The 35 labelled evaluation points are not fully independent — this number tells the operator the effective independent sample.
+2. **Wilson 95% confidence interval** — `_wilson_ci(successes, total)` helper using the Wilson score formula, preferred over normal approximation when n is small or proportion is near 0/1 (both true here: n≈35, p≈0.94). Both lower and upper are written to the JSON output and printed to console.
+3. **Per-detector breakdown of disagreements** — `_per_detector_breakdown(labelled_visits)` decomposes FP and FN counts per detector. For false positives, every detector that fired is credited as the cause. For false negatives no single detector is responsible (none fired) — every detector is credited with the missed opportunity so the operator can see which detector had the chance to catch the case. The aggregate disagreement rate hides which specific detector to prioritise improving — this decomposition exposes it.
+
+All three are written to `data/shadow_mode_results.json` as `agreement_ci_95_lower_pct`, `agreement_ci_95_upper_pct`, `fully_independent_eval_points`, `overlapping_eval_points`, and `detector_breakdown`. Console output prints them after the agreement line.
+
+### Fix 14 — Multi-patient pipeline runner
+`scripts/run_pipeline_tests.py` extended to accept `--patients` comma-separated list (default `1091,1015269`). Six per-patient tests refactored to take a `patient_id` parameter (`test_get_patient`, `test_get_briefing`, `test_get_readings`, `test_get_adherence`, `test_layer1_detectors`, `test_risk_scorer`). Briefing composer test takes both `patient_id` and `appt_date`; only patients in the `_PATIENT_APPT_DATES` map run the composer test (no fabricated dates).
+
+Pre-flight `_patient_exists()` check skips patients missing from the DB with a clear `FAIL: patient row missing — run adapter + ingestion first` record. Aborts with exit code 1 if no patients are available. Process exits 0 only when all tests pass.
+
+### Schema repair — risk_score_computed_at migration restored
+The `patients_risk_score_computed_at_col` migration entry in `setup_db.py` was lost in the merge from main (replaced rather than appended). Restored alongside the new alert_feedback indexes so existing Supabase deployments correctly receive the column on next `python scripts/setup_db.py` run.
+
+### Tests added — 4 new in `test_api.py`
+- `test_list_alerts_filtered_by_patient_id` — Fix 24 query parameter
+- `test_acknowledge_alert_with_disposition_writes_feedback` — Fix 42 L1 happy path with all three optional fields
+- `test_acknowledge_alert_without_disposition_no_feedback` — backwards-compatible empty body
+- `test_acknowledge_alert_invalid_disposition_rejected` — Pydantic Literal validation returns HTTP 422
+
+### Phase 5 prerequisites for deploy
+1. **Re-run setup_db.py** against the dev Supabase DB to create the `alert_feedback` table, the two new indexes, and the restored `risk_score_computed_at` column.
+2. **Frontend integration (Phase 6 — Krishna)** — add disposition radio buttons to `AlertInbox.tsx` and call `acknowledgeAlert(id, {disposition, reason_text})`. The endpoint is backwards-compatible so frontend changes are non-blocking.
+3. **Multi-patient ingestion** — Fix 14 test runner skips patients missing from the DB. To validate the multi-patient panel end-to-end, run the FHIR adapter + ingestion + generator for patient 1015269 against the existing `data/raw/iemr/1015269_data.json`.
+
+---
+
 ## AUDIT.md Fixes Implemented — 2026-04-26
 
 ### Fix 25 — Comorbidity risk score saturated at 5 problems

@@ -24,13 +24,20 @@ Ground truth: PROBLEM_STATUS2_FLAG on the HTN problem record (per CLAUDE.md).
 Target: >= 80% agreement on labelled evaluation points.
 
 Usage (from project root, aria conda env active):
-    python scripts/run_shadow_mode.py
+    python scripts/run_shadow_mode.py                                    # defaults: --patient 1091
+    python scripts/run_shadow_mode.py --patient 1015269 \\
+        --iemr data/raw/iemr/1015269_data.json
+    python scripts/run_shadow_mode.py --patient 2045 \\
+        --iemr data/raw/iemr/2045_data.json \\
+        --output data/shadow_mode_2045.json
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
+import math
 import random
 import statistics
 import sys
@@ -57,9 +64,15 @@ from app.db.base import AsyncSessionLocal  # noqa: E402
 from app.models.clinical_context import ClinicalContext  # noqa: E402
 from app.models.reading import Reading  # noqa: E402
 
-PATIENT_ID = "1091"
-OUTPUT_PATH = PROJECT_ROOT / "data" / "shadow_mode_results.json"
-IEMR_PATH = PROJECT_ROOT / "data" / "raw" / "iemr" / "1091_data.json"
+_DEFAULT_PATIENT_ID = "1091"
+_DEFAULT_IEMR_PATH = PROJECT_ROOT / "data" / "raw" / "iemr" / "1091_data.json"
+_DEFAULT_OUTPUT_PATH = PROJECT_ROOT / "data" / "shadow_mode_results.json"
+
+# Module-level globals — populated from argparse in main() before _run() executes.
+# Kept module-level (not threaded through every helper) to minimise diff surface.
+PATIENT_ID: str = _DEFAULT_PATIENT_ID
+IEMR_PATH: Path = _DEFAULT_IEMR_PATH
+OUTPUT_PATH: Path = _DEFAULT_OUTPUT_PATH
 
 _LABEL_PRIORITY: dict[str, int] = {
     "concerned": 0,
@@ -1088,6 +1101,17 @@ async def _run() -> None:
     agreement_pct  = (agreements / len(labelled) * 100) if labelled else 0.0
     passed = agreement_pct >= 80.0
 
+    # ── Step 6b: Window-overlap independence + Wilson CI + per-detector breakdown (Fix 33) ──
+    independent_count = sum(
+        1 for v in labelled
+        if (v["days_since_prior_visit"] or 0) >= 28
+    )
+    overlapping_count = len(labelled) - independent_count
+
+    ci_lower, ci_upper = _wilson_ci(agreements, len(labelled))
+
+    detector_breakdown = _per_detector_breakdown(labelled)
+
     # ── Step 7: Save ─────────────────────────────────────────────────────────
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {
@@ -1105,6 +1129,11 @@ async def _run() -> None:
         "false_negatives": false_negatives,
         "false_positives": false_positives,
         "agreement_pct": round(agreement_pct, 1),
+        "agreement_ci_95_lower_pct": round(ci_lower * 100.0, 1),
+        "agreement_ci_95_upper_pct": round(ci_upper * 100.0, 1),
+        "fully_independent_eval_points": independent_count,
+        "overlapping_eval_points": overlapping_count,
+        "detector_breakdown": detector_breakdown,
         "passed": passed,
         "best_demo_window": best_window,
         "visits": visits,
@@ -1123,8 +1152,23 @@ async def _run() -> None:
     print(f"No ground truth (flag absent — HTN not assessed): {len(no_gt_visits)} (excluded)")
     print()
     print(f"Agreement on labelled visits: {agreements}/{len(labelled)} ({agreement_pct:.1f}%)")
+    print(
+        f"  95% Wilson CI: [{ci_lower * 100:.1f}%, {ci_upper * 100:.1f}%]"
+    )
+    print(
+        f"  Fully independent eval points (>= 28d apart): {independent_count}/{len(labelled)} "
+        f"({overlapping_count} overlap with prior window)"
+    )
     print(f"False negatives: {false_negatives}")
     print(f"False positives: {false_positives}")
+    if false_negatives + false_positives > 0:
+        print()
+        print("Per-detector breakdown of disagreements:")
+        for det, stats in detector_breakdown.items():
+            fp = stats["false_positives"]
+            fn = stats["false_negatives"]
+            total = stats["disagreements"]
+            print(f"  {det:14s} disagreements={total:2d}  (FP={fp}, FN={fn})")
     print()
     print("PASSED ✓" if passed else "FAILED ✗")
     if best_window:
@@ -1144,8 +1188,112 @@ async def _run() -> None:
     print(f"\nResults saved to {OUTPUT_PATH}")
 
 
+def _wilson_ci(successes: int, total: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson 95% confidence interval for a binomial proportion.
+
+    Wilson interval is preferred over the normal approximation when n is small
+    or the proportion is near 0/1 — both true for shadow mode (n≈35, p≈0.94).
+
+    Returns (lower, upper) as proportions in [0, 1].  Returns (0.0, 0.0) when
+    total == 0 to avoid division by zero.
+    """
+    if total <= 0:
+        return (0.0, 0.0)
+    p_hat = successes / total
+    denom = 1.0 + (z * z) / total
+    centre = (p_hat + (z * z) / (2 * total)) / denom
+    spread = (z * math.sqrt(p_hat * (1 - p_hat) / total + (z * z) / (4 * total * total))) / denom
+    return (max(0.0, centre - spread), min(1.0, centre + spread))
+
+
+def _per_detector_breakdown(labelled_visits: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """Decompose disagreements (FP + FN) per detector.
+
+    For false positives: the detector(s) that fired are credited as the cause.
+    For false negatives: every detector is credited (none fired but the physician
+        was concerned — there is no single "responsible" detector).  Reported
+        as FN against each so the operator can see which detector had the
+        opportunity to catch the case.
+    """
+    breakdown: dict[str, dict[str, int]] = {
+        det: {"false_positives": 0, "false_negatives": 0, "disagreements": 0}
+        for det in ("gap", "inertia", "deterioration", "adherence")
+    }
+
+    for visit in labelled_visits:
+        result = visit["result"]
+        if result == "agree":
+            continue
+        detectors = visit.get("with_aria", {}).get("detectors", {})
+
+        if result == "false_positive":
+            # gap uses "urgent"; the others use "fired"
+            if detectors.get("gap", {}).get("urgent"):
+                breakdown["gap"]["false_positives"] += 1
+                breakdown["gap"]["disagreements"] += 1
+            for name in ("inertia", "deterioration", "adherence"):
+                if detectors.get(name, {}).get("fired"):
+                    breakdown[name]["false_positives"] += 1
+                    breakdown[name]["disagreements"] += 1
+
+        elif result == "false_negative":
+            # No detector fired — credit every detector with the missed opportunity.
+            for name in ("gap", "inertia", "deterioration", "adherence"):
+                breakdown[name]["false_negatives"] += 1
+                breakdown[name]["disagreements"] += 1
+
+    return breakdown
+
+
 def main() -> None:
-    """Entry point."""
+    """Entry point — parses CLI args then runs shadow mode validation."""
+    global PATIENT_ID, IEMR_PATH, OUTPUT_PATH
+
+    parser = argparse.ArgumentParser(
+        description="ARIA shadow mode validation (Fix 13 — multi-patient CLI).",
+    )
+    parser.add_argument(
+        "--patient",
+        default=_DEFAULT_PATIENT_ID,
+        help=f"Patient ID to validate (default: {_DEFAULT_PATIENT_ID})",
+    )
+    parser.add_argument(
+        "--iemr",
+        default=None,
+        help="Path to iEMR JSON file (default: data/raw/iemr/<patient>_data.json)",
+    )
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Output path for results JSON "
+             "(default: data/shadow_mode_results.json for 1091, "
+             "data/shadow_mode_<patient>.json otherwise)",
+    )
+    args = parser.parse_args()
+
+    PATIENT_ID = str(args.patient)
+
+    if args.iemr is not None:
+        IEMR_PATH = Path(args.iemr)
+    else:
+        IEMR_PATH = PROJECT_ROOT / "data" / "raw" / "iemr" / f"{PATIENT_ID}_data.json"
+
+    if args.output is not None:
+        OUTPUT_PATH = Path(args.output)
+    elif PATIENT_ID == _DEFAULT_PATIENT_ID:
+        OUTPUT_PATH = _DEFAULT_OUTPUT_PATH
+    else:
+        OUTPUT_PATH = PROJECT_ROOT / "data" / f"shadow_mode_{PATIENT_ID}.json"
+
+    if not IEMR_PATH.exists():
+        print(f"ERROR: iEMR file not found: {IEMR_PATH}", file=sys.stderr)
+        sys.exit(2)
+
+    print(f"Patient:    {PATIENT_ID}")
+    print(f"iEMR file:  {IEMR_PATH}")
+    print(f"Output:     {OUTPUT_PATH}")
+    print()
+
     asyncio.run(_run())
 
 

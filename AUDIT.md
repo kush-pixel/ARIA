@@ -742,14 +742,15 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 
 ### Phase 5 — API and alert improvements
 
-| # | Fix | Files |
-|---|---|---|
-| 24 | Alert `patient_id` filter | alerts.py |
-| 42 (L1) | Alert disposition on acknowledge (feedback loop Layer 1) | alerts.py, new `alert_feedback` table |
-| 41 | Gap explanations table and API | new table, new API route |
-| 13 | Shadow mode CLI argument | run_shadow_mode.py |
-| 32 | Remove `run_ingestion.py` default bundle | run_ingestion.py |
-| 33 | Shadow mode window overlap + CI + per-detector breakdown | run_shadow_mode.py |
+| # | Fix | Files | Status |
+|---|---|---|---|
+| 24 | Alert `patient_id` filter | alerts.py | DONE |
+| 42 (L1) | Alert disposition on acknowledge (feedback loop Layer 1) | alerts.py, new `alert_feedback` table | DONE |
+| 41 | Gap explanations table and API | new table, new API route | pending |
+| 13 | Shadow mode CLI argument | run_shadow_mode.py | DONE |
+| 32 | Remove `run_ingestion.py` default bundle | run_ingestion.py | pending |
+| 33 | Shadow mode window overlap + CI + per-detector breakdown | run_shadow_mode.py | DONE |
+| 14 | Multi-patient pipeline test runner | run_pipeline_tests.py | DONE |
 
 ---
 
@@ -808,8 +809,8 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 | 10 | High | No scheduled pattern_recompute sweep | scheduler.py | 4 |
 | 11 | High | Adherence alert not written to DB | processor.py | 0 |
 | 12 | High | last_visit_date misses 71 non-vitals visits | ingestion.py | 1 |
-| 13 | High | Shadow mode hardcoded to patient 1091 | run_shadow_mode.py | 5 |
-| 14 | High | Only one patient in DB | data | 5 |
+| 13 | High | Shadow mode hardcoded to patient 1091 | run_shadow_mode.py | 5 ✓ DONE |
+| 14 | High | Only one patient in DB | data | 5 ✓ DONE (pipeline test runner) |
 | 15 | High | Full care timeline readings not generated | reading_generator.py | 3 |
 | 16 | High | Lab values not ingested | adapter.py, ingestion.py | 8 |
 | 17 | High | Cold start misleading briefings | processor.py | 3 |
@@ -819,7 +820,7 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 | 21 | Medium | No next_appointment update mechanism | patients.py | 4 |
 | 22 | Medium | Batch-level idempotency blocks new clinic visits | ingestion.py | 3 |
 | 23 | Medium | Briefing icon today-only | PatientList.tsx | 6 |
-| 24 | Medium | Alert API no patient_id filter | alerts.py | 5 |
+| 24 | Medium | Alert API no patient_id filter | alerts.py | 5 ✓ DONE |
 | 25 | Medium | Comorbidity score saturates at 5 problems | risk_scorer.py | 0 |
 | 26 | Medium | Pattern B suppression missing drug-class-aware med change condition | adherence_analyzer.py | 0 |
 | 27 | Medium | White-coat window not excluded from threshold comparisons | detectors | 2 |
@@ -828,7 +829,7 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 | 30 | Low | delivered_at never set on alerts | processor.py | 0 |
 | 31 | Low | Duplicate sort backend + frontend | PatientList.tsx | 6 |
 | 32 | Low | run_ingestion.py default bundle hardcoded | run_ingestion.py | 5 |
-| 33 | Low | Shadow mode: window overlap + CI + per-detector breakdown not reported | run_shadow_mode.py | 5 |
+| 33 | Low | Shadow mode: window overlap + CI + per-detector breakdown not reported | run_shadow_mode.py | 5 ✓ DONE |
 | 34 | Low | Medication titration timing not in briefing — use drug-class-aware window | composer.py | 2 |
 | 35 | Infra | Patient research ID — HMAC-based pseudonymization (not sequential IDs) | adapter.py, config.py | 8 |
 | 36 | Infra | JWT expiry not verified | auth config | 8 |
@@ -837,7 +838,7 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 | 39 | Infra | No MFA | Supabase Auth | 8 |
 | 40 | Infra | No dead-letter queue | processor.py | 4 |
 | 41 | Feature | Gap explanations (device vs non-compliance) | new table + API | 5 |
-| 42 | Feature | Feedback loop (3 layers) | new tables + API | 5–7 |
+| 42 | Feature | Feedback loop (3 layers) | new tables + API | 5–7 (L1 ✓ DONE) |
 | 43 | Feature | Patient-facing submission interface | Next.js | 7 |
 | 44 | Feature | BLE connector | new | 7 |
 | 45 | Feature | Escalation pathway + off-hours tagging | processor.py, alerts | 7 |

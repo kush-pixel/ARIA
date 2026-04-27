@@ -58,7 +58,7 @@ Audit:
   [ ] alert_acknowledged -> audit_events
 
 Database:
-  [ ] All 13 CREATE INDEX + 9 ALTER TABLE migrations in setup_db.py (includes risk_score_computed_at)
+  [ ] All 15 CREATE INDEX + 9 ALTER TABLE migrations in setup_db.py (includes risk_score_computed_at + alert_feedback indexes)
   [ ] TIMESTAMPTZ not TIMESTAMP
   [ ] risk_score column exists on patients
   [ ] risk_score_computed_at column exists on patients (Fix 61)
@@ -66,6 +66,7 @@ Database:
   [ ] UNIQUE INDEX on readings (patient_id, effective_datetime, source)
   [ ] UNIQUE INDEX on medication_confirmations (patient_id, medication_name, scheduled_time)
   [ ] alerts.alert_type accepts "adherence"
+  [ ] alert_feedback table exists with FK to alerts (Fix 42 L1)
   [ ] _aria_med_history, _aria_problem_assessments, _aria_visit_dates consumed in ingestion.py
   [ ] Clinic readings use session="ad_hoc" source="clinic"
   [ ] Ingestion idempotency: per-observation ON CONFLICT DO NOTHING (not batch COUNT)
