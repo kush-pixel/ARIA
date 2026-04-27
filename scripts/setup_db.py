@@ -141,6 +141,19 @@ INDEXES: list[tuple[str, str]] = [
         "patients_risk_score_computed_at_col",
         "ALTER TABLE patients ADD COLUMN IF NOT EXISTS risk_score_computed_at TIMESTAMPTZ",
     ),
+    # Phase 4 — processing_jobs retry support + briefings nullable fix
+    (
+        "processing_jobs_retry_count_col",
+        "ALTER TABLE processing_jobs ADD COLUMN IF NOT EXISTS retry_count SMALLINT NOT NULL DEFAULT 0",
+    ),
+    (
+        "processing_jobs_retry_after_col",
+        "ALTER TABLE processing_jobs ADD COLUMN IF NOT EXISTS retry_after TIMESTAMPTZ",
+    ),
+    (
+        "briefings_appointment_date_nullable",
+        "ALTER TABLE briefings ALTER COLUMN appointment_date DROP NOT NULL",
+    ),
     # Generator prerequisite unique indexes
     (
         "idx_readings_patient_datetime_source",

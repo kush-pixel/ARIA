@@ -10,8 +10,9 @@ Idempotency strategy
 --------------------
 - patients:          INSERT … ON CONFLICT DO NOTHING on patient_id PK.
 - clinical_context:  INSERT … ON CONFLICT DO UPDATE — refreshes on re-run.
-- readings:          SELECT COUNT(*) first; skip all inserts if clinic readings
-                     already exist for this patient (batch-level idempotency).
+- readings:          Per-observation ON CONFLICT DO NOTHING on
+                     (patient_id, effective_datetime, source).  New readings
+                     are added on re-run without skipping the entire batch.
 - audit_events:      Always appended (one row per ingestion attempt).
 """
 
