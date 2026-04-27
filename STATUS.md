@@ -1,5 +1,5 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-26 by Krishna (Phase 3 audit items 15/19/22 — per-observation idempotency in ingestion.py, parametric median baseline in reading_generator.py, full-timeline readings generator added)
+Last updated: 2026-04-26 by Kush (AUDIT.md Fix 15 confirmations half complete — generate_full_timeline_confirmations() added; Fix 15 fully done)
 
 ---
 
@@ -37,8 +37,8 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - backend/tests/test_worker.py — 23 unit tests passing, 1 integration test (@pytest.mark.integration, deselected in unit-only run); covers processor status transitions, claim guard, error handling, unknown job type, pattern_recompute (all 4 detectors + scorer), briefing_generation (Layer 1+3 success, Layer 3 graceful failure, missing patient_id, bad date in key), scheduler enqueue logic, idempotency key format
 - backend/tests/test_ingestion.py — 37 unit tests passing, 1 integration test (@pytest.mark.integration); covers success path, idempotency, CHF tier override, failure audit event, all summary fields, med_history stored in upsert
 - backend/app/services/generator/reading_generator.py — Patient A 28-day scenario; 47 readings (14+13+4+6+10); all clinical rules pass; 14 unit tests + 1 integration test; ruff clean
-- backend/app/services/generator/confirmation_generator.py — synthetic medication confirmation events for all active medications over 28 days; 1092 scheduled doses for patient 1091; 977 confirmed (89.5%), 115 missed; weekday rate 0.95, weekend rate 0.78 (blended ~90% matches Patient A spec 91%); 20 unit tests passing; ruff clean
-- scripts/run_generator.py — updated: independent idempotency checks for readings (source='generated') and confirmations (confidence='simulated'); both data types generated and reported in a single CLI run; prints adherence summary (total/confirmed/missed) when confirmations are inserted
+- backend/app/services/generator/confirmation_generator.py — 28-day scenario: 1092 scheduled doses for patient 1091; 977 confirmed (89.5%), 115 missed; weekday rate 0.95, weekend rate 0.78; full-timeline (Fix 15): generate_full_timeline_confirmations() — for each inter-visit interval derives active meds from med_history JSONB via _active_meds_at(), draws per-interval adherence from Beta(α=6.5, β=0.65) mean≈91% SD≈10%, applies weekend discount, inserts with ON CONFLICT DO NOTHING on (patient_id, medication_name, scheduled_time); falls back to current_medications when med_history absent; 32 unit tests passing; ruff clean
+- scripts/run_generator.py — demo mode: independent idempotency checks for readings and confirmations; full-timeline mode (--mode full-timeline): calls generate_full_timeline_readings() then generate_full_timeline_confirmations() and prints both inserted counts + date range
 
 - backend/app/services/briefing/composer.py — compose_briefing() async function; queries DB for 28-day readings, unacknowledged alerts, medication confirmations, clinical context; assembles all 9 deterministic briefing fields (trend_summary, medication_status, adherence_summary, active_problems, overdue_labs, visit_agenda, urgent_flags, risk_score, data_limitations); persists Briefing row + audit_event row; clinical language enforced at code level ("possible adherence concern", "treatment review warranted"); Layer 1 only — no LLM. Data quality fix 2026-04-21: visit agenda item prefix changed from "Order overdue lab:" to "Pending follow-up:" because the overdue_labs field contains a mix of actual lab orders and clinical referrals/protocols.
 - backend/app/services/briefing/summarizer.py — generate_llm_summary() async function; loads prompt from prompts/briefing_summary_prompt.md; computes SHA-256 prompt_hash; calls claude-sonnet-4-20250514 for 3-sentence readable summary; retry loop (max 2 attempts): calls validate_llm_output() after each attempt — on pass stores readable_summary, on fail retries once then stores None; populates model_version, prompt_hash, generated_at on briefing row for audit; must only run after Layer 1 is verified
@@ -83,7 +83,8 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 
 - Item 22 COMPLETE: per-observation idempotency — ingestion.py uses ON CONFLICT DO NOTHING per reading; batch COUNT guard removed; setup_db.py adds idx_readings_patient_datetime_source UNIQUE index and idx_confirmations_patient_med_scheduled UNIQUE index (both IF NOT EXISTS); test_ingestion.py updated to match new execute call order
 - Item 19 COMPLETE: parametric baseline using median(historic_bp_systolic); _get_patient_baseline() async helper added to reading_generator.py; falls back to PATIENT_A_MORNING_MEAN=163.0 when <2 clinic readings; 3 new tests in TestGetPatientBaseline
-- Item 15 COMPLETE: generate_full_timeline_readings() added to reading_generator.py; interpolates between clinic visits; ON CONFLICT DO NOTHING per reading; run_generator.py --mode full-timeline; 4 new unit tests in TestFullTimelineReadings
+- Item 15 COMPLETE (readings): generate_full_timeline_readings() — linear interpolation between clinic anchors, Gaussian SD=8mmHg, morning/evening split (6-9mmHg differential), device outage (_build_outage_days: 1-2 episodes of 2-4 consecutive absent days per interval), white-coat dip (_white_coat_dip_amount: linear ramp 10-15mmHg in 3-5 days before visit), ON CONFLICT DO NOTHING per reading; 9 new unit tests (TestBuildOutageDays, TestWhiteCoatDipAmount)
+- Item 15 COMPLETE (confirmations): generate_full_timeline_confirmations() — _active_meds_at() parses med_history JSONB timeline (handles add/discontinue/re-add lifecycle); Beta(6.5, 0.65) per-interval adherence; weekend discount; ON CONFLICT DO NOTHING on (patient_id, medication_name, scheduled_time); 12 new unit tests (TestActiveMedsAt, TestFullTimelineConfirmations); Fix 15 fully complete
 
 ### IN PROGRESS
 - None
@@ -243,6 +244,28 @@ The 57 audit items are categorised as: Critical (7), High (14), Medium (13), Low
 - New file: `backend/tests/test_llm_validator.py` — 51 tests, all passing
 - AUDIT.md expanded to 57 items (Fixes 48–57 added); CLAUDE.md updated (briefings table, test list, audit_events action column); AGENTS.md, all .claude agents/skills verified complete
 - Groq/Gemini revert (earlier same day): summarizer.py and config.py reverted to Anthropic-only after branch merge introduced non-spec LLM keys
+
+---
+
+## Generator — Fix 15 Confirmations Half + Fix 15 Reading Gaps — 2026-04-26
+
+**Author:** Kush Patel  
+**Files changed:** `confirmation_generator.py`, `reading_generator.py`, `run_generator.py`, `tests/test_confirmation_generator.py`, `tests/test_reading_generator.py`  
+**Tests:** 384 unit tests total, all passing. `ruff check app/` — all checks passed.
+
+### Fix 15 (confirmations) — generate_full_timeline_confirmations()
+AUDIT.md Fix 15 requires both readings AND confirmations to span the full care timeline. Krishna completed the readings half; this completes the confirmations half.
+
+`_active_meds_at(med_history, cutoff_date)` — parses `med_history` JSONB list to determine which medications were active at the start of each inter-visit interval. Processes entries chronologically: an add/refill/null activity makes a drug active; a "Discontinue"/"remove" makes it inactive; a subsequent re-add restores it. Returns `(name, rxnorm_or_None)` tuples.
+
+`generate_full_timeline_confirmations(patient_id, session)` — for each consecutive pair of clinic readings, draws a per-interval adherence rate from `Beta(α=6.5, β=0.65)` (mean≈91%, SD≈10%), applies a weekend discount (×0.821), generates daily scheduled dose events for every active medication, inserts with `ON CONFLICT DO NOTHING` on `(patient_id, medication_name, scheduled_time)`, commits in batches of 200. Falls back to `current_medications` when `med_history` is absent. `run_generator.py --mode full-timeline` now calls both readings and confirmations generators.
+
+### Fix 15 (readings) — device outage + white-coat dip
+These two synthetic data rules from CLAUDE.md were missing from `generate_full_timeline_readings()` (only present in the 28-day scenario generator):
+
+`_build_outage_days(window_start, window_end)` — generates 1-2 outage episodes of 2-4 consecutive absent days per interval, placed in the inner quarter of the window. Returns `frozenset[date]`. Windows < 6 days get no outage.
+
+`_white_coat_dip_amount(current_day, date_b, dip_days, dip_mmhg)` — linear ramp from 0 at the start of the dip window to the full `dip_mmhg` on the day before the clinic visit. Per-interval dip window 3-5 days, magnitude 10-15 mmHg — drawn fresh each interval so the dip varies across the timeline.
 
 ---
 

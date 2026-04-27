@@ -46,7 +46,10 @@ from sqlalchemy import func as sa_func, select  # noqa: E402
 from app.db.base import AsyncSessionLocal  # noqa: E402
 from app.models.medication_confirmation import MedicationConfirmation  # noqa: E402
 from app.models.reading import Reading  # noqa: E402
-from app.services.generator.confirmation_generator import generate_confirmations  # noqa: E402
+from app.services.generator.confirmation_generator import (  # noqa: E402
+    generate_confirmations,
+    generate_full_timeline_confirmations,
+)
 from app.services.generator.reading_generator import (  # noqa: E402
     generate_full_timeline_readings,
     generate_readings,
@@ -146,6 +149,9 @@ async def _run_full_timeline(patient_id: str) -> None:
     async with AsyncSessionLocal() as session:
         readings_inserted = await generate_full_timeline_readings(patient_id, session)
 
+    async with AsyncSessionLocal() as session:
+        confs_inserted = await generate_full_timeline_confirmations(patient_id, session)
+
     # ── Print date range of all source='generated' readings ──────────────────
     async with AsyncSessionLocal() as session:
         range_result = await session.execute(
@@ -164,6 +170,7 @@ async def _run_full_timeline(patient_id: str) -> None:
     print(f"\nGeneration complete (mode=full-timeline):")
     print(f"  patient_id:               {patient_id}")
     print(f"  readings_inserted:        {readings_inserted}")
+    print(f"  confirmations_inserted:   {confs_inserted}")
     if min_dt and max_dt:
         print(f"  date_range_start:         {min_dt.date().isoformat()}")
         print(f"  date_range_end:           {max_dt.date().isoformat()}")
