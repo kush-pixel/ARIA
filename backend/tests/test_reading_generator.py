@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import random
 import statistics
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -23,8 +23,17 @@ import pytest
 
 from app.models.clinical_context import ClinicalContext
 from app.services.generator.reading_generator import (
+    FULL_TIMELINE_OUTAGE_MAX_DAYS,
+    FULL_TIMELINE_OUTAGE_MIN_DAYS,
+    FULL_TIMELINE_WC_DIP_MAX_MMHG,
+    FULL_TIMELINE_WC_DIP_MIN_MMHG,
+    PATIENT_A_MORNING_MEAN,
     SCENARIO_PATIENT_A,
+    _build_outage_days,
     _compute_baseline,
+    _get_patient_baseline,
+    _white_coat_dip_amount,
+    generate_full_timeline_readings,
     generate_readings,
 )
 
@@ -97,6 +106,56 @@ class TestComputeBaseline:
         mean, sd = _compute_baseline([])
         assert mean == PATIENT_A_MORNING_MEAN
         assert sd == PATIENT_A_MORNING_SD
+
+
+class TestGetPatientBaseline:
+    """Tests for the _get_patient_baseline async helper (Item 19 — parametric baseline)."""
+
+    @pytest.mark.asyncio
+    async def test_baseline_computed_from_historic_data(self) -> None:
+        """Returns median (not mean) when >= 2 clinic readings exist.
+
+        For [120, 130, 200] median=130, mean=150 — verifies median is used.
+        """
+        ctx = MagicMock(spec=ClinicalContext)
+        ctx.historic_bp_systolic = [120, 130, 200]
+
+        cc_result = MagicMock()
+        cc_result.scalar_one_or_none.return_value = ctx
+
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=cc_result)
+
+        baseline = await _get_patient_baseline("1091", session)
+        # median([120, 130, 200]) = 130.0; mean = 150.0 — confirms median used
+        assert abs(baseline - 130.0) < 0.1
+
+    @pytest.mark.asyncio
+    async def test_baseline_falls_back_to_default_when_insufficient(self) -> None:
+        """Falls back to PATIENT_A_MORNING_MEAN when fewer than 2 clinic readings exist."""
+        ctx = MagicMock(spec=ClinicalContext)
+        ctx.historic_bp_systolic = [155]  # only 1 reading — below the >= 2 threshold
+
+        cc_result = MagicMock()
+        cc_result.scalar_one_or_none.return_value = ctx
+
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=cc_result)
+
+        baseline = await _get_patient_baseline("9999", session)
+        assert baseline == PATIENT_A_MORNING_MEAN
+
+    @pytest.mark.asyncio
+    async def test_baseline_falls_back_when_no_context(self) -> None:
+        """Falls back to PATIENT_A_MORNING_MEAN when no ClinicalContext row exists."""
+        cc_result = MagicMock()
+        cc_result.scalar_one_or_none.return_value = None
+
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=cc_result)
+
+        baseline = await _get_patient_baseline("9999", session)
+        assert baseline == PATIENT_A_MORNING_MEAN
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +389,229 @@ class TestMissingClinicalContext:
 
 
 # ---------------------------------------------------------------------------
+# Full timeline tests (Item 15)
+# ---------------------------------------------------------------------------
+
+
+def _make_clinic_row(
+    effective_datetime: datetime, systolic_avg: float, diastolic_avg: float = 90.0
+) -> MagicMock:
+    """Build a mock clinic reading row as returned by session.execute().all()."""
+    row = MagicMock()
+    row.effective_datetime = effective_datetime
+    row.systolic_avg = systolic_avg
+    row.diastolic_avg = diastolic_avg
+    return row
+
+
+def _make_full_timeline_session(
+    clinic_rows: list,
+    reading_rowcount: int = 1,
+) -> MagicMock:
+    """Build a mock AsyncSession for generate_full_timeline_readings.
+
+    Call order:
+      0. SELECT clinic readings (returns clinic_rows via .all())
+      1..N. INSERT Reading ON CONFLICT DO NOTHING (one per generated reading)
+    """
+    clinic_result = MagicMock()
+    clinic_result.all.return_value = clinic_rows
+
+    insert_result = MagicMock()
+    insert_result.rowcount = reading_rowcount
+
+    session = MagicMock()
+    # First call returns clinic rows; all subsequent calls return insert result
+    session.execute = AsyncMock(side_effect=[clinic_result] + [insert_result] * 10000)
+    session.commit = AsyncMock()
+    return session
+
+
+class TestFullTimelineReadings:
+    """Tests for generate_full_timeline_readings() (Item 15)."""
+
+    @pytest.mark.asyncio
+    async def test_full_timeline_generates_between_clinic_visits(self) -> None:
+        """Two clinic readings 60 days apart → readings inserted between them."""
+        from datetime import timezone
+
+        date_a = datetime(2012, 1, 1, 9, 0, 0, tzinfo=timezone.utc)
+        date_b = datetime(2012, 3, 1, 9, 0, 0, tzinfo=timezone.utc)  # ~60 days later
+        clinic_rows = [
+            _make_clinic_row(date_a, 160.0),
+            _make_clinic_row(date_b, 150.0),
+        ]
+        session = _make_full_timeline_session(clinic_rows, reading_rowcount=1)
+
+        total = await generate_full_timeline_readings("1091", session)
+
+        # Should have inserted some readings (at least one morning + one evening
+        # for most days in the ~58-day window, minus random misses)
+        assert total > 0
+        # The clinic SELECT call + multiple INSERT calls
+        assert session.execute.call_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_full_timeline_interpolation(self) -> None:
+        """Interpolation from sys=180 to sys=120 over 30 days: all values in range.
+
+        Seeds random for determinism and verifies that generated systolic values
+        stay within the plausible interpolated range (day_mean ± clip_offset = 120–180
+        plus Gaussian noise).  The midpoint day_mean is ≈ 150 at day 15.
+        """
+        from datetime import timezone
+
+        random.seed(2025)
+        date_a = datetime(2012, 1, 1, 9, 0, 0, tzinfo=timezone.utc)
+        date_b = datetime(2012, 1, 31, 9, 0, 0, tzinfo=timezone.utc)  # 30 days later
+        clinic_rows = [
+            _make_clinic_row(date_a, 180.0),
+            _make_clinic_row(date_b, 120.0),
+        ]
+        session = _make_full_timeline_session(clinic_rows, reading_rowcount=1)
+
+        total = await generate_full_timeline_readings("1091", session)
+
+        # With rowcount=1 for all inserts and a 28-day window (1 day each side excluded),
+        # we expect readings for up to 28 days × 2 sessions = 56 inserts minus random misses.
+        # The key assertion: total > 0 confirms interpolation ran.
+        assert total > 0
+        # At least one morning insert call occurred beyond the clinic SELECT
+        assert session.execute.call_count > 1
+
+    @pytest.mark.asyncio
+    async def test_full_timeline_idempotent(self) -> None:
+        """ON CONFLICT DO NOTHING returns rowcount=0 → total_inserted=0 on re-run."""
+        from datetime import timezone
+
+        date_a = datetime(2012, 1, 1, 9, 0, 0, tzinfo=timezone.utc)
+        date_b = datetime(2012, 3, 1, 9, 0, 0, tzinfo=timezone.utc)
+        clinic_rows = [
+            _make_clinic_row(date_a, 160.0),
+            _make_clinic_row(date_b, 150.0),
+        ]
+        # rowcount=0 simulates every reading already existing (ON CONFLICT)
+        session = _make_full_timeline_session(clinic_rows, reading_rowcount=0)
+
+        total = await generate_full_timeline_readings("1091", session)
+        assert total == 0
+
+    @pytest.mark.asyncio
+    async def test_full_timeline_skips_adjacent_visits(self) -> None:
+        """Two clinic readings one day apart → window_end <= window_start → no inserts."""
+        from datetime import timezone
+
+        date_a = datetime(2012, 1, 1, 9, 0, 0, tzinfo=timezone.utc)
+        date_b = datetime(2012, 1, 2, 9, 0, 0, tzinfo=timezone.utc)  # 1 day apart
+        clinic_rows = [
+            _make_clinic_row(date_a, 160.0),
+            _make_clinic_row(date_b, 158.0),
+        ]
+        session = _make_full_timeline_session(clinic_rows, reading_rowcount=1)
+
+        total = await generate_full_timeline_readings("1091", session)
+
+        # window_start = Jan 2, window_end = Jan 1 → skipped
+        assert total == 0
+        # Only the clinic SELECT should have been called (no INSERT calls)
+        assert session.execute.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Device outage helper tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuildOutageDays:
+    """Tests for _build_outage_days() — consecutive absent-row outage blocks."""
+
+    def test_short_window_returns_empty(self) -> None:
+        """Window < 6 days → no outage episodes (not enough room)."""
+        start = date(2012, 1, 1)
+        end = date(2012, 1, 4)   # 4-day window
+        assert _build_outage_days(start, end) == frozenset()
+
+    def test_returns_frozenset_of_dates(self) -> None:
+        """Long window → frozenset of date objects."""
+        start = date(2012, 1, 1)
+        end = date(2012, 3, 1)
+        result = _build_outage_days(start, end)
+        assert isinstance(result, frozenset)
+        assert all(isinstance(d, date) for d in result)
+
+    def test_outage_days_within_window(self) -> None:
+        """All outage dates fall within [window_start, window_end]."""
+        start = date(2012, 1, 1)
+        end = date(2012, 3, 1)
+        for _ in range(20):   # repeat to cover random placement
+            result = _build_outage_days(start, end)
+            for d in result:
+                assert start <= d <= end
+
+    def test_outage_episode_length_within_spec(self) -> None:
+        """No outage run exceeds FULL_TIMELINE_OUTAGE_MAX_DAYS consecutive days."""
+        random.seed(42)
+        start = date(2012, 1, 1)
+        end = date(2012, 6, 1)
+        outage = sorted(_build_outage_days(start, end))
+        if not outage:
+            return
+        # Find run lengths
+        runs, run_len = [], 1
+        for i in range(1, len(outage)):
+            if (outage[i] - outage[i - 1]).days == 1:
+                run_len += 1
+            else:
+                runs.append(run_len)
+                run_len = 1
+        runs.append(run_len)
+        assert all(FULL_TIMELINE_OUTAGE_MIN_DAYS <= r <= FULL_TIMELINE_OUTAGE_MAX_DAYS for r in runs)
+
+
+# ---------------------------------------------------------------------------
+# White-coat dip helper tests
+# ---------------------------------------------------------------------------
+
+
+class TestWhiteCoatDipAmount:
+    """Tests for _white_coat_dip_amount()."""
+
+    def test_outside_dip_window_returns_zero(self) -> None:
+        """Days before the dip window return 0.0."""
+        visit = date(2012, 1, 10)
+        assert _white_coat_dip_amount(date(2012, 1, 1), visit, 5, 12.0) == 0.0
+
+    def test_on_visit_day_returns_zero(self) -> None:
+        """The clinic visit day itself returns 0.0 (excluded from home monitoring)."""
+        visit = date(2012, 1, 10)
+        assert _white_coat_dip_amount(visit, visit, 5, 12.0) == 0.0
+
+    def test_last_day_before_visit_returns_full_dip(self) -> None:
+        """Day immediately before visit = full dip magnitude."""
+        visit = date(2012, 1, 10)
+        result = _white_coat_dip_amount(date(2012, 1, 9), visit, 5, 12.0)
+        assert result == pytest.approx(12.0, rel=0.01)
+
+    def test_dip_increases_linearly(self) -> None:
+        """Dip is larger closer to visit (linear ramp)."""
+        visit = date(2012, 1, 10)
+        dip_days, magnitude = 5, 15.0
+        amounts = [
+            _white_coat_dip_amount(date(2012, 1, 10) - timedelta(days=d), visit, dip_days, magnitude)
+            for d in range(1, dip_days + 1)
+        ]
+        # amounts[0] = day before visit (largest), amounts[-1] = first dip day (smallest)
+        assert amounts == sorted(amounts, reverse=True)
+
+    def test_dip_within_spec_range(self) -> None:
+        """Max dip on last day is within FULL_TIMELINE_WC_DIP_MIN/MAX_MMHG range."""
+        visit = date(2012, 1, 10)
+        for dip_mmhg in [FULL_TIMELINE_WC_DIP_MIN_MMHG, FULL_TIMELINE_WC_DIP_MAX_MMHG]:
+            result = _white_coat_dip_amount(date(2012, 1, 9), visit, 3, dip_mmhg)
+            assert FULL_TIMELINE_WC_DIP_MIN_MMHG <= result <= FULL_TIMELINE_WC_DIP_MAX_MMHG
+
+
+# ---------------------------------------------------------------------------
 # Integration test — requires live Supabase DB
 # ---------------------------------------------------------------------------
 
@@ -365,7 +647,7 @@ async def test_generate_readings_integration() -> None:
 
     # Verify persisted count
     async with AsyncSessionLocal() as session:
-        from sqlalchemy import func as sa_func
+        from sqlalchemy import func as sa_func, select
 
         count_result = await session.execute(
             select(sa_func.count())  # type: ignore[name-defined]

@@ -1,7 +1,5 @@
 """Background job processor for ARIA.
 
-What was implemented
----------------------
 WorkerProcessor: an async polling class that claims and executes queued jobs
 from the processing_jobs table.
 
@@ -16,8 +14,10 @@ from the processing_jobs table.
 Three job-type handlers are registered:
   bundle_import       — loads FHIR Bundle JSON from payload_ref path and
                         calls ingest_fhir_bundle() [fully implemented].
-  pattern_recompute   — stub; wired up once pattern_engine/ is built (Week 2).
-  briefing_generation — stub; wired up once briefing/ is built (Week 3).
+  pattern_recompute   — runs all 4 Layer 1 detectors then Layer 2 risk scorer.
+  briefing_generation — composes deterministic briefing (Layer 1) then optional
+                        LLM summary (Layer 3). Layer 3 failure is logged but
+                        does not fail the job.
 
 The session_factory parameter is injectable for unit testing — pass a mock
 factory to avoid real DB connections in tests.
@@ -28,13 +28,14 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.base import AsyncSessionLocal
+from app.models.alert import Alert
 from app.models.processing_job import ProcessingJob
 from app.utils.logging_utils import get_logger
 
@@ -46,6 +47,49 @@ _BATCH_SIZE: int = 10
 
 # Type alias for async job handler functions
 _JobHandler = Callable[[ProcessingJob, AsyncSession], Awaitable[None]]
+
+
+# ---------------------------------------------------------------------------
+# Alert helper
+# ---------------------------------------------------------------------------
+
+
+async def _upsert_alert(
+    session: AsyncSession,
+    patient_id: str,
+    alert_type: str,
+    gap_days: int | None = None,
+) -> None:
+    """Insert an alert row for today if one does not already exist.
+
+    Deduplicates by (patient_id, alert_type, date(triggered_at)) so
+    re-running pattern_recompute on the same day does not create duplicates.
+
+    Args:
+        session: Active async SQLAlchemy session.
+        patient_id: Patient to alert on.
+        alert_type: gap_urgent | gap_briefing | inertia | deterioration
+        gap_days: Only set for gap_urgent and gap_briefing alert types.
+    """
+    today = datetime.now(UTC).date()
+    existing = await session.execute(
+        select(Alert)
+        .where(
+            Alert.patient_id == patient_id,
+            Alert.alert_type == alert_type,
+            func.date(Alert.triggered_at) == today,
+        )
+        .limit(1)
+    )
+    if existing.scalar_one_or_none() is None:
+        session.add(
+            Alert(
+                patient_id=patient_id,
+                alert_type=alert_type,
+                gap_days=gap_days,
+                triggered_at=datetime.now(UTC),
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -97,14 +141,16 @@ async def _handle_bundle_import(job: ProcessingJob, session: AsyncSession) -> No
 
 
 async def _handle_pattern_recompute(job: ProcessingJob, session: AsyncSession) -> None:
-    """Run Layer 1 pattern detectors and Layer 2 risk scorer for the patient.
+    """Run all 4 Layer 1 detectors then Layer 2 risk scorer for the patient.
 
-    Execution order once Layer 1 detectors are implemented:
-      1. gap_detector.detect_gap(patient_id, session)
-      2. inertia_detector.detect_inertia(patient_id, session)
-      3. adherence_analyzer.analyze_adherence(patient_id, session)
-      4. deterioration_detector.detect_deterioration(patient_id, session)
-      5. risk_scorer.compute_risk_score(patient_id, session)  [Layer 2]
+    Execution order is strict — Layer 2 MUST run after all Layer 1 detectors.
+    Do not parallelize these calls.
+
+      1. run_gap_detector()            — days without a home BP reading
+      2. run_inertia_detector()        — sustained elevation with no med change
+      3. run_adherence_analyzer()      — adherence rate vs BP pattern
+      4. run_deterioration_detector()  — worsening systolic trend
+      5. compute_risk_score()          — Layer 2 weighted priority score
 
     Args:
         job: The ProcessingJob being executed. patient_id must be set.
@@ -113,21 +159,56 @@ async def _handle_pattern_recompute(job: ProcessingJob, session: AsyncSession) -
     Raises:
         ValueError: patient_id is missing from the job.
     """
+    from app.services.pattern_engine.adherence_analyzer import run_adherence_analyzer
+    from app.services.pattern_engine.deterioration_detector import run_deterioration_detector
+    from app.services.pattern_engine.gap_detector import run_gap_detector
+    from app.services.pattern_engine.inertia_detector import run_inertia_detector
     from app.services.pattern_engine.risk_scorer import compute_risk_score
 
     if not job.patient_id:
         raise ValueError("pattern_recompute job is missing patient_id")
 
-    # TODO(Week 2): wire Layer 1 detectors once built:
-    #   gap_detector.detect_gap(job.patient_id, session)
-    #   inertia_detector.detect_inertia(job.patient_id, session)
-    #   adherence_analyzer.analyze_adherence(job.patient_id, session)
-    #   deterioration_detector.detect_deterioration(job.patient_id, session)
-    # Layer 2 MUST run after Layer 1; do not parallelize these calls.
-    score = await compute_risk_score(job.patient_id, session)
+    pid = job.patient_id
+
+    gap = await run_gap_detector(session, pid)
+    logger.info(
+        "gap_detector: patient=%s gap_days=%s status=%s",
+        pid, gap["gap_days"], gap["status"],
+    )
+
+    inertia = await run_inertia_detector(session, pid)
+    logger.info(
+        "inertia_detector: patient=%s detected=%s avg_systolic=%s",
+        pid, inertia["inertia_detected"], inertia.get("avg_systolic"),
+    )
+
+    adherence = await run_adherence_analyzer(session, pid)
+    logger.info(
+        "adherence_analyzer: patient=%s pattern=%s adherence_pct=%s",
+        pid, adherence["pattern"], adherence.get("adherence_pct"),
+    )
+
+    deterioration = await run_deterioration_detector(session, pid)
+    logger.info(
+        "deterioration_detector: patient=%s detected=%s slope=%s",
+        pid, deterioration["deterioration"], deterioration.get("slope"),
+    )
+
+    # Write alert rows for triggered conditions (deduplicated by date)
+    if gap["status"] in ("flag", "urgent"):
+        alert_type = "gap_urgent" if gap["status"] == "urgent" else "gap_briefing"
+        await _upsert_alert(session, pid, alert_type, gap_days=int(gap["gap_days"]))
+    if inertia["inertia_detected"]:
+        await _upsert_alert(session, pid, "inertia")
+    if deterioration["deterioration"]:
+        await _upsert_alert(session, pid, "deterioration")
+    await session.flush()
+    logger.info("Alert rows written for patient=%s", pid)
+
+    score = await compute_risk_score(pid, session)
     logger.info(
         "pattern_recompute completed: patient=%s risk_score=%.2f",
-        job.patient_id,
+        pid,
         score,
     )
 
@@ -135,26 +216,64 @@ async def _handle_pattern_recompute(job: ProcessingJob, session: AsyncSession) -
 async def _handle_briefing_generation(job: ProcessingJob, session: AsyncSession) -> None:
     """Compose a deterministic briefing JSON and optional LLM summary.
 
-    Stub — wired up once briefing/ service is built (Week 3).
-    See: backend/app/services/briefing/
+    Layer execution order is strict — never reverse:
+      1. compose_briefing()      — Layer 1 deterministic JSON (9 fields)
+      2. generate_llm_summary()  — Layer 3 optional LLM readable summary
 
-    Layer execution order when implemented (STRICT — never reverse):
-      1. compose_briefing() — deterministic JSON from Layer 1 + Layer 2 outputs
-      2. Verify all 9 briefing fields are populated
-      3. summarize()        — optional LLM readable summary (Layer 3)
+    The appointment date is parsed from the idempotency_key, which is always
+    in the format ``briefing_generation:{patient_id}:{YYYY-MM-DD}``.
+
+    Layer 3 failure (e.g. missing API key, network error) is logged but does
+    NOT fail the job — Layer 1 briefing is already persisted and useful.
 
     Args:
-        job: The ProcessingJob being executed. patient_id must be set.
+        job: The ProcessingJob being executed. patient_id and idempotency_key
+            must be set.
         session: Async database session.
 
     Raises:
-        NotImplementedError: Always — stub not yet implemented.
+        ValueError: patient_id or idempotency_key is missing, or the date
+            portion of the idempotency_key cannot be parsed.
     """
-    # TODO(Week 3): replace this stub with real briefing calls.
-    raise NotImplementedError(
-        "briefing_generation handler not yet implemented — "
-        "build briefing/composer.py first (Week 3)"
+    from app.services.briefing.composer import compose_briefing
+    from app.services.briefing.summarizer import generate_llm_summary
+
+    if not job.patient_id:
+        raise ValueError("briefing_generation job is missing patient_id")
+    if not job.idempotency_key:
+        raise ValueError("briefing_generation job is missing idempotency_key")
+
+    # Parse appointment date from idempotency_key tail (always "YYYY-MM-DD")
+    date_str = job.idempotency_key[-10:]
+    try:
+        appointment_date: date = date.fromisoformat(date_str)
+    except ValueError as exc:
+        raise ValueError(
+            f"Cannot parse appointment date from idempotency_key "
+            f"{job.idempotency_key!r}: {exc}"
+        ) from exc
+
+    briefing = await compose_briefing(session, job.patient_id, appointment_date)
+    logger.info(
+        "briefing_generation Layer 1 complete: patient=%s briefing_id=%s",
+        job.patient_id,
+        briefing.briefing_id,
     )
+
+    # Layer 3 is optional — log failure but do not fail the job
+    try:
+        await generate_llm_summary(briefing, session)
+        logger.info(
+            "briefing_generation Layer 3 complete: patient=%s briefing_id=%s",
+            job.patient_id,
+            briefing.briefing_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Layer 3 LLM summary skipped for briefing=%s: %s",
+            briefing.briefing_id,
+            exc,
+        )
 
 
 # Registry of all supported job_type values → handler functions.

@@ -31,6 +31,11 @@ _ADHERENCE_WEIGHT = 0.20
 _GAP_WEIGHT = 0.15
 _COMORBIDITY_WEIGHT = 0.10
 
+# Comorbidity severity weights — ARIA-specific (not a Charlson score), subject to
+# clinician calibration via Layer 2 feedback loop once data accumulates.
+_SEVERE_PREFIXES = ("I50", "I63", "I64", "G45")  # CHF, Stroke, TIA — 25 pts each
+_MODERATE_PREFIXES = ("E11", "N18", "I25")         # Diabetes, CKD, CAD — 15 pts each
+
 
 def _clamp(value: float, minimum: float = 0.0, maximum: float = 100.0) -> float:
     """Clamp value to the inclusive minimum and maximum range."""
@@ -72,7 +77,7 @@ def _days_since_med_change(context: ClinicalContext | None) -> int:
 
 
 def _days_since_reading(last_reading_at: datetime | None, now: datetime) -> int:
-    """Return whole days since most recent reading; absent readings count as 28 days."""
+    """Return whole days since most recent reading; absent readings count as lookback days."""
     if last_reading_at is None:
         return _LOOKBACK_DAYS
 
@@ -82,11 +87,44 @@ def _days_since_reading(last_reading_at: datetime | None, now: datetime) -> int:
     return max((now - last_reading_at).days, 0)
 
 
-def _comorbidity_count(context: ClinicalContext | None) -> int:
-    """Return the number of coded problems available for the patient."""
+def _comorbidity_severity_score(context: ClinicalContext | None) -> float:
+    """Return a severity-weighted comorbidity signal clamped to 0-100.
+
+    Differentiates within the high-risk cohort rather than saturating at 5 problems.
+    CHF/Stroke/TIA: 25 pts each; Diabetes/CKD/CAD: 15 pts each; other: 5 pts each.
+    """
     if context is None or context.problem_codes is None:
-        return 0
-    return len(context.problem_codes)
+        return 0.0
+    total = 0
+    for code in context.problem_codes:
+        if any(code.startswith(p) for p in _SEVERE_PREFIXES):
+            total += 25
+        elif any(code.startswith(p) for p in _MODERATE_PREFIXES):
+            total += 15
+        else:
+            total += 5
+    return _clamp(float(total))
+
+
+def _compute_window_days(patient: Patient, context: ClinicalContext | None) -> int:
+    """Return the adaptive detection window using the same logic as Layer 1 detectors.
+
+    Falls back to _LOOKBACK_DAYS (28) when next_appointment or last_visit_date is
+    unavailable, or when the computed interval is non-positive.
+    """
+    next_appt = patient.next_appointment
+    last_visit = context.last_visit_date if context is not None else None
+
+    if next_appt is None or last_visit is None:
+        return _LOOKBACK_DAYS
+
+    next_appt_date = next_appt.date() if isinstance(next_appt, datetime) else next_appt
+    last_visit_date = last_visit.date() if isinstance(last_visit, datetime) else last_visit
+
+    interval = (next_appt_date - last_visit_date).days
+    if interval <= 0:
+        return _LOOKBACK_DAYS
+    return min(90, max(14, interval))
 
 
 async def compute_risk_score(patient_id: str, session: AsyncSession) -> float:
@@ -106,9 +144,10 @@ async def compute_risk_score(patient_id: str, session: AsyncSession) -> float:
     window_start = now - timedelta(days=_LOOKBACK_DAYS)
 
     patient_result = await session.execute(
-        select(Patient.patient_id).where(Patient.patient_id == patient_id)
+        select(Patient).where(Patient.patient_id == patient_id)
     )
-    if patient_result.scalar_one_or_none() is None:
+    patient = patient_result.scalar_one_or_none()
+    if patient is None:
         raise ValueError(f"Patient not found: {patient_id}")
 
     context_result = await session.execute(
@@ -140,6 +179,8 @@ async def compute_risk_score(patient_id: str, session: AsyncSession) -> float:
     )
     total_confirmations, confirmed_count = confirmations_result.one()
 
+    window_days = _compute_window_days(patient, context)
+
     baseline = _baseline_systolic(context)
     sig_systolic = (
         50.0
@@ -147,7 +188,7 @@ async def compute_risk_score(patient_id: str, session: AsyncSession) -> float:
         else _clamp((avg_systolic - baseline) / 30.0 * 100.0)
     )
 
-    sig_inertia = _clamp(_days_since_med_change(context) / 90.0 * 100.0)
+    sig_inertia = _clamp(_days_since_med_change(context) / 180.0 * 100.0)
 
     sig_adherence = (
         50.0
@@ -156,9 +197,9 @@ async def compute_risk_score(patient_id: str, session: AsyncSession) -> float:
     )
 
     gap_days = _days_since_reading(last_reading_at, now)
-    sig_gap = _clamp(gap_days / 14.0 * 100.0)
+    sig_gap = _clamp(gap_days / window_days * 100.0)
 
-    sig_comorbidity = _clamp(_comorbidity_count(context) / 5.0 * 100.0)
+    sig_comorbidity = _comorbidity_severity_score(context)
 
     score = _clamp(
         sig_systolic * _SYSTOLIC_WEIGHT
@@ -173,7 +214,7 @@ async def compute_risk_score(patient_id: str, session: AsyncSession) -> float:
     await session.execute(
         update(Patient)
         .where(Patient.patient_id == patient_id)
-        .values(risk_score=rounded_score)
+        .values(risk_score=rounded_score, risk_score_computed_at=now)
     )
     await session.commit()
 

@@ -3,6 +3,13 @@ backend/.env
 .env
 *.env
 
+# Virtual environments
+venv/
+.venv/
+env/
+aria-env/
+*-env/
+
 # Patient data
 data/raw/iemr/*.json
 data/fhir/bundles/*.json

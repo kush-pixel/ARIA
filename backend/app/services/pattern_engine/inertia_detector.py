@@ -1,18 +1,22 @@
 """Layer 1 – Therapeutic Inertia Detection.
 
-All four conditions must be simultaneously true for inertia to be flagged:
+All five conditions must be simultaneously true for inertia to be flagged:
 
-  1. Average systolic >= 140 over the last 28 days
-  2. At least 5 readings with systolic_avg >= 140
+  1. Average systolic >= patient_threshold over the last 28 days
+     (patient_threshold is adaptive: max(130, mean + 1.5×SD) capped at 145;
+      falls back to 140 mmHg when fewer than 3 clinic readings are available)
+  2. At least 5 readings with systolic_avg >= patient_threshold
   3. Elevated condition spans > 7 days (from first elevated reading to now)
   4. No medication change on or after the first elevated reading
+     (uses clinical_context.med_history JSONB; falls back to last_med_change)
+  5. 7-day recent average >= patient_threshold  (BP not currently declining)
 
 Fail-safe: sparse data, missing context, or any unmet condition → False.
 """
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TypedDict
 
 from sqlalchemy import select
@@ -20,6 +24,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.clinical_context import ClinicalContext
 from app.models.reading import Reading
+from app.services.pattern_engine.threshold_utils import (
+    apply_comorbidity_adjustment,
+    classify_comorbidity_concern,
+    compute_patient_threshold,
+    get_last_med_change_date,
+)
 from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -29,9 +39,10 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 _WINDOW_DAYS = 28
-_ELEVATED_THRESHOLD = 140       # systolic_avg >= this qualifies as elevated
-_MIN_ELEVATED_COUNT = 5         # minimum elevated readings required to trigger
-_MIN_DURATION_DAYS = 7          # elevated condition must persist at least this long
+_ELEVATED_THRESHOLD = 140       # FALLBACK ONLY — primary is patient-adaptive threshold
+_MIN_ELEVATED_COUNT = 5
+_MIN_DURATION_DAYS = 7
+_RECENT_SLOPE_WINDOW = 7        # days for slope direction check (condition 5)
 
 
 class InertiaResult(TypedDict):
@@ -77,9 +88,30 @@ async def run_inertia_detector(session: AsyncSession, patient_id: str) -> Inerti
     Returns:
         InertiaResult with inertia_detected flag and supporting evidence values.
     """
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     window_start = now - timedelta(days=_WINDOW_DAYS)
 
+    # --- Query 1: clinical context for threshold and medication history ---
+    cc_result = await session.execute(
+        select(ClinicalContext).where(ClinicalContext.patient_id == patient_id)
+    )
+    cc: ClinicalContext | None = cc_result.scalar_one_or_none()
+
+    historic_bp = cc.historic_bp_systolic if cc else None
+    problem_codes = cc.problem_codes if cc else None
+    med_history = cc.med_history if cc else None
+    last_med_change_field = cc.last_med_change if cc else None
+
+    patient_threshold, threshold_mode = compute_patient_threshold(historic_bp)
+    concern_state = classify_comorbidity_concern(problem_codes)
+    patient_threshold, adj_mode = apply_comorbidity_adjustment(patient_threshold, concern_state)
+
+    logger.debug(
+        "patient=%s inertia threshold=%.1f mode=%s adj=%s",
+        patient_id, patient_threshold, threshold_mode, adj_mode,
+    )
+
+    # --- Query 2: readings in 28-day window ---
     rows = await session.execute(
         select(Reading.effective_datetime, Reading.systolic_avg)
         .where(
@@ -99,13 +131,14 @@ async def run_inertia_detector(session: AsyncSession, patient_id: str) -> Inerti
     all_systolics = [s for _, s in readings]
     avg_systolic = round(sum(all_systolics) / len(all_systolics), 1)
 
-    elevated = [(dt, s) for dt, s in readings if s >= _ELEVATED_THRESHOLD]
+    elevated = [(dt, s) for dt, s in readings if s >= patient_threshold]
     elevated_count = len(elevated)
 
-    # Condition 1: average systolic >= 140
-    if avg_systolic < _ELEVATED_THRESHOLD:
+    # Condition 1: average systolic >= patient_threshold
+    if avg_systolic < patient_threshold:
         logger.debug(
-            "patient=%s inertia=False (avg_sys=%.1f below threshold)", patient_id, avg_systolic
+            "patient=%s inertia=False (avg_sys=%.1f below threshold=%.1f)",
+            patient_id, avg_systolic, patient_threshold,
         )
         return _false_result(avg_systolic, elevated_count)
 
@@ -129,30 +162,36 @@ async def run_inertia_detector(session: AsyncSession, patient_id: str) -> Inerti
         return _false_result(avg_systolic, elevated_count, duration_days)
 
     # Condition 4: no medication change on or after first elevated reading
-    cc_row = await session.execute(
-        select(ClinicalContext.last_med_change).where(
-            ClinicalContext.patient_id == patient_id
-        )
-    )
-    last_med_change: date | None = cc_row.scalar_one_or_none()
+    # Use med_history JSONB traversal; fall back to last_med_change date field.
+    last_med_date = get_last_med_change_date(med_history, last_med_change_field)
 
-    if last_med_change is not None:
+    if last_med_date is not None:
         last_med_dt = datetime(
-            last_med_change.year,
-            last_med_change.month,
-            last_med_change.day,
-            tzinfo=timezone.utc,
+            last_med_date.year, last_med_date.month, last_med_date.day, tzinfo=UTC
         )
         if last_med_dt >= first_elevated_dt:
             logger.debug(
                 "patient=%s inertia=False (med change %s on/after first elevated %s)",
-                patient_id, last_med_change, first_elevated_dt,
+                patient_id, last_med_date, first_elevated_dt,
+            )
+            return _false_result(avg_systolic, elevated_count, duration_days)
+
+    # Condition 5: slope direction — 7-day recent avg must be >= patient_threshold
+    # (If BP is declining, do not flag inertia)
+    recent_cutoff = now - timedelta(days=_RECENT_SLOPE_WINDOW)
+    recent_vals = [s for dt, s in readings if dt >= recent_cutoff]
+    if recent_vals:
+        recent_7d_avg = sum(recent_vals) / len(recent_vals)
+        if recent_7d_avg < patient_threshold:
+            logger.debug(
+                "patient=%s inertia=False (recent_7d_avg=%.1f < threshold=%.1f — BP declining)",
+                patient_id, recent_7d_avg, patient_threshold,
             )
             return _false_result(avg_systolic, elevated_count, duration_days)
 
     logger.info(
-        "patient=%s inertia=True avg_sys=%.1f elevated=%d duration=%.1f days",
-        patient_id, avg_systolic, elevated_count, duration_days,
+        "patient=%s inertia=True avg_sys=%.1f elevated=%d duration=%.1f days threshold=%.1f",
+        patient_id, avg_systolic, elevated_count, duration_days, patient_threshold,
     )
     return {
         "inertia_detected": True,

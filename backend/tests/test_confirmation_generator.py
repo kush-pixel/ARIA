@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import random
-from datetime import UTC, date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -26,8 +26,13 @@ from app.services.generator.confirmation_generator import (
     ADHERENCE_RATE_WEEKDAY,
     ADHERENCE_RATE_WEEKEND,
     CONFIRMATION_CONFIDENCE,
+    FULL_TIMELINE_ADHERENCE_FLOOR,
+    FULL_TIMELINE_BETA_ALPHA,
+    FULL_TIMELINE_BETA_BETA,
     GENERATION_WINDOW_DAYS,
+    _active_meds_at,
     generate_confirmations,
+    generate_full_timeline_confirmations,
     _determine_hours,
     BID_HOURS,
     QD_HOURS,
@@ -422,3 +427,171 @@ async def test_idempotency_via_script() -> None:
     # run_generator.py would skip insertion — simulate that here
     second_pass_inserted = 0 if existing > 0 else -1
     assert second_pass_inserted == 0, "Second pass should insert 0 records"
+
+
+# ---------------------------------------------------------------------------
+# _active_meds_at() unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestActiveMedsAt:
+    """Tests for _active_meds_at() — medication timeline parsing."""
+
+    def test_single_active_drug(self) -> None:
+        """Drug with no removal → returned as active."""
+        history = [{"name": "Lisinopril", "rxnorm": "314076", "date": "2010-01-01", "activity": None}]
+        result = _active_meds_at(history, date(2012, 1, 1))
+        assert ("Lisinopril", "314076") in result
+
+    def test_discontinued_drug_excluded(self) -> None:
+        """Drug with last activity='Discontinue' → excluded."""
+        history = [
+            {"name": "Simvastatin", "rxnorm": "36567", "date": "2010-01-01", "activity": None},
+            {"name": "Simvastatin", "rxnorm": "36567", "date": "2011-06-01", "activity": "Discontinue"},
+        ]
+        result = _active_meds_at(history, date(2012, 1, 1))
+        names = [m[0] for m in result]
+        assert "Simvastatin" not in names
+
+    def test_future_entries_excluded(self) -> None:
+        """Entries after cutoff_date are ignored."""
+        history = [{"name": "Amlodipine", "rxnorm": "329528", "date": "2015-01-01", "activity": None}]
+        result = _active_meds_at(history, date(2012, 1, 1))
+        assert result == []
+
+    def test_multiple_active_drugs(self) -> None:
+        """Multiple active drugs all returned."""
+        history = [
+            {"name": "Metoprolol", "rxnorm": "", "date": "2010-01-01", "activity": None},
+            {"name": "Lisinopril", "rxnorm": "314076", "date": "2010-01-01", "activity": "add"},
+        ]
+        result = _active_meds_at(history, date(2012, 1, 1))
+        names = [m[0] for m in result]
+        assert "Metoprolol" in names
+        assert "Lisinopril" in names
+
+    def test_re_added_drug_after_discontinue_is_active(self) -> None:
+        """Drug discontinued then re-added → active at cutoff."""
+        history = [
+            {"name": "Warfarin", "rxnorm": "855318", "date": "2010-01-01", "activity": "add"},
+            {"name": "Warfarin", "rxnorm": "855318", "date": "2011-01-01", "activity": "Discontinue"},
+            {"name": "Warfarin", "rxnorm": "855318", "date": "2012-06-01", "activity": "add"},
+        ]
+        result = _active_meds_at(history, date(2013, 1, 1))
+        names = [m[0] for m in result]
+        assert "Warfarin" in names
+
+    def test_empty_history_returns_empty(self) -> None:
+        """Empty med_history → empty list."""
+        assert _active_meds_at([], date(2012, 1, 1)) == []
+
+    def test_rxnorm_empty_string_becomes_none(self) -> None:
+        """Empty rxnorm string normalised to None."""
+        history = [{"name": "Aspirin", "rxnorm": "", "date": "2010-01-01", "activity": None}]
+        result = _active_meds_at(history, date(2012, 1, 1))
+        assert result == [("Aspirin", None)]
+
+
+# ---------------------------------------------------------------------------
+# generate_full_timeline_confirmations() unit tests
+# ---------------------------------------------------------------------------
+
+
+def _make_reading_row(dt: datetime) -> MagicMock:
+    row = MagicMock()
+    row.effective_datetime = dt
+    return row
+
+
+def _make_cc_with_history(med_history: list[dict]) -> MagicMock:
+    cc = MagicMock()
+    cc.med_history = med_history
+    cc.current_medications = []
+    cc.med_rxnorm_codes = []
+    return cc
+
+
+def _make_ft_session(clinic_rows: list, cc_obj: MagicMock, rowcount: int = 1) -> AsyncMock:
+    """Build mocked session for generate_full_timeline_confirmations.
+
+    Query order:
+      1. SELECT clinic readings (iterable)
+      2. SELECT ClinicalContext (scalar_one_or_none)
+      3+ INSERT ... ON CONFLICT DO NOTHING (rowcount)
+    """
+    clinic_result = MagicMock()
+    clinic_result.__iter__ = lambda _: iter(clinic_rows)
+
+    cc_result = MagicMock()
+    cc_result.scalar_one_or_none.return_value = cc_obj
+
+    insert_result = MagicMock()
+    insert_result.rowcount = rowcount
+
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=[clinic_result, cc_result] + [insert_result] * 5000)
+    session.commit = AsyncMock()
+    return session
+
+
+class TestFullTimelineConfirmations:
+    """Unit tests for generate_full_timeline_confirmations()."""
+
+    @pytest.mark.asyncio
+    async def test_fewer_than_two_clinic_readings_returns_zero(self) -> None:
+        """Fewer than 2 clinic readings → 0 inserted."""
+        from datetime import timezone
+        single_row = _make_reading_row(datetime(2012, 1, 1, 9, 0, tzinfo=timezone.utc))
+        cc = _make_cc_with_history([])
+        session = _make_ft_session([single_row], cc)
+        result = await generate_full_timeline_confirmations("1091", session)
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_generates_confirmations_for_active_meds(self) -> None:
+        """Two clinic readings 30 days apart with one active med → rows inserted."""
+        from datetime import timezone
+        date_a = datetime(2012, 1, 1, 9, 0, tzinfo=timezone.utc)
+        date_b = datetime(2012, 2, 1, 9, 0, tzinfo=timezone.utc)
+        history = [{"name": "Lisinopril", "rxnorm": "314076", "date": "2011-01-01", "activity": None}]
+        cc = _make_cc_with_history(history)
+        session = _make_ft_session([_make_reading_row(date_a), _make_reading_row(date_b)], cc, rowcount=1)
+        result = await generate_full_timeline_confirmations("1091", session)
+        assert result > 0
+
+    @pytest.mark.asyncio
+    async def test_adjacent_visits_produce_no_inserts(self) -> None:
+        """Clinic visits one day apart → no home monitoring window → 0 rows."""
+        from datetime import timezone
+        date_a = datetime(2012, 1, 1, 9, 0, tzinfo=timezone.utc)
+        date_b = datetime(2012, 1, 2, 9, 0, tzinfo=timezone.utc)
+        history = [{"name": "Metoprolol", "rxnorm": "", "date": "2011-01-01", "activity": None}]
+        cc = _make_cc_with_history(history)
+        session = _make_ft_session([_make_reading_row(date_a), _make_reading_row(date_b)], cc)
+        result = await generate_full_timeline_confirmations("1091", session)
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_idempotent_on_conflict(self) -> None:
+        """rowcount=0 (ON CONFLICT DO NOTHING) → total_inserted=0."""
+        from datetime import timezone
+        date_a = datetime(2012, 1, 1, 9, 0, tzinfo=timezone.utc)
+        date_b = datetime(2012, 2, 1, 9, 0, tzinfo=timezone.utc)
+        history = [{"name": "Lisinopril", "rxnorm": "314076", "date": "2011-01-01", "activity": None}]
+        cc = _make_cc_with_history(history)
+        session = _make_ft_session([_make_reading_row(date_a), _make_reading_row(date_b)], cc, rowcount=0)
+        result = await generate_full_timeline_confirmations("1091", session)
+        assert result == 0
+
+    def test_beta_distribution_mean_approx_91pct(self) -> None:
+        """Beta(α, β) draws cluster around 0.91 over many samples."""
+        import random as _random
+        import statistics as _stat
+        _random.seed(42)
+        draws = [
+            max(FULL_TIMELINE_ADHERENCE_FLOOR,
+                _random.betavariate(FULL_TIMELINE_BETA_ALPHA, FULL_TIMELINE_BETA_BETA))
+            for _ in range(2000)
+        ]
+        mean = _stat.mean(draws)
+        assert 0.85 <= mean <= 0.96

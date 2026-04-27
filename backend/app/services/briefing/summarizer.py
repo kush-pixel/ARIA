@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models.briefing import Briefing
+from app.services.briefing.llm_validator import validate_llm_output
 from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -138,16 +139,43 @@ async def generate_llm_summary(
 
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
-    message = client.messages.create(
-        model=_MODEL_VERSION,
-        max_tokens=256,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_message}],
-    )
+    # Attempt up to 2 times — retry once on validation failure before storing None
+    summary_text: str | None = None
+    for attempt in range(2):
+        message = client.messages.create(
+            model=_MODEL_VERSION,
+            max_tokens=256,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_message}],
+        )
+        candidate = message.content[0].text.strip()
 
-    summary_text = message.content[0].text.strip()
+        result = await validate_llm_output(
+            candidate,
+            briefing.llm_response,
+            str(briefing.briefing_id),
+            briefing.patient_id,
+            session,
+        )
 
-    # Merge summary into existing payload
+        if result.passed:
+            summary_text = candidate
+            break
+
+        if attempt == 0:
+            logger.warning(
+                "Layer 3 validation failed (attempt 1) briefing=%s check=%s — retrying",
+                briefing.briefing_id,
+                result.failed_check,
+            )
+        else:
+            logger.error(
+                "Layer 3 validation failed (attempt 2) briefing=%s check=%s — storing None",
+                briefing.briefing_id,
+                result.failed_check,
+            )
+
+    # Merge summary into existing payload (summary_text is None if both attempts failed)
     updated_payload = dict(briefing.llm_response)
     updated_payload["readable_summary"] = summary_text
 

@@ -83,6 +83,7 @@ def _make_patient(
 def _make_clinical_context(
     medications: list[str] | None = None,
     problems: list[str] | None = None,
+    problem_codes: list[str] | None = None,
     overdue_labs: list[str] | None = None,
     last_med_change: date | None = None,
     last_clinic_systolic: int | None = 185,
@@ -93,6 +94,7 @@ def _make_clinical_context(
     ctx.patient_id = "1091"
     ctx.current_medications = medications or ["Metoprolol 50mg BID", "Lisinopril 10mg QD", "Lasix 40mg QD"]
     ctx.active_problems = problems or ["Hypertension", "CHF", "T2DM"]
+    ctx.problem_codes = problem_codes or ["I10", "I50.9", "E11.9"]
     ctx.overdue_labs = overdue_labs or []
     ctx.last_med_change = last_med_change or date(2026, 1, 15)
     ctx.last_clinic_systolic = last_clinic_systolic
@@ -194,7 +196,7 @@ class TestBuildMedicationStatus:
         assert "Metoprolol" in result
         assert "Lisinopril" in result
         assert "2026-01-15" in result
-        assert "days ago" in result
+        assert "months ago" in result
 
     def test_medications_no_change_date(self) -> None:
         result = _build_medication_status(["Aspirin 81mg"], None)
@@ -444,12 +446,14 @@ class TestBuildDataLimitations:
         result = _build_data_limitations(readings, monitoring_active=True)
         assert "8 sessions" in result
         assert "caution" in result
+        assert "synthetic" in result
 
     def test_sufficient_readings(self) -> None:
         readings = [MagicMock() for _ in range(20)]
         result = _build_data_limitations(readings, monitoring_active=True)
         assert "20 sessions" in result
         assert "caution" not in result
+        assert "synthetic" in result
 
 
 # ---------------------------------------------------------------------------
@@ -582,7 +586,7 @@ class TestComposeBriefing:
     @pytest.mark.asyncio
     async def test_active_problems_list_in_payload(self) -> None:
         patient = _make_patient()
-        ctx = _make_clinical_context(problems=["Hypertension", "CHF"])
+        ctx = _make_clinical_context(problems=["Hypertension", "CHF"], problem_codes=["I10", "I50.9"])
         session = self._make_session(patient, ctx, [], [], [])
 
         briefing = await compose_briefing(session, "1091", date(2026, 4, 14))
