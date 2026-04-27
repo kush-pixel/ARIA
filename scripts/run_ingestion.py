@@ -1,10 +1,8 @@
 """CLI script: ingest a FHIR R4 Bundle into the ARIA PostgreSQL database.
 
 Usage (from project root, with the aria conda environment active):
-    python scripts/run_ingestion.py
     python scripts/run_ingestion.py --bundle data/fhir/bundles/1091_bundle.json
 
-Reads:   data/fhir/bundles/1091_bundle.json  (default)
 Writes:  patients, clinical_context, readings, audit_events tables in Supabase
 Needs:   DATABASE_URL set in backend/.env
 """
@@ -70,8 +68,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--bundle",
-        default=str(PROJECT_ROOT / "data" / "fhir" / "bundles" / "1091_bundle.json"),
-        help="Path to FHIR Bundle JSON file (default: data/fhir/bundles/1091_bundle.json)",
+        required=True,
+        help="Path to FHIR Bundle JSON file (e.g. data/fhir/bundles/1091_bundle.json)",
     )
     args = parser.parse_args()
 

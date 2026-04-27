@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import adherence, admin, alerts, ble_webhook, briefings, calibration, ingest, patients, readings, shadow_mode
+from app.api import adherence, admin, alerts, ble_webhook, briefings, calibration, gap_explanations, ingest, patients, readings, shadow_mode
 from app.config import settings
 from app.db.base import AsyncSessionLocal
 from app.services.worker.processor import WorkerProcessor
@@ -77,6 +77,7 @@ app.include_router(adherence.router, prefix="/api")
 app.include_router(shadow_mode.router, prefix="/api")
 app.include_router(ble_webhook.router, prefix="/api")
 app.include_router(calibration.router, prefix="/api")
+app.include_router(gap_explanations.router, prefix="/api")
 
 
 @app.get("/health", tags=["health"])

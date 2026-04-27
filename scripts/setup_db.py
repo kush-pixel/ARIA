@@ -158,6 +158,12 @@ INDEXES: list[tuple[str, str]] = [
         "CREATE INDEX IF NOT EXISTS idx_outcome_verifications_patient "
         "ON outcome_verifications (patient_id, prompted_at DESC)",
     ),
+    # Fix 41 — gap_explanations indexes
+    (
+        "idx_gap_explanations_patient",
+        "CREATE INDEX IF NOT EXISTS idx_gap_explanations_patient "
+        "ON gap_explanations (patient_id, gap_start DESC)",
+    ),
 ]
 
 

@@ -1,5 +1,40 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-26 by Sahil (Phase 5 complete — Fixes 13, 14, 24, 33, 42 L1 implemented; 388 unit tests passing, ruff clean)
+Last updated: 2026-04-27 by Yash (Phase 0 complete — Fix 11 + Fix 20 + Fix 30 in processor.py, scripts/run_scheduler.py; 392 unit tests passing, ruff clean)
+
+---
+
+## Phase 0 — Standalone Correctness Fixes — 2026-04-27
+
+**Author:** Yash Sharma
+**Files changed:** `backend/app/services/worker/processor.py`, `backend/tests/test_worker.py`, `scripts/run_scheduler.py` (new)
+**Tests:** 388 → 392 unit tests, all passing. `ruff check app/` — all checks passed.
+
+### Fix 11 — Adherence alert row never written in processor
+`_handle_pattern_recompute()` wrote alert rows for gap, inertia, and deterioration but silently dropped the adherence result. Pattern A (`adherence["pattern"] == "A"` — high BP + low adherence) never produced a row in the `alerts` table, so the adherence alert type was absent from the clinician inbox even when the detector fired. Fixed by adding `await _upsert_alert(session, pid, "adherence")` when `adherence["pattern"] == "A"`, consistent with how the other three detector results are handled.
+
+New test: `test_handle_pattern_recompute_writes_adherence_alert_for_pattern_a` — verifies an Alert with `alert_type="adherence"` is added when the adherence analyzer returns pattern A.
+
+### Fix 30 — `delivered_at` never set on alert insert
+`_upsert_alert()` in `processor.py` never set `delivered_at` — the API serializer always returned `null` for this field, making every alert appear undelivered. Fixed by capturing `datetime.now(UTC)` once into `now` and setting both `triggered_at=now` and `delivered_at=now` on the `Alert` object at insert time. The alert is "delivered" at creation — the moment the system has written the finding for the clinician to see.
+
+New tests: `test_upsert_alert_sets_delivered_at_on_insert` (verifies `delivered_at` is non-null and within 1 second of `triggered_at`), `test_upsert_alert_skips_insert_when_alert_already_exists` (deduplication still works).
+
+### Fix 20 — Briefing appointment date parsed from idempotency key
+`_handle_briefing_generation()` parsed the appointment date from the last 10 characters of the idempotency key (`job.idempotency_key[-10:]`). If the admin trigger fired on a day other than the patient's actual appointment, `briefings.appointment_date` recorded the trigger date, not the true appointment date.
+
+Fixed by replacing the string parse with a DB query: `select(Patient).where(Patient.patient_id == job.patient_id)`, then using `patient.next_appointment.date()` as the appointment date. Falls back to `date.today()` when `next_appointment` is `None` or the patient row is absent, preserving demo-mode behaviour. `Patient` model is now imported at module level in `processor.py`.
+
+Updated tests: `test_handle_briefing_generation_calls_composer_and_summarizer` and `test_handle_briefing_generation_layer3_failure_does_not_fail_job` both mock the Patient query. Replaced `test_handle_briefing_generation_raises_on_bad_date_in_key` (obsolete) with `test_handle_briefing_generation_falls_back_to_today_when_no_appointment` and `test_handle_briefing_generation_falls_back_to_today_when_patient_not_found`.
+
+### scripts/run_scheduler.py — standalone manual scheduler trigger
+The last remaining NOT STARTED item from the project scaffold. Provides a CLI equivalent to `POST /api/admin/trigger-scheduler` that can be invoked directly from the terminal without the API server running. `main()` parses an optional `--date YYYY-MM-DD` argument (defaults to today UTC). `_run()` calls `enqueue_briefing_jobs(target_date=target_date)` and prints the count of enqueued jobs. Invalid `--date` format exits with code 1.
+
+Usage:
+```
+conda activate aria
+python scripts/run_scheduler.py                    # target today UTC
+python scripts/run_scheduler.py --date 2026-05-01  # target specific date
+```
 
 ---
 
@@ -34,11 +69,12 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - backend/app/services/worker/processor.py — WorkerProcessor async polling class; polls processing_jobs every 30s; status flow queued→running→succeeded|failed; atomic claim via conditional UPDATE (rowcount guard); finished_at always written; three handlers fully wired: bundle_import (ingest_fhir_bundle), pattern_recompute (all 4 Layer 1 detectors in order then compute_risk_score), briefing_generation (compose_briefing + generate_llm_summary; Layer 3 failure caught and logged, job still succeeds); session_factory injectable for tests
 - backend/app/services/worker/scheduler.py — enqueue_briefing_jobs() finds monitoring_active patients with next_appointment::DATE = today and no existing briefing, inserts briefing_generation jobs; idempotent via ON CONFLICT DO NOTHING on idempotency_key ("briefing_generation:{patient_id}:{YYYY-MM-DD}"); mirrors spec Section 7.4 query exactly; callable from POST /api/admin/trigger-scheduler for demo mode
 - scripts/run_worker.py — CLI entry point; starts WorkerProcessor + APScheduler cron at 07:30Z daily; graceful Ctrl+C shutdown
-- backend/tests/test_worker.py — 23 unit tests passing, 1 integration test (@pytest.mark.integration, deselected in unit-only run); covers processor status transitions, claim guard, error handling, unknown job type, pattern_recompute (all 4 detectors + scorer), briefing_generation (Layer 1+3 success, Layer 3 graceful failure, missing patient_id, bad date in key), scheduler enqueue logic, idempotency key format
+- backend/tests/test_worker.py — 27 unit tests passing, 1 integration test (@pytest.mark.integration, deselected in unit-only run); covers processor status transitions, claim guard, error handling, unknown job type, pattern_recompute (all 4 detectors + scorer, adherence alert for pattern A — Fix 11), briefing_generation (Layer 1+3 success, Layer 3 graceful failure, missing patient_id, appointment date from patient record with fallback to today — Fix 20), _upsert_alert delivered_at set on insert (Fix 30), scheduler enqueue logic, idempotency key format
 - backend/tests/test_ingestion.py — 37 unit tests passing, 1 integration test (@pytest.mark.integration); covers success path, idempotency, CHF tier override, failure audit event, all summary fields, med_history stored in upsert
 - backend/app/services/generator/reading_generator.py — Patient A 28-day scenario; 47 readings (14+13+4+6+10); all clinical rules pass; 14 unit tests + 1 integration test; ruff clean
 - backend/app/services/generator/confirmation_generator.py — 28-day scenario: 1092 scheduled doses for patient 1091; 977 confirmed (89.5%), 115 missed; weekday rate 0.95, weekend rate 0.78; full-timeline (Fix 15): generate_full_timeline_confirmations() — for each inter-visit interval derives active meds from med_history JSONB via _active_meds_at(), draws per-interval adherence from Beta(α=6.5, β=0.65) mean≈91% SD≈10%, applies weekend discount, inserts with ON CONFLICT DO NOTHING on (patient_id, medication_name, scheduled_time); falls back to current_medications when med_history absent; 32 unit tests passing; ruff clean
 - scripts/run_generator.py — demo mode: independent idempotency checks for readings and confirmations; full-timeline mode (--mode full-timeline): calls generate_full_timeline_readings() then generate_full_timeline_confirmations() and prints both inserted counts + date range
+- scripts/run_scheduler.py — standalone CLI: manually triggers the 7:30 AM briefing scheduler; calls enqueue_briefing_jobs() directly; accepts optional --date YYYY-MM-DD flag (defaults to today UTC); prints count of enqueued jobs; exits with clear message when no appointment-day patients found; ruff clean
 
 - backend/app/services/briefing/composer.py — compose_briefing() async function; queries DB for 28-day readings, unacknowledged alerts, medication confirmations, clinical context; assembles all 9 deterministic briefing fields (trend_summary, medication_status, adherence_summary, active_problems, overdue_labs, visit_agenda, urgent_flags, risk_score, data_limitations); persists Briefing row + audit_event row; clinical language enforced at code level ("possible adherence concern", "treatment review warranted"); Layer 1 only — no LLM. Data quality fix 2026-04-21: visit agenda item prefix changed from "Order overdue lab:" to "Pending follow-up:" because the overdue_labs field contains a mix of actual lab orders and clinical referrals/protocols.
 - backend/app/services/briefing/summarizer.py — generate_llm_summary() async function; loads prompt from prompts/briefing_summary_prompt.md; computes SHA-256 prompt_hash; calls claude-sonnet-4-20250514 for 3-sentence readable summary; retry loop (max 2 attempts): calls validate_llm_output() after each attempt — on pass stores readable_summary, on fail retries once then stores None; populates model_version, prompt_hash, generated_at on briefing row for audit; must only run after Layer 1 is verified
@@ -92,7 +128,7 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - None
 
 ### NOT STARTED
-- scripts/run_scheduler.py — standalone manual scheduler trigger script
+- None
 
 ---
 

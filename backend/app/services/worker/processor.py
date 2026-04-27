@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.base import AsyncSessionLocal
 from app.models.alert import Alert
+from app.models.patient import Patient
 from app.models.processing_job import ProcessingJob
 from app.utils.logging_utils import get_logger
 
@@ -109,6 +110,7 @@ async def _upsert_alert(
                 alert_type=alert_type,
                 gap_days=gap_days,
                 triggered_at=now,
+                delivered_at=now,
                 off_hours=_is_off_hours(now),
             )
         )
@@ -222,6 +224,8 @@ async def _handle_pattern_recompute(job: ProcessingJob, session: AsyncSession) -
         await _upsert_alert(session, pid, alert_type, gap_days=int(gap["gap_days"]))
     if inertia["inertia_detected"]:
         await _upsert_alert(session, pid, "inertia")
+    if adherence["pattern"] == "A":
+        await _upsert_alert(session, pid, "adherence")
     if deterioration["deterioration"]:
         await _upsert_alert(session, pid, "deterioration")
     await session.flush()
@@ -242,38 +246,36 @@ async def _handle_briefing_generation(job: ProcessingJob, session: AsyncSession)
       1. compose_briefing()      — Layer 1 deterministic JSON (9 fields)
       2. generate_llm_summary()  — Layer 3 optional LLM readable summary
 
-    The appointment date is parsed from the idempotency_key, which is always
-    in the format ``briefing_generation:{patient_id}:{YYYY-MM-DD}``.
+    Appointment date is sourced from patients.next_appointment (Fix 20).
+    Falls back to today when next_appointment is None (preserves demo-mode
+    behaviour where next_appointment may not be set).
 
     Layer 3 failure (e.g. missing API key, network error) is logged but does
     NOT fail the job — Layer 1 briefing is already persisted and useful.
 
     Args:
-        job: The ProcessingJob being executed. patient_id and idempotency_key
-            must be set.
+        job: The ProcessingJob being executed. patient_id must be set.
         session: Async database session.
 
     Raises:
-        ValueError: patient_id or idempotency_key is missing, or the date
-            portion of the idempotency_key cannot be parsed.
+        ValueError: patient_id is missing from the job.
     """
     from app.services.briefing.composer import compose_briefing
     from app.services.briefing.summarizer import generate_llm_summary
 
     if not job.patient_id:
         raise ValueError("briefing_generation job is missing patient_id")
-    if not job.idempotency_key:
-        raise ValueError("briefing_generation job is missing idempotency_key")
 
-    # Parse appointment date from idempotency_key tail (always "YYYY-MM-DD")
-    date_str = job.idempotency_key[-10:]
-    try:
-        appointment_date: date = date.fromisoformat(date_str)
-    except ValueError as exc:
-        raise ValueError(
-            f"Cannot parse appointment date from idempotency_key "
-            f"{job.idempotency_key!r}: {exc}"
-        ) from exc
+    # Fix 20: source appointment date from patients.next_appointment, NOT
+    # from idempotency_key parsing (key is for deduplication only).
+    patient_row = await session.execute(
+        select(Patient).where(Patient.patient_id == job.patient_id)
+    )
+    patient = patient_row.scalar_one_or_none()
+    if patient is not None and patient.next_appointment is not None:
+        appointment_date: date = patient.next_appointment.date()
+    else:
+        appointment_date = date.today()
 
     briefing = await compose_briefing(session, job.patient_id, appointment_date)
     logger.info(
