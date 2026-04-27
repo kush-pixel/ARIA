@@ -412,7 +412,7 @@ async def test_ingest_reading_inserted(full_bundle: dict) -> None:
     # Readings go via session.execute (ON CONFLICT path), not session.add.
     added = [c.args[0] for c in session.add.call_args_list]
     readings = [obj for obj in added if isinstance(obj, Reading)]
-    assert len(readings) == 0
+    assert len(readings) == 0  # readings now go via session.execute, not session.add
 
     # The fourth execute call (index 3) should be the reading INSERT statement.
     assert session.execute.call_count >= 4
@@ -512,7 +512,7 @@ async def test_ingest_med_history_stored(full_bundle: dict) -> None:
     session = _make_mock_session()
     await ingest_fhir_bundle(full_bundle, session)
     # The ClinicalContext upsert is execute call index 2 (0=SELECT Patient,
-    # 1=INSERT Patient, 2=UPSERT ClinicalContext, 3=SELECT COUNT readings).
+    # 1=INSERT Patient, 2=UPSERT ClinicalContext, 3+=INSERT Reading per obs).
     upsert_call = session.execute.call_args_list[2]
     stmt = upsert_call.args[0]
     # Compile without literal_binds (JSONB cannot be rendered as literal).

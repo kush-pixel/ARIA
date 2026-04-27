@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import func, select, update
@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.base import AsyncSessionLocal
 from app.models.alert import Alert
+from app.models.patient import Patient
 from app.models.processing_job import ProcessingJob
 from app.utils.logging_utils import get_logger
 
@@ -43,10 +44,33 @@ logger = get_logger(__name__)
 
 # Worker tuning constants — do not hardcode in call sites
 _POLL_INTERVAL_SECONDS: int = 30
+_FALLBACK_POLL_SECONDS: int = 60   # idle timeout when LISTEN/NOTIFY is active
 _BATCH_SIZE: int = 10
+_MAX_RETRIES: int = 3
+_RETRY_BACKOFF_SECONDS: list[int] = [30, 120, 480]  # backoff for retry 1, 2, 3
+
+# Off-hours window: 6 PM (18) to 8 AM (8) local UTC, or weekends
+_OFF_HOURS_START: int = 18
+_OFF_HOURS_END: int = 8
+# Alert types eligible for escalation after 24h unacknowledged
+_ESCALATION_ALERT_TYPES: tuple[str, ...] = ("gap_urgent", "deterioration")
 
 # Type alias for async job handler functions
 _JobHandler = Callable[[ProcessingJob, AsyncSession], Awaitable[None]]
+
+
+# ---------------------------------------------------------------------------
+# Off-hours helper
+# ---------------------------------------------------------------------------
+
+
+def _is_off_hours(dt: datetime) -> bool:
+    """Return True if dt falls between 6 PM–8 AM UTC or on a weekend."""
+    hour = dt.hour
+    weekday = dt.weekday()  # 5=Saturday, 6=Sunday
+    if weekday >= 5:
+        return True
+    return hour >= _OFF_HOURS_START or hour < _OFF_HOURS_END
 
 
 # ---------------------------------------------------------------------------
@@ -82,12 +106,15 @@ async def _upsert_alert(
         .limit(1)
     )
     if existing.scalar_one_or_none() is None:
+        now = datetime.now(UTC)
         session.add(
             Alert(
                 patient_id=patient_id,
                 alert_type=alert_type,
                 gap_days=gap_days,
-                triggered_at=datetime.now(UTC),
+                triggered_at=now,
+                delivered_at=now,
+                off_hours=_is_off_hours(now),
             )
         )
 
@@ -200,10 +227,18 @@ async def _handle_pattern_recompute(job: ProcessingJob, session: AsyncSession) -
         await _upsert_alert(session, pid, alert_type, gap_days=int(gap["gap_days"]))
     if inertia["inertia_detected"]:
         await _upsert_alert(session, pid, "inertia")
+    if adherence["pattern"] == "A":
+        await _upsert_alert(session, pid, "adherence")
     if deterioration["deterioration"]:
         await _upsert_alert(session, pid, "deterioration")
     await session.flush()
     logger.info("Alert rows written for patient=%s", pid)
+
+    # Trigger mini-briefing for urgent alerts only (gap_urgent or deterioration)
+    if gap["status"] == "urgent" or deterioration["deterioration"]:
+        from app.services.briefing.composer import compose_mini_briefing
+        trigger = "gap_urgent" if gap["status"] == "urgent" else "deterioration"
+        await compose_mini_briefing(session, pid, trigger)
 
     score = await compute_risk_score(pid, session)
     logger.info(
@@ -220,38 +255,36 @@ async def _handle_briefing_generation(job: ProcessingJob, session: AsyncSession)
       1. compose_briefing()      — Layer 1 deterministic JSON (9 fields)
       2. generate_llm_summary()  — Layer 3 optional LLM readable summary
 
-    The appointment date is parsed from the idempotency_key, which is always
-    in the format ``briefing_generation:{patient_id}:{YYYY-MM-DD}``.
+    Appointment date is sourced from patients.next_appointment (Fix 20).
+    Falls back to today when next_appointment is None (preserves demo-mode
+    behaviour where next_appointment may not be set).
 
     Layer 3 failure (e.g. missing API key, network error) is logged but does
     NOT fail the job — Layer 1 briefing is already persisted and useful.
 
     Args:
-        job: The ProcessingJob being executed. patient_id and idempotency_key
-            must be set.
+        job: The ProcessingJob being executed. patient_id must be set.
         session: Async database session.
 
     Raises:
-        ValueError: patient_id or idempotency_key is missing, or the date
-            portion of the idempotency_key cannot be parsed.
+        ValueError: patient_id is missing from the job.
     """
     from app.services.briefing.composer import compose_briefing
     from app.services.briefing.summarizer import generate_llm_summary
 
     if not job.patient_id:
         raise ValueError("briefing_generation job is missing patient_id")
-    if not job.idempotency_key:
-        raise ValueError("briefing_generation job is missing idempotency_key")
 
-    # Parse appointment date from idempotency_key tail (always "YYYY-MM-DD")
-    date_str = job.idempotency_key[-10:]
-    try:
-        appointment_date: date = date.fromisoformat(date_str)
-    except ValueError as exc:
-        raise ValueError(
-            f"Cannot parse appointment date from idempotency_key "
-            f"{job.idempotency_key!r}: {exc}"
-        ) from exc
+    # Fix 20: source appointment date from patients.next_appointment, NOT
+    # from idempotency_key parsing (key is for deduplication only).
+    patient_row = await session.execute(
+        select(Patient).where(Patient.patient_id == job.patient_id)
+    )
+    patient = patient_row.scalar_one_or_none()
+    if patient is not None and patient.next_appointment is not None:
+        appointment_date: date = patient.next_appointment.date()
+    else:
+        appointment_date = date.today()
 
     briefing = await compose_briefing(session, job.patient_id, appointment_date)
     logger.info(
@@ -274,6 +307,38 @@ async def _handle_briefing_generation(job: ProcessingJob, session: AsyncSession)
             briefing.briefing_id,
             exc,
         )
+
+
+# ---------------------------------------------------------------------------
+# Periodic sweeps (run every poll cycle regardless of job queue state)
+# ---------------------------------------------------------------------------
+
+
+async def _run_escalation_sweep(session: AsyncSession) -> int:
+    """Escalate gap_urgent/deterioration alerts unacknowledged for > 24 hours.
+
+    Sets escalated=True on qualifying alerts. Runs once per poll cycle so the
+    24-hour window is checked with ~30-second precision.
+
+    Returns:
+        Number of alerts newly escalated.
+    """
+    cutoff = datetime.now(UTC) - timedelta(hours=24)
+    result = await session.execute(
+        update(Alert)
+        .where(
+            Alert.alert_type.in_(_ESCALATION_ALERT_TYPES),
+            Alert.acknowledged_at.is_(None),
+            Alert.escalated.is_(False),
+            Alert.triggered_at <= cutoff,
+        )
+        .values(escalated=True)
+    )
+    count = result.rowcount
+    if count:
+        await session.commit()
+        logger.info("escalation_sweep: %d alert(s) escalated", count)
+    return count
 
 
 # Registry of all supported job_type values → handler functions.
@@ -318,12 +383,15 @@ class WorkerProcessor:
         self,
         poll_interval: int = _POLL_INTERVAL_SECONDS,
         session_factory: async_sessionmaker[AsyncSession] | None = None,
+        listen_url: str | None = None,
     ) -> None:
         self._poll_interval = poll_interval
         self._session_factory: async_sessionmaker[AsyncSession] = (
             session_factory if session_factory is not None else AsyncSessionLocal
         )
         self._running = False
+        self._listen_url = listen_url
+        self._wake_event: asyncio.Event = asyncio.Event()
 
     async def run(self) -> None:
         """Start the polling loop. Runs until stop() is called or cancelled.
@@ -339,12 +407,28 @@ class WorkerProcessor:
             self._poll_interval,
         )
 
+        # Start LISTEN/NOTIFY listener if a raw DB URL was supplied.
+        # Best-effort: on failure the worker falls back to _FALLBACK_POLL_SECONDS polling.
+        listener_task = None
+        if self._listen_url:
+            listener_task = asyncio.create_task(self._start_listener())
+
         while self._running:
             try:
                 processed = await self._process_batch()
+                await self._run_periodic_sweeps()
                 if processed == 0:
-                    # Queue was empty — sleep before next poll
-                    await asyncio.sleep(self._poll_interval)
+                    # Wait for a NOTIFY wake-up or the 60-second fallback timeout.
+                    # This replaces the fixed 30s sleep — the worker is idle only when
+                    # the queue is genuinely empty and no notification has arrived.
+                    try:
+                        await asyncio.wait_for(
+                            self._wake_event.wait(),
+                            timeout=_FALLBACK_POLL_SECONDS,
+                        )
+                    except TimeoutError:
+                        pass
+                    self._wake_event.clear()
             except asyncio.CancelledError:
                 logger.info("WorkerProcessor cancelled — shutting down cleanly")
                 self._running = False
@@ -357,6 +441,13 @@ class WorkerProcessor:
                 )
                 await asyncio.sleep(self._poll_interval)
 
+        if listener_task is not None:
+            listener_task.cancel()
+            try:
+                await listener_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
         logger.info("WorkerProcessor stopped")
 
     def stop(self) -> None:
@@ -366,6 +457,24 @@ class WorkerProcessor:
         """
         self._running = False
         logger.info("WorkerProcessor stop requested")
+
+    async def _run_periodic_sweeps(self) -> None:
+        """Run escalation sweep and outcome checks once per poll cycle."""
+        from app.services.feedback.outcome_tracker import run_outcome_checks
+
+        try:
+            async with self._session_factory() as session:
+                await _run_escalation_sweep(session)
+        except Exception as exc:
+            logger.warning("escalation_sweep error: %s", exc)
+
+        try:
+            async with self._session_factory() as session:
+                resolved = await run_outcome_checks(session)
+                if resolved:
+                    await session.commit()
+        except Exception as exc:
+            logger.warning("outcome_checks error: %s", exc)
 
     async def _process_batch(self) -> int:
         """Fetch up to _BATCH_SIZE queued jobs and dispatch each one.
@@ -377,7 +486,11 @@ class WorkerProcessor:
         async with self._session_factory() as session:
             result = await session.execute(
                 select(ProcessingJob)
-                .where(ProcessingJob.status == "queued")
+                .where(
+                    ProcessingJob.status == "queued",
+                    (ProcessingJob.retry_after.is_(None))
+                    | (ProcessingJob.retry_after <= func.now()),
+                )
                 .order_by(ProcessingJob.queued_at.asc())
                 .limit(_BATCH_SIZE)
             )
@@ -436,7 +549,7 @@ class WorkerProcessor:
         if handler is None:
             error_msg = f"Unknown job_type {job.job_type!r} — no handler registered"
             logger.error("Job %s: %s", job.job_id, error_msg)
-            await self._mark_failed(job.job_id, error_msg)
+            await self._mark_failed_or_retry(job.job_id, error_msg, job.retry_count)
             return True
 
         try:
@@ -447,7 +560,7 @@ class WorkerProcessor:
         except Exception as exc:
             error_msg = str(exc)
             logger.error("Job %s [%s] failed: %s", job.job_id, job.job_type, error_msg)
-            await self._mark_failed(job.job_id, error_msg)
+            await self._mark_failed_or_retry(job.job_id, error_msg, job.retry_count)
 
         return True
 
@@ -468,22 +581,74 @@ class WorkerProcessor:
             )
             await session.commit()
 
-    async def _mark_failed(self, job_id: str, error_message: str) -> None:
-        """Transition a job to failed and record error_message + finished_at.
+    async def _mark_failed_or_retry(
+        self,
+        job_id: str,
+        error_message: str,
+        current_retry_count: int,
+    ) -> None:
+        """On failure, schedule a retry with exponential backoff or mark dead.
+
+        If ``current_retry_count < _MAX_RETRIES``, increments retry_count,
+        computes the next retry window using ``_RETRY_BACKOFF_SECONDS``, and
+        resets status to ``queued`` with ``retry_after`` set so the batch
+        query skips the job until the backoff expires.
+
+        If ``current_retry_count >= _MAX_RETRIES`` (all 3 retries exhausted),
+        sets status to ``dead`` so the job is no longer picked up and can be
+        inspected via ``GET /api/admin/dead-jobs``.
+
+        Backoff schedule (indexed by current_retry_count):
+          0 → 30 s, 1 → 120 s, 2 → 480 s
 
         Args:
             job_id: UUID string of the ProcessingJob to update.
-            error_message: Human-readable cause of the failure. Do not include
-                PHI — this value is stored in processing_jobs.error_message.
+            error_message: Human-readable cause of failure. No PHI.
+            current_retry_count: Value of retry_count on the job before this
+                failure (i.e. how many retries have already been scheduled).
         """
-        async with self._session_factory() as session:
-            await session.execute(
-                update(ProcessingJob)
-                .where(ProcessingJob.job_id == job_id)
-                .values(
-                    status="failed",
-                    error_message=error_message,
-                    finished_at=datetime.now(UTC),
-                )
+        now = datetime.now(UTC)
+        if current_retry_count < _MAX_RETRIES:
+            new_retry_count = current_retry_count + 1
+            backoff = _RETRY_BACKOFF_SECONDS[current_retry_count]
+            retry_after = now + timedelta(seconds=backoff)
+            logger.warning(
+                "Job %s failed (attempt %d/%d) — retrying in %ds at %s: %s",
+                job_id,
+                new_retry_count,
+                _MAX_RETRIES + 1,
+                backoff,
+                retry_after.isoformat(),
+                error_message,
             )
-            await session.commit()
+            async with self._session_factory() as session:
+                await session.execute(
+                    update(ProcessingJob)
+                    .where(ProcessingJob.job_id == job_id)
+                    .values(
+                        status="queued",
+                        retry_count=new_retry_count,
+                        retry_after=retry_after,
+                        error_message=error_message,
+                        finished_at=now,
+                    )
+                )
+                await session.commit()
+        else:
+            logger.error(
+                "Job %s exhausted all %d retries — marking dead: %s",
+                job_id,
+                _MAX_RETRIES,
+                error_message,
+            )
+            async with self._session_factory() as session:
+                await session.execute(
+                    update(ProcessingJob)
+                    .where(ProcessingJob.job_id == job_id)
+                    .values(
+                        status="dead",
+                        error_message=error_message,
+                        finished_at=now,
+                    )
+                )
+                await session.commit()

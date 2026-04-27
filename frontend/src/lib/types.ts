@@ -73,12 +73,14 @@ export interface Briefing {
 export interface Alert {
   alert_id: string
   patient_id: string
-  alert_type: 'gap_urgent' | 'gap_briefing' | 'inertia' | 'deterioration'
+  alert_type: 'gap_urgent' | 'gap_briefing' | 'inertia' | 'deterioration' | 'adherence'
   gap_days: number | null
   systolic_avg: number | null
   triggered_at: string
   delivered_at: string | null
   acknowledged_at: string | null
+  off_hours: boolean
+  escalated: boolean
 }
 
 export interface AdherenceData {

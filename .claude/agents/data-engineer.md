@@ -34,5 +34,8 @@ Key rules:
   NOT the old batch COUNT check — new clinic visits must insert alongside existing ones
 - Medication confirmations idempotency: UNIQUE on (patient_id, medication_name, scheduled_time)
 - alerts.alert_type includes "adherence" — Pattern A adherence fires an alert row
+- alert_feedback table (Fix 42 L1): clinician disposition on alert acknowledge —
+  disposition (agree_acting|agree_monitoring|disagree), reason_text, clinician_id, detector_type
+  Indexed on (patient_id, detector_type, created_at DESC) for Layer 2 calibration; (alert_id) for FK lookup
 - Filter ALLERGY_STATUS == "Active" before building AllergyIntolerance resources
 - Additive schema changes use ALTER TABLE ... ADD COLUMN IF NOT EXISTS in setup_db.py

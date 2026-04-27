@@ -206,6 +206,11 @@ async def ingest_fhir_bundle(
     the same bundle leaves the database unchanged (``patients_inserted=0``,
     ``readings_inserted=0`` on re-run).
 
+    Idempotency for readings uses per-observation ON CONFLICT DO NOTHING on
+    the unique index ``(patient_id, effective_datetime, source)``.  Each
+    Observation is inserted independently — new readings are added without
+    skipping the entire batch when any prior clinic reading already exists.
+
     Args:
         bundle: Parsed FHIR R4 Bundle dict, as produced by the iEMR adapter.
         session: SQLAlchemy async session.  The caller is responsible for

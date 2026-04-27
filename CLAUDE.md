@@ -146,7 +146,7 @@ ORM: SQLAlchemy 2.0 async
 ## TECH STACK
 
 Backend:    Python 3.11, FastAPI, SQLAlchemy 2.0 async, Pydantic v2
-Database:   PostgreSQL (Supabase) — 8 tables, asyncpg driver
+Database:   PostgreSQL (Supabase) — 12 tables, asyncpg driver
 Frontend:   Next.js 14, TypeScript strict, Tailwind CSS, recharts
 AI:         Anthropic claude-sonnet-4-20250514 (Layer 3 only)
 Background: processing_jobs table + Python polling worker
@@ -200,31 +200,40 @@ aria-platform/
         __init__.py
         base.py         <- SQLAlchemy Base, async engine, session factory
         session.py      <- get_session FastAPI dependency
-      models/           <- SQLAlchemy ORM models (8 tables)
+      models/           <- SQLAlchemy ORM models (12 tables)
         __init__.py
         patient.py
         clinical_context.py
         reading.py
         medication_confirmation.py
         alert.py
+        alert_feedback.py
         briefing.py
         processing_job.py
         audit_event.py
+        gap_explanation.py
+        calibration_rule.py
+        outcome_verification.py
       api/
         __init__.py
         patients.py     <- enrolment, patient list, tier assignment
         readings.py     <- POST /api/readings ingestion
         briefings.py    <- GET /api/briefings/{patient_id}
-        alerts.py       <- GET /api/alerts (alert inbox)
+        alerts.py       <- GET /api/alerts[?patient_id=] (alert inbox; optional filter — Fix 24)
+                          POST /api/alerts/{id}/acknowledge accepts optional disposition payload (Fix 42 L1)
         ingest.py       <- POST /api/ingest (FHIR Bundle)
         admin.py        <- POST /api/admin/trigger-scheduler (demo mode)
         shadow_mode.py  <- GET /api/shadow-mode (ARIA vs physician agreement results)
+        adherence.py    <- GET /api/adherence/{patient_id}
+        ble_webhook.py  <- POST /api/ble-webhook (BLE device readings — Fix 44)
+        calibration.py  <- GET/POST /api/admin/calibration-* (Fix 42 L2/L3)
+        gap_explanations.py <- GET/POST/DELETE /api/gap-explanations (Fix 41)
       services/
         __init__.py
         fhir/
           __init__.py
           adapter.py          <- iEMR JSON -> FHIR Bundle
-          ingestion.py        <- FHIR Bundle -> 8 PostgreSQL tables
+          ingestion.py        <- FHIR Bundle -> 12 PostgreSQL tables
           validator.py        <- validate FHIR Bundle structure
         generator/
           __init__.py
@@ -244,9 +253,13 @@ aria-platform/
           composer.py     <- deterministic briefing JSON (Layer 1 output)
           summarizer.py   <- optional LLM summary (Layer 3)
           llm_validator.py <- Layer 3 output guardrails + faithfulness validation
+        feedback/
+          __init__.py
+          calibration_engine.py <- Layer 2 dismissal aggregation + rule approval (Fix 42 L2)
+          outcome_tracker.py    <- 30-day outcome verification sweep (Fix 42 L3)
         worker/
           __init__.py
-          processor.py    <- processing_jobs polling loop (30s interval)
+          processor.py    <- processing_jobs polling loop (30s interval); escalation sweep; off-hours tagging
           scheduler.py    <- 7:30 AM briefing enqueue + manual trigger
       utils/
         __init__.py
@@ -306,7 +319,7 @@ aria-platform/
 
 ---
 
-## DATABASE — 8 TABLES (PostgreSQL via Supabase)
+## DATABASE — 12 TABLES (PostgreSQL via Supabase)
 
 ### patients
 patient_id          TEXT PRIMARY KEY        FHIR Patient.id / iEMR MED_REC_NO
@@ -398,6 +411,8 @@ systolic_avg        NUMERIC(5,1)
 triggered_at        TIMESTAMPTZ DEFAULT NOW()
 delivered_at        TIMESTAMPTZ
 acknowledged_at     TIMESTAMPTZ
+off_hours           BOOLEAN DEFAULT FALSE    TRUE if triggered between 6 PM–8 AM UTC or on weekend (Fix 45)
+escalated           BOOLEAN DEFAULT FALSE    TRUE if unacknowledged after 24h for gap_urgent/deterioration (Fix 45)
 
 ### briefings
 briefing_id         UUID PK DEFAULT gen_random_uuid()
@@ -435,6 +450,52 @@ outcome             TEXT NOT NULL           success | failure
 request_id          TEXT
 event_timestamp     TIMESTAMPTZ DEFAULT NOW()
 details             TEXT
+
+### alert_feedback (Phase 5 Fix 42 L1)
+feedback_id         UUID PK DEFAULT gen_random_uuid()
+alert_id            UUID REFERENCES alerts
+patient_id          TEXT NOT NULL
+detector_type       TEXT NOT NULL           gap | inertia | deterioration | adherence
+disposition         TEXT NOT NULL           agree_acting | agree_monitoring | disagree
+reason_text         TEXT
+clinician_id        TEXT
+created_at          TIMESTAMPTZ DEFAULT NOW()
+
+### gap_explanations (Phase 5 Fix 41)
+explanation_id      UUID PK DEFAULT gen_random_uuid()
+patient_id          TEXT NOT NULL
+gap_start           DATE NOT NULL
+gap_end             DATE NOT NULL
+reason              TEXT NOT NULL           device_issue | travel | illness | unknown | non_compliance
+notes               TEXT
+reported_by         TEXT NOT NULL DEFAULT 'clinician'   clinician | patient | system
+reporter_id         TEXT
+created_at          TIMESTAMPTZ DEFAULT NOW()
+
+### calibration_rules (Phase 7 Fix 42 L2)
+rule_id             UUID PK DEFAULT gen_random_uuid()
+patient_id          TEXT NOT NULL
+detector_type       TEXT NOT NULL           gap | inertia | deterioration | adherence
+dismissal_count     INTEGER NOT NULL
+approved_by         TEXT
+approved_at         TIMESTAMPTZ
+notes               TEXT
+active              BOOLEAN DEFAULT TRUE
+created_at          TIMESTAMPTZ DEFAULT NOW()
+
+### outcome_verifications (Phase 7 Fix 42 L3)
+verification_id     UUID PK DEFAULT gen_random_uuid()
+feedback_id         UUID REFERENCES alert_feedback
+alert_id            UUID REFERENCES alerts
+patient_id          TEXT NOT NULL
+dismissed_at        TIMESTAMPTZ NOT NULL
+check_after         TIMESTAMPTZ NOT NULL    dismissed_at + 30 days
+outcome_type        TEXT NOT NULL DEFAULT 'pending'   pending | deterioration_cluster | none
+prompted_at         TIMESTAMPTZ
+clinician_response  TEXT                    relevant | not_relevant | unsure
+responded_at        TIMESTAMPTZ
+response_notes      TEXT
+created_at          TIMESTAMPTZ DEFAULT NOW()
 
 ---
 
@@ -482,6 +543,25 @@ CREATE UNIQUE INDEX idx_readings_patient_datetime_source
 CREATE UNIQUE INDEX idx_confirmations_patient_med_scheduled
   ON medication_confirmations (patient_id, medication_name, scheduled_time);
 
+CREATE INDEX idx_alert_feedback_patient_detector
+  ON alert_feedback (patient_id, detector_type, created_at DESC);
+
+CREATE INDEX idx_alert_feedback_alert
+  ON alert_feedback (alert_id);
+
+CREATE INDEX idx_calibration_rules_patient_detector
+  ON calibration_rules (patient_id, detector_type, active);
+
+CREATE INDEX idx_outcome_verifications_pending
+  ON outcome_verifications (outcome_type, check_after)
+  WHERE outcome_type = 'pending';
+
+CREATE INDEX idx_outcome_verifications_patient
+  ON outcome_verifications (patient_id, prompted_at DESC);
+
+CREATE INDEX idx_gap_explanations_patient
+  ON gap_explanations (patient_id, gap_start DESC);
+
 -- Migrations (added after initial schema) — run via setup_db.py ADD COLUMN IF NOT EXISTS, safe to re-run:
 ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS med_history JSONB;
 ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS problem_assessments JSONB;
@@ -492,6 +572,8 @@ ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS last_clinic_spo2 NUMERIC(4
 ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS historic_spo2 NUMERIC[];
 ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS allergy_reactions TEXT[];
 ALTER TABLE patients ADD COLUMN IF NOT EXISTS risk_score_computed_at TIMESTAMPTZ;
+ALTER TABLE alerts ADD COLUMN IF NOT EXISTS off_hours BOOLEAN DEFAULT FALSE;
+ALTER TABLE alerts ADD COLUMN IF NOT EXISTS escalated BOOLEAN DEFAULT FALSE;
 
 ---
 
@@ -810,3 +892,6 @@ Testing:
   - Unit tests: fixture-based, no real patient data
   - Integration tests: @pytest.mark.integration marker
   - Run unit: python -m pytest tests/ -v -m "not integration"
+
+# SPECIAL INSTRUCTION
+Do not make any changes until you have 95% confidence in what you need to build. Ask me follow up questions until you reach that confidence.

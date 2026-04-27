@@ -66,14 +66,16 @@ def _build_trend_summary(
     last_clinic_systolic: int | None,
     last_clinic_diastolic: int | None,
     monitoring_active: bool,
+    window_days: int = 28,
 ) -> str:
-    """Describe the 28-day home BP trend in plain clinical language.
+    """Describe the home BP trend in plain clinical language.
 
     Args:
-        readings: List of Reading rows from the last 28 days, sorted ascending.
+        readings: List of Reading rows from the window, sorted ascending.
         last_clinic_systolic: Most recent in-clinic systolic from EHR.
         last_clinic_diastolic: Most recent in-clinic diastolic from EHR.
         monitoring_active: Whether the patient has home monitoring active.
+        window_days: Size of the trend window in days (default 28).
 
     Returns:
         Trend summary string for the briefing payload.
@@ -87,7 +89,7 @@ def _build_trend_summary(
         return "No home monitoring data available. EHR data only."
 
     if not readings:
-        return "Home monitoring active but no readings received in the past 28 days."
+        return f"Home monitoring active but no readings received in the past {window_days} days."
 
     systolics = [float(r.systolic_avg) for r in readings]
     diastolics = [float(r.diastolic_avg) for r in readings]
@@ -111,9 +113,73 @@ def _build_trend_summary(
             trend = " Readings have been relatively stable."
 
     return (
-        f"28-day home average: {avg_sys:.0f}/{avg_dia:.0f} mmHg "
+        f"{window_days}-day home average: {avg_sys:.0f}/{avg_dia:.0f} mmHg "
         f"({category}) based on {n} reading sessions.{trend}"
     )
+
+
+def _build_long_term_trajectory(
+    historic_bp_systolic: list[int] | None,
+    historic_bp_dates: list[str] | None,
+) -> str | None:
+    """Compute a 90-day clinic BP trajectory from the historic EHR reading arrays.
+
+    Anchors the 90-day window on the most recent clinic date (not today), so
+    patients with older EHR data still produce a meaningful trajectory.
+
+    Returns a sentence for appending to trend_summary, or None if fewer than
+    two clinic readings exist in the 90-day window.
+
+    Args:
+        historic_bp_systolic: Array of clinic systolic values (parallel to dates).
+        historic_bp_dates: ISO-8601 date strings, parallel to historic_bp_systolic.
+
+    Returns:
+        Trajectory sentence string, or None when insufficient data.
+    """
+    if not historic_bp_systolic or not historic_bp_dates:
+        return None
+    if len(historic_bp_systolic) != len(historic_bp_dates):
+        return None
+
+    # Parse all dates, dropping any unparseable entries
+    pairs: list[tuple[date, int]] = []
+    for sys_val, date_str in zip(historic_bp_systolic, historic_bp_dates, strict=False):
+        try:
+            d = date.fromisoformat(date_str)
+            pairs.append((d, sys_val))
+        except (ValueError, AttributeError):
+            continue
+
+    if not pairs:
+        return None
+
+    # Anchor window on the most recent clinic date (handles historical patients)
+    max_date = max(d for d, _ in pairs)
+    cutoff = max_date - timedelta(days=90)
+    window_pairs = [(d, s) for d, s in pairs if d >= cutoff]
+
+    if len(window_pairs) < 2:
+        return None
+
+    window_pairs.sort(key=lambda x: x[0])
+    earliest_date, earliest_sys = window_pairs[0]
+    _, latest_sys = window_pairs[-1]
+
+    month_name = earliest_date.strftime("%B")
+    delta = latest_sys - earliest_sys
+
+    if delta <= -5:
+        return (
+            f"3-month trajectory: declining from {earliest_sys} in {month_name} "
+            f"— improvement trend."
+        )
+    if delta >= 5:
+        return (
+            f"3-month trajectory: rising from {earliest_sys} in {month_name} "
+            f"— worsening trend."
+        )
+    return f"3-month trajectory: stable elevation since {month_name}."
 
 
 _PROBLEM_PRIORITY: dict[str, int] = {
@@ -409,12 +475,16 @@ def _build_visit_agenda(
 def _build_data_limitations(
     readings: list[Reading],
     monitoring_active: bool,
+    window_days: int = 28,
+    mini_briefing: bool = False,
 ) -> str:
     """Describe any data quality or availability limitations for this briefing.
 
     Args:
-        readings: 28-day reading rows (may be empty).
+        readings: Reading rows for the window period (may be empty).
         monitoring_active: Whether home monitoring is active.
+        window_days: Size of the trend window in days (default 28).
+        mini_briefing: True when this is a between-visit alert briefing.
 
     Returns:
         Data limitations string for the briefing payload.
@@ -422,18 +492,19 @@ def _build_data_limitations(
     if not monitoring_active:
         return "Patient is on EHR-only pathway. No home monitoring data available."
     if not readings:
-        return "Home monitoring active but no readings received in past 28 days."
+        return f"Home monitoring active but no readings received in past {window_days} days."
     n = len(readings)
     _synthetic_notice = (
         " Home BP readings are synthetic, generated for demonstration purposes "
         "from real iEMR baseline data."
     )
+    suffix = " This is a between-visit alert briefing — not a scheduled pre-visit summary." if mini_briefing else ""
     if n < 14:
         return (
-            f"Limited home monitoring data: {n} sessions in past 28 days. "
-            f"Trend interpretation should be treated with caution.{_synthetic_notice}"
+            f"Limited home monitoring data: {n} sessions in past {window_days} days. "
+            f"Trend interpretation should be treated with caution.{_synthetic_notice}{suffix}"
         )
-    return f"Home monitoring data available: {n} sessions over 28 days.{_synthetic_notice}"
+    return f"Home monitoring data available: {n} sessions over {window_days} days.{_synthetic_notice}{suffix}"
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
@@ -532,6 +603,12 @@ async def compose_briefing(
         last_clinic_diastolic=ctx.last_clinic_diastolic,
         monitoring_active=patient.monitoring_active,
     )
+    trajectory = _build_long_term_trajectory(
+        ctx.historic_bp_systolic,
+        ctx.historic_bp_dates,
+    )
+    if trajectory:
+        trend_summary = f"{trend_summary} {trajectory}"
     medication_status = _build_medication_status(
         current_medications=ctx.current_medications,
         last_med_change=ctx.last_med_change,
@@ -596,5 +673,176 @@ async def compose_briefing(
         briefing.briefing_id,
         patient_id,
         appointment_date,
+    )
+    return briefing
+
+
+async def compose_mini_briefing(
+    session: AsyncSession,
+    patient_id: str,
+    trigger_alert_type: str,
+) -> Briefing:
+    """Compose and persist a between-visit mini-briefing for an urgent alert.
+
+    Called when a gap_urgent or deterioration alert fires between appointments.
+    Uses a 7-day reading window instead of 28 days.  Layer 3 LLM summary is
+    never generated for mini-briefings.  appointment_date is stored as None.
+
+    Deduplicated by calendar day: if a mini-briefing already exists for this
+    patient today (appointment_date IS NULL, DATE(generated_at) = today), the
+    existing row is returned without a new insert.
+
+    Args:
+        session: Active async SQLAlchemy session.
+        patient_id: The patient's unique identifier.
+        trigger_alert_type: ``"gap_urgent"`` or ``"deterioration"``.
+
+    Returns:
+        The persisted (or pre-existing same-day) Briefing ORM instance.
+
+    Raises:
+        ValueError: If the patient or clinical context row is not found.
+    """
+    from sqlalchemy import Date as SADate
+    from sqlalchemy import cast
+
+    logger.info(
+        "Composing mini-briefing for patient=%s trigger=%s",
+        patient_id,
+        trigger_alert_type,
+    )
+
+    # ── Same-day dedup ─────────────────────────────────────────────────────────
+    today_utc = _now_utc().date()
+    existing_result = await session.execute(
+        select(Briefing).where(
+            and_(
+                Briefing.patient_id == patient_id,
+                Briefing.appointment_date.is_(None),
+                cast(Briefing.generated_at, SADate) == today_utc,
+            )
+        )
+    )
+    existing = existing_result.scalar_one_or_none()
+    if existing is not None:
+        logger.info(
+            "Mini-briefing already exists for patient=%s today — skipping duplicate",
+            patient_id,
+        )
+        return existing
+
+    # ── Fetch patient ──────────────────────────────────────────────────────────
+    patient_result = await session.execute(
+        select(Patient).where(Patient.patient_id == patient_id)
+    )
+    patient = patient_result.scalar_one_or_none()
+    if patient is None:
+        raise ValueError(f"Patient {patient_id!r} not found in database.")
+
+    # ── Fetch clinical context ─────────────────────────────────────────────────
+    ctx_result = await session.execute(
+        select(ClinicalContext).where(ClinicalContext.patient_id == patient_id)
+    )
+    ctx = ctx_result.scalar_one_or_none()
+    if ctx is None:
+        raise ValueError(f"Clinical context for patient {patient_id!r} not found.")
+
+    # ── Fetch last 7 days of readings ─────────────────────────────────────────
+    mini_window_days = 7
+    since = _now_utc() - timedelta(days=mini_window_days)
+    readings_result = await session.execute(
+        select(Reading)
+        .where(
+            and_(
+                Reading.patient_id == patient_id,
+                Reading.effective_datetime >= since,
+            )
+        )
+        .order_by(Reading.effective_datetime.asc())
+    )
+    readings = list(readings_result.scalars().all())
+
+    # ── Fetch unacknowledged alerts ───────────────────────────────────────────
+    alerts_result = await session.execute(
+        select(Alert)
+        .where(
+            and_(
+                Alert.patient_id == patient_id,
+                Alert.acknowledged_at.is_(None),
+            )
+        )
+        .order_by(Alert.triggered_at.desc())
+    )
+    alerts = list(alerts_result.scalars().all())
+
+    # ── Build payload (same 9-field structure as full briefing) ───────────────
+    urgent_flags = _build_urgent_flags(alerts)
+    trend_summary = _build_trend_summary(
+        readings=readings,
+        last_clinic_systolic=ctx.last_clinic_systolic,
+        last_clinic_diastolic=ctx.last_clinic_diastolic,
+        monitoring_active=patient.monitoring_active,
+        window_days=mini_window_days,
+    )
+    medication_status = _build_medication_status(
+        current_medications=ctx.current_medications,
+        last_med_change=ctx.last_med_change,
+    )
+    visit_agenda = _build_visit_agenda(
+        urgent_flags=urgent_flags,
+        readings=readings,
+        confirmations=[],
+        active_problems=ctx.active_problems,
+        overdue_labs=ctx.overdue_labs,
+        last_med_change=ctx.last_med_change,
+        monitoring_active=patient.monitoring_active,
+    )
+    data_limitations = _build_data_limitations(
+        readings=readings,
+        monitoring_active=patient.monitoring_active,
+        window_days=mini_window_days,
+        mini_briefing=True,
+    )
+
+    payload: dict[str, Any] = {
+        "trend_summary": trend_summary,
+        "medication_status": medication_status,
+        "adherence_summary": "",
+        "active_problems": _sort_problems(ctx.active_problems or [], ctx.problem_codes or []),
+        "overdue_labs": ctx.overdue_labs or [],
+        "visit_agenda": visit_agenda,
+        "urgent_flags": urgent_flags,
+        "risk_score": float(patient.risk_score) if patient.risk_score is not None else None,
+        "data_limitations": data_limitations,
+    }
+
+    # ── Persist briefing row (appointment_date=None marks as mini-briefing) ───
+    briefing = Briefing(
+        patient_id=patient_id,
+        appointment_date=None,
+        llm_response=payload,
+    )
+    session.add(briefing)
+    await session.flush()
+
+    # ── Write audit event ─────────────────────────────────────────────────────
+    audit = AuditEvent(
+        actor_type="system",
+        actor_id="briefing_composer",
+        patient_id=patient_id,
+        action="briefing_generation",
+        resource_type="Briefing",
+        resource_id=briefing.briefing_id,
+        outcome="success",
+        details=f"Mini-briefing for {trigger_alert_type}",
+    )
+    session.add(audit)
+    await session.commit()
+
+    logger.info(
+        "Mini-briefing %s composed for patient=%s trigger=%s",
+        briefing.briefing_id,
+        patient_id,
+        trigger_alert_type,
     )
     return briefing

@@ -25,29 +25,39 @@ class WorkerProcessor:
         self,
         poll_interval: int = 30,
         session_factory: async_sessionmaker[AsyncSession] | None = None,
+        listen_url: str | None = None,   # raw asyncpg URL for LISTEN/NOTIFY (Fix 60)
     ) -> None
 
     async def run(self) -> None      # blocking loop; handle asyncio.CancelledError for SIGINT
     def stop(self) -> None           # signals loop to stop after current batch
     async def _process_batch(self) -> int  # claims and dispatches up to _BATCH_SIZE=10 jobs
+    async def _start_listener(self) -> None  # opens asyncpg LISTEN on 'aria_jobs' channel (Fix 60)
 ```
 
 `session_factory` is injectable for unit tests — pass a mock factory to avoid real DB connections.
-Default `poll_interval=30` seconds. When queue is empty, sleeps; when jobs exist, drains without sleeping.
+`listen_url` is optional. When provided (production), opens a raw asyncpg connection and listens on
+the `aria_jobs` channel. When omitted (unit tests / no DB), the `_wake_event` never fires externally
+and the loop falls back to `_FALLBACK_POLL_SECONDS=60` timeout automatically — no listener started.
+When queue is empty, waits on `_wake_event` (woken immediately by NOTIFY or after 60s fallback).
 
 ---
 
 ## processor.py — Job Status Transitions
 
 ```
-queued → running   : claimed via conditional UPDATE WHERE status='queued'
-                     (rowcount guard prevents double-processing by concurrent workers)
+queued  → running   : claimed via conditional UPDATE WHERE status='queued'
+                      (rowcount guard prevents double-processing by concurrent workers)
 running → succeeded : handler returned without raising
-running → failed    : handler raised any exception
+running → queued    : handler failed; retry_count < 3 — backoff and re-queue
+                      retry_after set to now + backoff (30s / 120s / 480s)
+running → dead      : handler failed; retry_count >= 3 — all retries exhausted
 
 All transitions set started_at / finished_at.
-failed sets error_message with the exception repr.
+queued (re-queue) and dead both set error_message with the exception repr.
 ```
+
+`_process_batch()` skips jobs with `retry_after > now()` so backoff windows are respected.
+`dead` jobs are never re-queued automatically — inspect via `GET /api/admin/dead-jobs`.
 
 ---
 
@@ -99,8 +109,11 @@ async def _handle_briefing_generation(job: ProcessingJob, session: AsyncSession)
 ## processor.py — Key Constants
 
 ```python
-_POLL_INTERVAL_SECONDS: int = 30
+_POLL_INTERVAL_SECONDS: int = 30     # default constructor poll_interval; kept for compat
+_FALLBACK_POLL_SECONDS: int = 60     # idle timeout when LISTEN/NOTIFY active (Fix 60)
 _BATCH_SIZE: int = 10
+_MAX_RETRIES: int = 3
+_RETRY_BACKOFF_SECONDS: list[int] = [30, 120, 480]  # backoff for retry attempt 1, 2, 3
 ```
 
 Handler registry (add new job types here):
@@ -148,8 +161,10 @@ Pattern recompute key format:    `"pattern_recompute:{patient_id}:{YYYY-MM-DD}"`
 ### Three Execution Paths
 
 1. **7:30 AM UTC:** APScheduler cron calls `enqueue_briefing_jobs()`.
-2. **Midnight UTC:** APScheduler cron calls `enqueue_pattern_recompute_sweep()` for all active patients.
+2. **Midnight UTC:** APScheduler cron calls `enqueue_pattern_recompute_sweep()` for all active patients. (Fix 10)
 3. **Demo mode (on demand):** `POST /api/admin/trigger-scheduler` calls `enqueue_briefing_jobs()` directly. Guarded by `DEMO_MODE=true` in config.
+
+Both functions send `SELECT pg_notify('aria_jobs', '')` inside their INSERT transaction before `commit()` (Fix 60). The worker's `_start_listener()` wakes immediately on notification instead of waiting up to 60 seconds.
 
 ---
 
@@ -169,12 +184,14 @@ job_id              UUID PK (DB-generated)
 job_type            TEXT           "pattern_recompute" | "briefing_generation" | "bundle_import"
 patient_id          TEXT REFERENCES patients (may be NULL for bundle_import)
 idempotency_key     TEXT NOT NULL UNIQUE
-status              TEXT           "queued" | "running" | "succeeded" | "failed"
+status              TEXT           "queued" | "running" | "succeeded" | "failed" | "dead"
 payload_ref         TEXT           file path for bundle_import jobs (NULL for others)
-error_message       TEXT           set on failure
+error_message       TEXT           set on failure / retry
+retry_count         SMALLINT       NOT NULL DEFAULT 0 — incremented on each retry (Fix 40)
+retry_after         TIMESTAMPTZ    NULL = pick up immediately; set during backoff window (Fix 40)
 queued_at           TIMESTAMPTZ    DEFAULT NOW()
 started_at          TIMESTAMPTZ    set when job is claimed
-finished_at         TIMESTAMPTZ    set when job completes or fails
+finished_at         TIMESTAMPTZ    set when job completes, fails, or is re-queued for retry
 created_by          TEXT           "system" | "scheduler" | "admin"
 ```
 
@@ -197,5 +214,9 @@ created_by          TEXT           "system" | "scheduler" | "admin"
 - Do NOT expose `POST /api/admin/trigger-scheduler` without `DEMO_MODE=true` guard
 - Do NOT use bare `except:` — catch specific exception types or `Exception` with explicit logging
 - Do NOT parse appointment date from idempotency_key — query patients.next_appointment instead
-- Do NOT skip the midnight pattern_recompute sweep — risk scores and alert flags go stale without it
-- Do NOT run inertia/deterioration/adherence detectors for patients enrolled < 14 days (cold-start suppression)
+- Do NOT skip the midnight pattern_recompute sweep — risk scores and alert flags go stale without it (Fix 10)
+- Do NOT run inertia/deterioration/adherence detectors for patients enrolled < 21 days (cold-start suppression)
+- Do NOT re-queue a job after it has reached `status="dead"` — it requires manual inspection
+- Do NOT call `compose_mini_briefing()` for inertia-only alerts — only gap_urgent and deterioration qualify (Fix 46)
+- Do NOT trigger mini-briefing from `compose_briefing()` — only from `_handle_pattern_recompute()` (Fix 46)
+- Do NOT place the `pg_notify` call after `commit()` — it must be inside the same transaction as the INSERTs (Fix 60)

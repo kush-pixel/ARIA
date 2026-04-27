@@ -1,17 +1,23 @@
-"""CLI script: generate synthetic 28-day home BP readings and medication
-confirmation events for a patient.
+"""CLI script: generate synthetic home BP readings and medication confirmation
+events for a patient.
 
 Usage (from project root, with the aria conda environment active):
     python scripts/run_generator.py --patient 1091
+    python scripts/run_generator.py --patient 1091 --mode demo
+    python scripts/run_generator.py --patient 1091 --mode full-timeline
 
-Reads anchor data from clinical_context in the database, generates 47
-synthetic readings following the Patient A scenario, and generates
-medication confirmation events for all active medications over 28 days.
+Modes:
+    demo (default):     Generates 28 days of Patient A scenario readings (47
+                        readings) plus medication confirmations for the same window.
+    full-timeline:      Generates synthetic home BP readings spanning the patient's
+                        complete care timeline by interpolating between every
+                        consecutive pair of clinic readings.
 
-Each data type has an independent idempotency check:
-  - Readings are skipped if generated readings already exist (source='generated').
-  - Confirmations are skipped if simulated confirmations already exist
-    (confidence='simulated').
+Idempotency:
+  - demo readings:      Skipped if generated readings already exist (source='generated').
+  - full-timeline:      Uses ON CONFLICT DO NOTHING per reading — safe to re-run.
+  - Confirmations:      Skipped if simulated confirmations already exist
+                        (confidence='simulated').
 
 Needs: DATABASE_URL set in backend/.env
 """
@@ -40,12 +46,18 @@ from sqlalchemy import func as sa_func, select  # noqa: E402
 from app.db.base import AsyncSessionLocal  # noqa: E402
 from app.models.medication_confirmation import MedicationConfirmation  # noqa: E402
 from app.models.reading import Reading  # noqa: E402
-from app.services.generator.confirmation_generator import generate_confirmations  # noqa: E402
-from app.services.generator.reading_generator import generate_readings  # noqa: E402
+from app.services.generator.confirmation_generator import (  # noqa: E402
+    generate_confirmations,
+    generate_full_timeline_confirmations,
+)
+from app.services.generator.reading_generator import (  # noqa: E402
+    generate_full_timeline_readings,
+    generate_readings,
+)
 
 
-async def _run(patient_id: str) -> None:
-    """Generate and persist synthetic readings and confirmations for the given patient.
+async def _run_demo(patient_id: str) -> None:
+    """Generate 28-day Patient A scenario readings and medication confirmations.
 
     Each data type is checked and inserted independently so a previously
     completed readings run does not block confirmation generation.
@@ -53,6 +65,9 @@ async def _run(patient_id: str) -> None:
     Args:
         patient_id: ARIA patient identifier (e.g. ``"1091"``).
     """
+    readings: list[dict] = []
+    confs: list[dict] = []
+
     async with AsyncSessionLocal() as session:
 
         # ── Readings ─────────────────────────────────────────────────────────
@@ -98,7 +113,7 @@ async def _run(patient_id: str) -> None:
             await session.commit()
             confs_inserted = len(confs)
 
-    print(f"\nGeneration complete:")
+    print(f"\nGeneration complete (mode=demo):")
     print(f"  patient_id:               {patient_id}")
     print(f"  readings_inserted:        {readings_inserted}")
     print(f"  confirmations_inserted:   {confs_inserted}")
@@ -121,11 +136,53 @@ async def _run(patient_id: str) -> None:
         print(f"  missed:           {missed_count}")
 
 
+async def _run_full_timeline(patient_id: str) -> None:
+    """Generate synthetic home BP readings spanning the patient's full care timeline.
+
+    Iterates every consecutive pair of clinic readings and interpolates daily
+    home readings between them.  Uses ON CONFLICT DO NOTHING per reading — safe
+    to re-run.  Prints inserted count and date range on completion.
+
+    Args:
+        patient_id: ARIA patient identifier (e.g. ``"1091"``).
+    """
+    async with AsyncSessionLocal() as session:
+        readings_inserted = await generate_full_timeline_readings(patient_id, session)
+
+    async with AsyncSessionLocal() as session:
+        confs_inserted = await generate_full_timeline_confirmations(patient_id, session)
+
+    # ── Print date range of all source='generated' readings ──────────────────
+    async with AsyncSessionLocal() as session:
+        range_result = await session.execute(
+            select(
+                sa_func.min(Reading.effective_datetime),
+                sa_func.max(Reading.effective_datetime),
+            ).where(
+                Reading.patient_id == patient_id,
+                Reading.source == "generated",
+            )
+        )
+        row = range_result.one_or_none()
+        min_dt = row[0] if row else None
+        max_dt = row[1] if row else None
+
+    print(f"\nGeneration complete (mode=full-timeline):")
+    print(f"  patient_id:               {patient_id}")
+    print(f"  readings_inserted:        {readings_inserted}")
+    print(f"  confirmations_inserted:   {confs_inserted}")
+    if min_dt and max_dt:
+        print(f"  date_range_start:         {min_dt.date().isoformat()}")
+        print(f"  date_range_end:           {max_dt.date().isoformat()}")
+    else:
+        print(f"  date_range:               (no generated readings found)")
+
+
 def main() -> None:
     """Parse CLI arguments and run the generator."""
     parser = argparse.ArgumentParser(
         description=(
-            "Generate synthetic 28-day home BP readings and medication confirmation "
+            "Generate synthetic home BP readings and medication confirmation "
             "events for an ARIA patient."
         )
     )
@@ -134,10 +191,22 @@ def main() -> None:
         required=True,
         help="Patient ID to generate data for (e.g. 1091)",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["demo", "full-timeline"],
+        default="demo",
+        help=(
+            "Generation mode: 'demo' generates 28-day Patient A scenario (47 readings); "
+            "'full-timeline' interpolates between every consecutive clinic visit pair."
+        ),
+    )
     args = parser.parse_args()
 
     try:
-        asyncio.run(_run(args.patient))
+        if args.mode == "full-timeline":
+            asyncio.run(_run_full_timeline(args.patient))
+        else:
+            asyncio.run(_run_demo(args.patient))
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
