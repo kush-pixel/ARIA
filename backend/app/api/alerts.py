@@ -8,11 +8,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session
+from app.limiter import limiter
 from app.models.alert import Alert
 from app.models.audit_event import AuditEvent
 from app.utils.logging_utils import get_logger
@@ -22,7 +23,11 @@ router = APIRouter(tags=["alerts"])
 
 
 @router.get("/alerts")
-async def list_alerts(session: AsyncSession = Depends(get_session)) -> list[dict]:
+@limiter.limit("30/minute")
+async def list_alerts(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> list[dict]:
     """Return all unacknowledged alerts ordered by triggered_at DESC."""
     result = await session.execute(
         select(Alert)

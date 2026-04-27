@@ -4,17 +4,16 @@ GET  /api/readings?patient_id={id}  — home BP readings for a patient (28 days)
 POST /api/readings                  — ingest a single manual reading
 """
 
-from __future__ import annotations
-
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session
+from app.limiter import limiter
 from app.models.audit_event import AuditEvent
 from app.models.patient import Patient
 from app.models.reading import Reading
@@ -60,8 +59,10 @@ async def list_readings(
 
 
 @router.post("/readings", status_code=201)
+@limiter.limit("60/minute")
 async def create_reading(
-    payload: ReadingIn,
+    request: Request,
+    payload: ReadingIn = Body(...),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     """Ingest a single manually submitted home BP reading."""

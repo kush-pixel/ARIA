@@ -11,7 +11,7 @@ because asyncpg has known issues with DATE[] arrays in async context.
 
 from datetime import date, datetime
 
-from sqlalchemy import Date, DateTime, SmallInteger, String, func
+from sqlalchemy import Date, DateTime, Numeric, SmallInteger, String, func
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -39,8 +39,10 @@ class ClinicalContext(Base):
         ARRAY(String), nullable=True
     )
     med_history: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=None)
+    problem_assessments: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=None)
     last_med_change: Mapped[date | None] = mapped_column(Date, nullable=True)
     allergies: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
+    allergy_reactions: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
     last_visit_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     last_clinic_systolic: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     last_clinic_diastolic: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
@@ -53,6 +55,11 @@ class ClinicalContext(Base):
     )
     overdue_labs: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
     social_context: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_clinic_pulse: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    last_clinic_weight_kg: Mapped[float | None] = mapped_column(Numeric(5, 1), nullable=True)
+    last_clinic_spo2: Mapped[float | None] = mapped_column(Numeric(4, 1), nullable=True)
+    historic_spo2: Mapped[list[float] | None] = mapped_column(ARRAY(Numeric), nullable=True)
+    recent_labs: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=None)
     last_updated: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, server_default=func.now()
     )

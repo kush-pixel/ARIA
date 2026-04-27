@@ -33,9 +33,16 @@ from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
 
-# LOINC component codes used in FHIR Observation BP panels (BP panel = 55284-4)
+# LOINC codes for BP panel components
 _LOINC_SYSTOLIC = "8480-6"
 _LOINC_DIASTOLIC = "8462-4"
+
+# Top-level LOINC codes used to identify Observation type in the bundle
+_LOINC_BP_PANEL = "55284-4"   # Blood pressure panel
+_LOINC_PULSE    = "8867-4"    # Heart rate (Fix 6)
+_LOINC_WEIGHT   = "29463-7"   # Body weight in kg (Fix 6)
+_LOINC_SPO2     = "59408-5"   # Oxygen saturation (Fix 6)
+_LOINC_TEMP     = "8310-5"    # Body temperature (Fix 6)
 
 # Non-standard extension key for patient age (set by adapter.py, consumed here).
 # Both files must reference this same key string.
@@ -149,6 +156,36 @@ def _parse_authored_on(date_str: str | None) -> date | None:
         return datetime.fromisoformat(date_str).date()
     except ValueError:
         logger.warning("Cannot parse authoredOn date %r", date_str)
+        return None
+
+
+def _get_obs_loinc(obs: dict[str, Any]) -> str:
+    """Return the top-level LOINC code of a FHIR Observation resource.
+
+    Args:
+        obs: FHIR Observation resource dict.
+
+    Returns:
+        LOINC code string, or ``""`` if absent.
+    """
+    coding = obs.get("code", {}).get("coding", [])
+    return coding[0].get("code", "") if coding else ""
+
+
+def _get_obs_scalar_value(obs: dict[str, Any]) -> float | None:
+    """Extract the numeric value from a scalar FHIR Observation (``valueQuantity``).
+
+    Args:
+        obs: FHIR Observation resource dict with a ``valueQuantity`` element.
+
+    Returns:
+        Float value, or ``None`` if absent or non-numeric.
+    """
+    vq = obs.get("valueQuantity", {})
+    v = vq.get("value")
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
         return None
 
 
@@ -309,6 +346,21 @@ async def ingest_fhir_bundle(
         # Non-FHIR metadata injected by adapter.py — full medication timeline.
         med_history: list[dict] = bundle.get("_aria_med_history") or []
 
+        # Physician assessment texts per visit per problem (Fix 7).
+        problem_assessments: list[dict] = bundle.get("_aria_problem_assessments") or []
+
+        # All iEMR ADMIT_DATE values for last_visit_date (Fix 12).
+        visit_dates_raw: list[str] = bundle.get("_aria_visit_dates") or []
+        if visit_dates_raw:
+            last_visit_date: date | None = max(
+                date.fromisoformat(d) for d in visit_dates_raw
+            )
+        else:
+            last_visit_date = None  # populated from obs loop fallback below
+
+        # Social history free text (Fix 8).
+        social_context: str | None = bundle.get("_aria_social_context")
+
         # Sort Observations by effectiveDateTime (ASC) for historical arrays.
         observations = groups.get("Observation", [])
         obs_with_dt: list[tuple[datetime, dict[str, Any]]] = []
@@ -331,17 +383,69 @@ async def ingest_fhir_bundle(
         historic_bp_dates: list[str] = []
         last_clinic_systolic: int | None = None
         last_clinic_diastolic: int | None = None
-        last_visit_date: date | None = None
+        # Scalar vital accumulators (Fix 6) — ASC sort means last value wins
+        last_clinic_pulse: int | None = None
+        last_clinic_weight_kg: float | None = None
+        last_clinic_spo2: float | None = None
+        historic_spo2: list[float] = []
 
         for eff_dt, obs in obs_with_dt:
-            sys_val, dia_val = _extract_obs_components(obs)
-            if sys_val is not None:
-                historic_bp_systolic.append(sys_val)
-                historic_bp_dates.append(eff_dt.date().isoformat())
-                last_clinic_systolic = sys_val
-            if dia_val is not None:
-                last_clinic_diastolic = dia_val
-            last_visit_date = eff_dt.date()
+            loinc = _get_obs_loinc(obs)
+
+            if loinc == _LOINC_BP_PANEL:
+                sys_val, dia_val = _extract_obs_components(obs)
+                if sys_val is not None:
+                    historic_bp_systolic.append(sys_val)
+                    historic_bp_dates.append(eff_dt.date().isoformat())
+                    last_clinic_systolic = sys_val
+                if dia_val is not None:
+                    last_clinic_diastolic = dia_val
+                # Fallback: set last_visit_date from BP obs when _aria_visit_dates absent
+                if not visit_dates_raw:
+                    last_visit_date = eff_dt.date()
+
+            elif loinc == _LOINC_PULSE:
+                v = _get_obs_scalar_value(obs)
+                if v is not None:
+                    last_clinic_pulse = int(v)
+
+            elif loinc == _LOINC_WEIGHT:
+                v = _get_obs_scalar_value(obs)
+                if v is not None:
+                    last_clinic_weight_kg = round(v, 1)
+
+            elif loinc == _LOINC_SPO2:
+                v = _get_obs_scalar_value(obs)
+                if v is not None:
+                    last_clinic_spo2 = round(v, 1)
+                    historic_spo2.append(round(v, 1))
+
+        # Allergy reactions parallel array (Fix 9)
+        allergy_reactions: list[str] = []
+        for a in allergy_resources:
+            reactions = a.get("reaction", [])
+            if reactions:
+                manifests = reactions[0].get("manifestation", [])
+                reaction_text = manifests[0].get("text", "") if manifests else ""
+            else:
+                reaction_text = ""
+            allergy_reactions.append(reaction_text)
+
+        # Lab values skeleton (Fix 16) — always None for patient 1091 since iEMR
+        # data does not contain structured LOINC lab observations.  Column is
+        # ready for when structured lab data becomes available via the bundle.
+        recent_labs_raw: list[dict] = bundle.get("_aria_recent_labs") or []
+        recent_labs: dict | None = None
+        if recent_labs_raw:
+            recent_labs = {
+                entry["loinc_code"]: {
+                    "value": entry.get("value"),
+                    "unit": entry.get("unit"),
+                    "date": entry.get("date"),
+                }
+                for entry in recent_labs_raw
+                if entry.get("loinc_code")
+            }
 
         cc_values: dict[str, Any] = {
             "patient_id": patient_id,
@@ -350,14 +454,22 @@ async def ingest_fhir_bundle(
             "current_medications": current_medications or None,
             "med_rxnorm_codes": med_rxnorm_codes or None,
             "med_history": med_history or None,
+            "problem_assessments": problem_assessments or None,
             "last_med_change": last_med_change,
             "allergies": allergies or None,
+            "allergy_reactions": allergy_reactions or None,
+            "social_context": social_context,
             "overdue_labs": overdue_labs or None,
             "last_visit_date": last_visit_date,
             "last_clinic_systolic": last_clinic_systolic,
             "last_clinic_diastolic": last_clinic_diastolic,
             "historic_bp_systolic": historic_bp_systolic or None,
             "historic_bp_dates": historic_bp_dates or None,
+            "last_clinic_pulse": last_clinic_pulse,
+            "last_clinic_weight_kg": last_clinic_weight_kg,
+            "last_clinic_spo2": last_clinic_spo2,
+            "historic_spo2": historic_spo2 or None,
+            "recent_labs": recent_labs,
         }
 
         set_on_conflict = {k: v for k, v in cc_values.items() if k != "patient_id"}
@@ -375,32 +487,28 @@ async def ingest_fhir_bundle(
         logger.info("ClinicalContext upserted for patient %s", patient_id)
 
         # ------------------------------------------------------------------ #
-        # Step 3 — Readings (clinic Observations)                              #
+        # Step 3 — Readings (BP clinic Observations only)                      #
         # ------------------------------------------------------------------ #
-        # Batch-level idempotency: if any clinic readings already exist for
-        # this patient, skip all inserts.  This avoids duplicates without
-        # requiring a unique constraint on the readings table.
-        count_result = await session.execute(
-            select(sa_func.count())
-            .select_from(Reading)
-            .where(
-                Reading.patient_id == patient_id,
-                Reading.source == "clinic",
-            )
-        )
-        clinic_count: int = count_result.scalar() or 0
-
+        # Only BP panel Observations (LOINC 55284-4) become readings rows.
+        # Scalar vital Observations (pulse, weight, SpO2, temp) are stored in
+        # clinical_context columns and must not be inserted here.
+        # Per-observation idempotency: ON CONFLICT DO NOTHING on
+        # (patient_id, effective_datetime, source).
         readings_inserted = 0
-        if clinic_count == 0:
-            for eff_dt, obs in obs_with_dt:
-                sys_val, dia_val = _extract_obs_components(obs)
-                if sys_val is None or dia_val is None:
-                    logger.warning(
-                        "Skipping Observation at %s — missing systolic or diastolic component",
-                        eff_dt.isoformat(),
-                    )
-                    continue
-                reading = Reading(
+        bp_obs_with_dt = [
+            (dt, o) for dt, o in obs_with_dt if _get_obs_loinc(o) == _LOINC_BP_PANEL
+        ]
+        for eff_dt, obs in bp_obs_with_dt:
+            sys_val, dia_val = _extract_obs_components(obs)
+            if sys_val is None or dia_val is None:
+                logger.warning(
+                    "Skipping Observation at %s — missing systolic or diastolic component",
+                    eff_dt.isoformat(),
+                )
+                continue
+            stmt = (
+                pg_insert(Reading)
+                .values(
                     patient_id=patient_id,
                     systolic_1=sys_val,
                     diastolic_1=dia_val,
@@ -412,14 +520,12 @@ async def ingest_fhir_bundle(
                     submitted_by="clinic",
                     consent_version="1.0",
                 )
-                session.add(reading)
-                readings_inserted += 1
-        else:
-            logger.info(
-                "Skipping readings insert for patient %s — %d clinic readings already exist",
-                patient_id,
-                clinic_count,
+                .on_conflict_do_nothing(
+                    index_elements=["patient_id", "effective_datetime", "source"]
+                )
             )
+            result = await session.execute(stmt)
+            readings_inserted += result.rowcount
 
         summary["readings_inserted"] = readings_inserted
 

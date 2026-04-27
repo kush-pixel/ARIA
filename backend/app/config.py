@@ -29,5 +29,23 @@ class Settings(BaseSettings):
     demo_mode: bool = Field(False, description="Demo mode: enables admin trigger endpoints")
     briefing_trigger: str = Field("07:30", description="Daily briefing generation time HH:MM UTC")
 
+    # Security (Fix 35, 36)
+    patient_pseudonym_key: str = Field(
+        "",
+        description=(
+            "HMAC-SHA256 secret for patient ID pseudonymization (Fix 35). "
+            "When non-empty, MED_REC_NO is replaced with a 16-char hex digest "
+            "at adapter time. Activating requires clearing the DB and re-ingesting."
+        ),
+    )
+    jwt_expiry_minutes: int = Field(
+        60,
+        description=(
+            "JWT access token lifetime in minutes (Fix 36). "
+            "Must not exceed 60 — a leaked 7-day token gives 168× more exposure "
+            "than a 1-hour token."
+        ),
+    )
+
 
 settings = Settings()
