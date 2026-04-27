@@ -58,7 +58,7 @@ Audit:
   [ ] alert_acknowledged -> audit_events
 
 Database:
-  [ ] All 15 CREATE INDEX + 9 ALTER TABLE migrations in setup_db.py (includes risk_score_computed_at + alert_feedback indexes)
+  [ ] All 19 CREATE INDEX + 10 ALTER TABLE migrations in setup_db.py
   [ ] TIMESTAMPTZ not TIMESTAMP
   [ ] risk_score column exists on patients
   [ ] risk_score_computed_at column exists on patients (Fix 61)
@@ -66,7 +66,11 @@ Database:
   [ ] UNIQUE INDEX on readings (patient_id, effective_datetime, source)
   [ ] UNIQUE INDEX on medication_confirmations (patient_id, medication_name, scheduled_time)
   [ ] alerts.alert_type accepts "adherence"
+  [ ] alerts.off_hours BOOLEAN (Fix 45); alerts.escalated BOOLEAN (Fix 45)
   [ ] alert_feedback table exists with FK to alerts (Fix 42 L1)
+  [ ] gap_explanations table exists (Fix 41)
+  [ ] calibration_rules table exists (Fix 42 L2)
+  [ ] outcome_verifications table exists with FK to alert_feedback (Fix 42 L3)
   [ ] _aria_med_history, _aria_problem_assessments, _aria_visit_dates consumed in ingestion.py
   [ ] Clinic readings use session="ad_hoc" source="clinic"
   [ ] Ingestion idempotency: per-observation ON CONFLICT DO NOTHING (not batch COUNT)
@@ -76,6 +80,9 @@ Worker:
   [ ] Appointment date from patients.next_appointment (not idempotency_key parsing)
   [ ] Cold-start suppression: skip inertia/deterioration/adherence if enrolled < 21 days (NOT 14)
   [ ] delivered_at set on alert insert (not left NULL)
+  [ ] off_hours tagged at alert insert via _is_off_hours(triggered_at) (Fix 45)
+  [ ] _run_escalation_sweep() called every poll cycle (Fix 45)
+  [ ] run_outcome_checks() called every poll cycle (Fix 42 L3)
   [ ] risk_score_computed_at written on every risk score update
 
 Code:

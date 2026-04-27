@@ -1,5 +1,5 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-27 by Yash (Phase 0 complete — Fix 11 + Fix 20 + Fix 30 in processor.py, scripts/run_scheduler.py; 392 unit tests passing, ruff clean)
+Last updated: 2026-04-27 by Sahil (Phase 5 complete + Phase 7 complete except Fix 43; 426 unit tests passing, ruff clean)
 
 ---
 
@@ -56,8 +56,8 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - backend/app/config.py — Pydantic v2 Settings, 7 fields (DATABASE_URL, ANTHROPIC_API_KEY, APP_SECRET_KEY, APP_ENV, APP_DEBUG, DEMO_MODE, BRIEFING_TRIGGER)
 - backend/app/db/base.py — async engine (auto-converts postgresql:// → postgresql+asyncpg://), AsyncSessionLocal factory, DeclarativeBase
 - backend/app/db/session.py — get_session() FastAPI dependency
-- backend/app/models/ — all 8 ORM models (patients, clinical_context, readings, medication_confirmations, alerts, briefings, processing_jobs, audit_events); patients model now includes risk_score_computed_at TIMESTAMPTZ column (Fix 61)
-- scripts/setup_db.py — creates 8 tables + 13 indexes/migrations; safe to re-run (IF NOT EXISTS / ADD COLUMN IF NOT EXISTS); includes risk_score_computed_at migration (Fix 61)
+- backend/app/models/ — all 12 ORM models (patients, clinical_context, readings, medication_confirmations, alerts, alert_feedback, briefings, processing_jobs, audit_events, gap_explanations, calibration_rules, outcome_verifications); patients model includes risk_score_computed_at TIMESTAMPTZ (Fix 61); alerts model includes off_hours + escalated BOOLEAN (Fix 45)
+- scripts/setup_db.py — creates 12 tables + 19 indexes/migrations; safe to re-run (IF NOT EXISTS / ADD COLUMN IF NOT EXISTS); includes all Phase 5 and Phase 7 tables, off_hours/escalated column migrations (Fix 45)
 - backend/app/utils/logging_utils.py — get_logger(name) returns a named stdlib Logger with ISO timestamp format; used by all backend modules
 - backend/app/services/fhir/adapter.py — iEMR JSON → FHIR R4 Bundle; 6 resource types (Patient, Condition, MedicationRequest, Observation, AllergyIntolerance, ServiceRequest); most-recent-wins deduplication keyed by iEMR code for all types except Observation; VITALS_DATETIME used for effectiveDateTime (never ADMIT_DATE); non-standard `_age` extension passes age to ingestion layer; _build_med_history() collects full medication timeline (104 events for patient 1091) deduplicated by (name, date, activity), passed as _aria_med_history metadata on bundle dict. Data quality fixes applied 2026-04-21: (1) Z00.xx encounter-type codes filtered from Conditions, (2) discontinued medications excluded via sentinel tombstone + cross-MED_CODE name propagation, (3) supplies/tests/device scripts filtered from MedicationRequests via _NON_DRUG_MARKERS/_NON_DRUG_EXACT, (4) secondary name-level deduplication collapses same drug appearing under multiple MED_CODEs, (5) non-clinical PLAN items (physician names, redacted vendors, patient education) filtered from ServiceRequests. Patient 1091: medications reduced from 38 → 14 (all actual drugs); conditions reduced from 18 → 17 (PREVENTIVE CARE removed); follow-up items reduced from 10 → 6 (admin/education entries removed).
 - backend/tests/test_fhir_adapter.py — 42 tests (41 unit + 1 integration); all passing; includes TestBuildMedHistory (7 cases), test_bundle_contains_aria_med_history_key, and 6 new tests covering Z00.xx filtering, discontinued medication exclusion, cross-MED_CODE discontinue propagation, and non-clinical service request filtering
@@ -112,6 +112,7 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - backend/app/api/admin.py — POST /api/admin/trigger-scheduler; guarded by DEMO_MODE=true
 - backend/app/api/adherence.py — GET /api/adherence/{patient_id}; per-medication adherence breakdown from medication_confirmations (28-day window); matches frontend AdherenceData type exactly
 - backend/tests/test_api.py — 24 unit tests (all passing); covers all 11 API routes; uses httpx.AsyncClient + mocked sessions; no live DB required
+- backend/tests/test_phase5_phase7.py — 34 unit tests (all passing); covers Fix 41 gap explanations, Fix 44 BLE webhook, Fix 45 off-hours tagging, Fix 42 L2 calibration engine + admin API, Fix 42 L3 outcome verification tracking + admin API
 - backend/app/api/shadow_mode.py — GET /api/shadow-mode/results; serves pre-computed shadow mode results from data/shadow_mode_results.json; no DB dependency; returns 404 if results not yet generated
 - scripts/run_shadow_mode.py — shadow mode validation script; **COMPLETE, PASSING at 94.3%** (see Shadow Mode section below); Phase 5 Fix 13: PATIENT_ID/IEMR_PATH/OUTPUT_PATH replaced with `--patient`, `--iemr`, `--output` argparse flags (defaults preserve patient 1091 behaviour); Phase 5 Fix 33: output JSON now includes `agreement_ci_95_lower_pct`, `agreement_ci_95_upper_pct`, `fully_independent_eval_points`, `overlapping_eval_points`, and `detector_breakdown` per-detector FP/FN counts; `_wilson_ci()` and `_per_detector_breakdown()` helpers added
 - scripts/run_pipeline_tests.py — end-to-end ARIA pipeline test (Phase 5 Fix 14); accepts `--patients` comma-separated list (default `1091,1015269`); per-patient tests refactored to take patient_id parameter; pre-flight `_patient_exists()` skips missing patients with clear FAIL record; exits 0 only when all tests pass
@@ -157,11 +158,19 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 | GET /api/readings?patient_id= | DONE | 28-day window |
 | POST /api/readings | DONE | manual entry |
 | GET /api/alerts | DONE | unacknowledged only; optional ?patient_id= filter (Fix 24) |
-| POST /api/alerts/{id}/acknowledge | DONE | writes audit; optional disposition payload writes alert_feedback (Fix 42 L1) |
+| POST /api/alerts/{id}/acknowledge | DONE | writes audit; optional disposition payload writes alert_feedback (Fix 42 L1); disagree → schedules outcome verification |
 | GET /api/adherence/{patient_id} | DONE | per-medication breakdown |
 | POST /api/ingest | DONE | validates then ingests |
 | POST /api/admin/trigger-scheduler | DONE | DEMO_MODE guard |
 | GET /api/shadow-mode/results | DONE | serves pre-computed JSON results file |
+| POST /api/ble-webhook | DONE | BLE device readings, source=ble_auto, idempotent (Fix 44) |
+| GET /api/gap-explanations | DONE | list explanations for patient (Fix 41) |
+| POST /api/gap-explanations | DONE | record gap explanation (Fix 41) |
+| DELETE /api/gap-explanations/{id} | DONE | remove explanation (Fix 41) |
+| GET /api/admin/calibration-recommendations | DONE | 4+ dismissal pairs (Fix 42 L2) |
+| POST /api/admin/calibration-rules | DONE | approve calibration rule (Fix 42 L2) |
+| GET /api/admin/outcome-verifications | DONE | due retrospective prompts (Fix 42 L3) |
+| POST /api/admin/outcome-verifications/{id}/respond | DONE | clinician response (Fix 42 L3) |
 | GET /health | DONE | |
 
 ---
@@ -357,11 +366,38 @@ Key functions:
 - **Signal 3 (absolute gate):** `recent_avg >= patient_threshold` added as third required signal; prevents firing when a normotensive patient rises from e.g. 115 → 119 mmHg
 - **Step-change sub-detector (OR gate):** `recent_7d_avg − old_7d_avg ≥ 15 mmHg AND recent_7d_avg ≥ patient_threshold` flags deterioration regardless of linear slope direction; catches acute BP step-changes that least-squares regression smooths over; only compares weeks that have data (if 14-day window, old_7d is empty → sub-detector never fires on existing tests)
 - `_least_squares_slope` kept as module-level alias (`= compute_slope`) for backward compat with test imports
+
+---
+
+## Phase 7 — New Clinical Features — 2026-04-27
+
+**Author:** Sahil Khalsa
+**Files changed (new):** `backend/app/api/ble_webhook.py`, `backend/app/api/calibration.py`, `backend/app/api/gap_explanations.py`, `backend/app/models/alert_feedback.py`, `backend/app/models/calibration_rule.py`, `backend/app/models/gap_explanation.py`, `backend/app/models/outcome_verification.py`, `backend/app/services/feedback/__init__.py`, `backend/app/services/feedback/calibration_engine.py`, `backend/app/services/feedback/outcome_tracker.py`, `backend/tests/test_phase5_phase7.py`
+**Files changed (modified):** `backend/app/models/alert.py`, `backend/app/models/__init__.py` (12 models), `backend/app/services/worker/processor.py`, `backend/app/api/alerts.py`, `backend/app/main.py`, `scripts/setup_db.py`, `frontend/src/lib/types.ts`, `frontend/src/components/dashboard/AlertInbox.tsx`
+**Tests:** 392 → 426 unit tests (34 new in test_phase5_phase7.py), all passing. `ruff check app/` — all checks passed.
+
+### Fix 44 — BLE webhook
+`POST /api/ble-webhook` accepts vendor-normalised BLE BP readings. Inserts with `source='ble_auto'`, ON CONFLICT DO NOTHING. Writes `reading_ingested` audit event only on insert. Returns `inserted: bool`.
+
+### Fix 45 — Off-hours tagging + escalation sweep
+`_is_off_hours(dt)` tags alerts generated between 6 PM–8 AM UTC or on weekends. `_run_escalation_sweep()` sets `escalated=True` on gap_urgent/deterioration alerts unacknowledged for 24h. `_run_periodic_sweeps()` runs both every poll cycle. Frontend AlertInbox shows red border for escalated, purple badge for off_hours.
+
+### Fix 42 L2 — Calibration recommendations
+`calibration_engine.py`: `get_calibration_recommendations()` surfaces patient/detector pairs with 4+ dismissals and no active rule. `approve_calibration_rule()` deactivates prior active rule and creates new one. Admin API: GET/POST `/api/admin/calibration-recommendations` and `/api/admin/calibration-rules`.
+
+### Fix 42 L3 — Outcome verification (30-day retrospective)
+`outcome_tracker.py`: `schedule_outcome_check()` creates OutcomeVerification at dismiss time with check_after=+30d. `run_outcome_checks()` resolves due verifications by checking for concerning alerts, sets outcome_type. Admin API: GET/POST `/api/admin/outcome-verifications` and `/api/admin/outcome-verifications/{id}/respond`.
+
+### Fix 41 — Gap explanations
+`GET/POST/DELETE /api/gap-explanations`. Accepts reasons: device_issue|travel|illness|unknown|non_compliance. Validates gap_end >= gap_start. New `gap_explanations` table.
+
+---
+
 ## Phase 5 — API and Alert Improvements — 2026-04-26
 
 **Author:** Sahil Khalsa
 **Files changed:** `backend/app/api/alerts.py`, `backend/app/models/alert_feedback.py` (new), `backend/app/models/__init__.py`, `scripts/setup_db.py`, `scripts/run_shadow_mode.py`, `scripts/run_pipeline_tests.py`, `backend/tests/test_api.py`
-**Tests:** 384 → 388 unit tests, all passing. `ruff check app/` — all checks passed.
+**Tests:** 384 → 392 unit tests, all passing. `ruff check app/` — all checks passed.
 
 ### Fix 24 — Alert API patient_id filter
 `GET /api/alerts` now accepts an optional `?patient_id=` query parameter. When supplied, results are restricted to a single patient (`Alert.patient_id == patient_id`); when omitted, the original system-wide inbox behaviour is preserved. Required once a multi-patient panel is loaded — without it the inbox is a firehose with no scope.

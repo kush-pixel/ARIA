@@ -2,12 +2,13 @@
 Working on models, database setup, or migrations.
 
 Rules:
-- 9 tables: patients (with risk_score + risk_score_computed_at), clinical_context, readings,
-  medication_confirmations, alerts, alert_feedback, briefings, processing_jobs, audit_events
+- 12 tables: patients (with risk_score + risk_score_computed_at), clinical_context, readings,
+  medication_confirmations, alerts (with off_hours + escalated), alert_feedback,
+  briefings, processing_jobs, audit_events, gap_explanations, calibration_rules, outcome_verifications
 - SQLAlchemy 2.0 async ORM only
 - gen_random_uuid() for all UUID primary keys
 - TIMESTAMPTZ for all timestamps (not TIMESTAMP)
-- All indexes from CLAUDE.md must exist before data is inserted (13 CREATE INDEX + 8 ALTER TABLE)
+- All indexes from CLAUDE.md must exist before data is inserted (19 CREATE INDEX + 10 ALTER TABLE)
 - patients.risk_score NUMERIC(5,2) — Layer 2 score 0.0-100.0
 - patients.risk_score_computed_at TIMESTAMPTZ — set on every score update (Fix 61); frontend staleness badge if > 26h
 - Idempotency: processing_jobs.idempotency_key UNIQUE constraint
@@ -35,10 +36,32 @@ alert_feedback (Fix 42 L1 — clinician disposition on acknowledge):
   reason_text TEXT, clinician_id TEXT, created_at TIMESTAMPTZ
   Indexes: (patient_id, detector_type, created_at DESC), (alert_id)
 
+gap_explanations (Fix 41 — clinician-recorded gap reasons):
+  explanation_id UUID PK, patient_id TEXT, gap_start DATE, gap_end DATE
+  reason TEXT (device_issue | travel | illness | unknown | non_compliance)
+  notes TEXT, reported_by TEXT (clinician | patient | system), reporter_id TEXT, created_at TIMESTAMPTZ
+  Index: (patient_id, gap_start DESC)
+
+calibration_rules (Fix 42 L2 — clinician-approved detector calibration):
+  rule_id UUID PK, patient_id TEXT, detector_type TEXT, dismissal_count INTEGER
+  approved_by TEXT, approved_at TIMESTAMPTZ, notes TEXT, active BOOLEAN DEFAULT TRUE, created_at TIMESTAMPTZ
+  Index: (patient_id, detector_type, active)
+
+outcome_verifications (Fix 42 L3 — 30-day retrospective outcomes):
+  verification_id UUID PK, feedback_id UUID FK -> alert_feedback, alert_id UUID FK -> alerts
+  patient_id TEXT, dismissed_at TIMESTAMPTZ, check_after TIMESTAMPTZ (dismissed_at + 30d)
+  outcome_type TEXT DEFAULT 'pending' (pending | deterioration_cluster | none)
+  prompted_at TIMESTAMPTZ, clinician_response TEXT (relevant | not_relevant | unsure)
+  responded_at TIMESTAMPTZ, response_notes TEXT, created_at TIMESTAMPTZ
+  Indexes: (outcome_type, check_after) WHERE outcome_type='pending', (patient_id, prompted_at DESC)
+
+alerts table additions (Fix 45):
+  off_hours BOOLEAN DEFAULT FALSE    — tagged at insert time via _is_off_hours(triggered_at)
+  escalated BOOLEAN DEFAULT FALSE    — set TRUE after 24h unacknowledged (gap_urgent, deterioration)
+
 Critical unique indexes (idempotency):
   UNIQUE on readings (patient_id, effective_datetime, source)       — Fix 22 prerequisite for Fix 15
   UNIQUE on medication_confirmations (patient_id, medication_name, scheduled_time)
 
 - scripts/setup_db.py creates all tables and indexes
 - Additive schema changes use ALTER TABLE ... ADD COLUMN IF NOT EXISTS in setup_db.py. Safe to re-run.
-- Pending migration: ALTER TABLE patients ADD COLUMN IF NOT EXISTS risk_score_computed_at TIMESTAMPTZ;
