@@ -478,6 +478,67 @@ FULL_TIMELINE_CLIP_OFFSET: float = 25.0
 # Batch commit size
 FULL_TIMELINE_BATCH_SIZE: int = 100
 
+# Device outage: 1-2 episodes per interval, each 2-4 consecutive absent days
+FULL_TIMELINE_OUTAGE_MIN_EPISODES: int = 1
+FULL_TIMELINE_OUTAGE_MAX_EPISODES: int = 2
+FULL_TIMELINE_OUTAGE_MIN_DAYS: int = 2
+FULL_TIMELINE_OUTAGE_MAX_DAYS: int = 4
+
+# White-coat dip: 10-15 mmHg drop linearly applied in 3-5 days before next clinic visit
+FULL_TIMELINE_WC_DIP_MIN_DAYS: int = 3
+FULL_TIMELINE_WC_DIP_MAX_DAYS: int = 5
+FULL_TIMELINE_WC_DIP_MIN_MMHG: float = 10.0
+FULL_TIMELINE_WC_DIP_MAX_MMHG: float = 15.0
+
+
+def _build_outage_days(window_start: date, window_end: date) -> frozenset[date]:
+    """Return a frozenset of dates that represent device outage (absent rows).
+
+    Generates 1-2 outage episodes of 2-4 consecutive days per inter-visit
+    interval.  Episodes are placed in the middle half of the window to avoid
+    overlapping the clinic anchors.  If the window is too short to accommodate
+    any outage (< 6 days) returns an empty set.
+    """
+    gap = (window_end - window_start).days + 1
+    if gap < 6:
+        return frozenset()
+
+    outage_days: set[date] = set()
+    # Restrict episode placement to the inner half of the window
+    inner_start = window_start + timedelta(days=gap // 4)
+    inner_end = window_end - timedelta(days=gap // 4)
+    inner_gap = (inner_end - inner_start).days
+
+    num_episodes = random.randint(
+        FULL_TIMELINE_OUTAGE_MIN_EPISODES, FULL_TIMELINE_OUTAGE_MAX_EPISODES
+    )
+    for _ in range(num_episodes):
+        episode_len = random.randint(
+            FULL_TIMELINE_OUTAGE_MIN_DAYS, FULL_TIMELINE_OUTAGE_MAX_DAYS
+        )
+        if inner_gap <= episode_len:
+            continue
+        start_offset = random.randint(0, inner_gap - episode_len)
+        episode_start = inner_start + timedelta(days=start_offset)
+        for d in range(episode_len):
+            outage_days.add(episode_start + timedelta(days=d))
+
+    return frozenset(outage_days)
+
+
+def _white_coat_dip_amount(current_day: date, date_b: date, dip_days: int, dip_mmhg: float) -> float:
+    """Return the white-coat BP reduction (mmHg) for a given day.
+
+    Applies a linear ramp: 0 at the start of the dip window rising to
+    `dip_mmhg` on the day immediately before `date_b`.  Returns 0.0 for
+    days outside the dip window.
+    """
+    dip_start = date_b - timedelta(days=dip_days)
+    if current_day < dip_start or current_day >= date_b:
+        return 0.0
+    days_into_dip = (current_day - dip_start).days + 1   # 1-based
+    return dip_mmhg * (days_into_dip / dip_days)
+
 
 async def generate_full_timeline_readings(
     patient_id: str,
@@ -558,13 +619,30 @@ async def generate_full_timeline_readings(
         sys_a = float(anchor_a.systolic_avg)
         sys_b = float(anchor_b.systolic_avg)
 
+        # ── Per-interval: device outage days + white-coat dip params ─────────
+        outage_days = _build_outage_days(window_start, window_end)
+        wc_dip_days = random.randint(
+            FULL_TIMELINE_WC_DIP_MIN_DAYS, FULL_TIMELINE_WC_DIP_MAX_DAYS
+        )
+        wc_dip_mmhg = random.uniform(
+            FULL_TIMELINE_WC_DIP_MIN_MMHG, FULL_TIMELINE_WC_DIP_MAX_MMHG
+        )
+
         # ── Step 3: Generate one row per day per session ─────────────────────
         current_day = window_start
         while current_day <= window_end:
+            # Device outage: absent rows (never null values)
+            if current_day in outage_days:
+                current_day += timedelta(days=1)
+                continue
+
             progress = (current_day - date_a).days / gap_days
             day_mean = sys_a + (sys_b - sys_a) * progress
 
-            # Miss pattern
+            # White-coat dip: reduce day_mean in 3-5 days before next clinic visit
+            day_mean -= _white_coat_dip_amount(current_day, date_b, wc_dip_days, wc_dip_mmhg)
+
+            # Random miss pattern (independent of outage)
             is_weekend = current_day.weekday() >= 5  # Saturday=5, Sunday=6
             miss_prob = (
                 FULL_TIMELINE_MISS_PROB_WEEKEND

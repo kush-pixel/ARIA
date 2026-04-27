@@ -23,10 +23,16 @@ import pytest
 
 from app.models.clinical_context import ClinicalContext
 from app.services.generator.reading_generator import (
+    FULL_TIMELINE_OUTAGE_MAX_DAYS,
+    FULL_TIMELINE_OUTAGE_MIN_DAYS,
+    FULL_TIMELINE_WC_DIP_MAX_MMHG,
+    FULL_TIMELINE_WC_DIP_MIN_MMHG,
     PATIENT_A_MORNING_MEAN,
     SCENARIO_PATIENT_A,
+    _build_outage_days,
     _compute_baseline,
     _get_patient_baseline,
+    _white_coat_dip_amount,
     generate_full_timeline_readings,
     generate_readings,
 )
@@ -512,6 +518,100 @@ class TestFullTimelineReadings:
 
 
 # ---------------------------------------------------------------------------
+# Device outage helper tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuildOutageDays:
+    """Tests for _build_outage_days() — consecutive absent-row outage blocks."""
+
+    def test_short_window_returns_empty(self) -> None:
+        """Window < 6 days → no outage episodes (not enough room)."""
+        start = date(2012, 1, 1)
+        end = date(2012, 1, 4)   # 4-day window
+        assert _build_outage_days(start, end) == frozenset()
+
+    def test_returns_frozenset_of_dates(self) -> None:
+        """Long window → frozenset of date objects."""
+        start = date(2012, 1, 1)
+        end = date(2012, 3, 1)
+        result = _build_outage_days(start, end)
+        assert isinstance(result, frozenset)
+        assert all(isinstance(d, date) for d in result)
+
+    def test_outage_days_within_window(self) -> None:
+        """All outage dates fall within [window_start, window_end]."""
+        start = date(2012, 1, 1)
+        end = date(2012, 3, 1)
+        for _ in range(20):   # repeat to cover random placement
+            result = _build_outage_days(start, end)
+            for d in result:
+                assert start <= d <= end
+
+    def test_outage_episode_length_within_spec(self) -> None:
+        """No outage run exceeds FULL_TIMELINE_OUTAGE_MAX_DAYS consecutive days."""
+        random.seed(42)
+        start = date(2012, 1, 1)
+        end = date(2012, 6, 1)
+        outage = sorted(_build_outage_days(start, end))
+        if not outage:
+            return
+        # Find run lengths
+        runs, run_len = [], 1
+        for i in range(1, len(outage)):
+            if (outage[i] - outage[i - 1]).days == 1:
+                run_len += 1
+            else:
+                runs.append(run_len)
+                run_len = 1
+        runs.append(run_len)
+        assert all(FULL_TIMELINE_OUTAGE_MIN_DAYS <= r <= FULL_TIMELINE_OUTAGE_MAX_DAYS for r in runs)
+
+
+# ---------------------------------------------------------------------------
+# White-coat dip helper tests
+# ---------------------------------------------------------------------------
+
+
+class TestWhiteCoatDipAmount:
+    """Tests for _white_coat_dip_amount()."""
+
+    def test_outside_dip_window_returns_zero(self) -> None:
+        """Days before the dip window return 0.0."""
+        visit = date(2012, 1, 10)
+        assert _white_coat_dip_amount(date(2012, 1, 1), visit, 5, 12.0) == 0.0
+
+    def test_on_visit_day_returns_zero(self) -> None:
+        """The clinic visit day itself returns 0.0 (excluded from home monitoring)."""
+        visit = date(2012, 1, 10)
+        assert _white_coat_dip_amount(visit, visit, 5, 12.0) == 0.0
+
+    def test_last_day_before_visit_returns_full_dip(self) -> None:
+        """Day immediately before visit = full dip magnitude."""
+        visit = date(2012, 1, 10)
+        result = _white_coat_dip_amount(date(2012, 1, 9), visit, 5, 12.0)
+        assert result == pytest.approx(12.0, rel=0.01)
+
+    def test_dip_increases_linearly(self) -> None:
+        """Dip is larger closer to visit (linear ramp)."""
+        visit = date(2012, 1, 10)
+        dip_days, magnitude = 5, 15.0
+        amounts = [
+            _white_coat_dip_amount(date(2012, 1, 10) - timedelta(days=d), visit, dip_days, magnitude)
+            for d in range(1, dip_days + 1)
+        ]
+        # amounts[0] = day before visit (largest), amounts[-1] = first dip day (smallest)
+        assert amounts == sorted(amounts, reverse=True)
+
+    def test_dip_within_spec_range(self) -> None:
+        """Max dip on last day is within FULL_TIMELINE_WC_DIP_MIN/MAX_MMHG range."""
+        visit = date(2012, 1, 10)
+        for dip_mmhg in [FULL_TIMELINE_WC_DIP_MIN_MMHG, FULL_TIMELINE_WC_DIP_MAX_MMHG]:
+            result = _white_coat_dip_amount(date(2012, 1, 9), visit, 3, dip_mmhg)
+            assert FULL_TIMELINE_WC_DIP_MIN_MMHG <= result <= FULL_TIMELINE_WC_DIP_MAX_MMHG
+
+
+# ---------------------------------------------------------------------------
 # Integration test — requires live Supabase DB
 # ---------------------------------------------------------------------------
 
@@ -547,7 +647,7 @@ async def test_generate_readings_integration() -> None:
 
     # Verify persisted count
     async with AsyncSessionLocal() as session:
-        from sqlalchemy import func as sa_func
+        from sqlalchemy import func as sa_func, select
 
         count_result = await session.execute(
             select(sa_func.count())  # type: ignore[name-defined]
