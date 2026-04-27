@@ -27,13 +27,20 @@ import pytest
 from app.models.alert import Alert
 from app.models.processing_job import ProcessingJob
 from app.services.worker.processor import (
+    _MAX_RETRIES,
+    _RETRY_BACKOFF_SECONDS,
     WorkerProcessor,
     _handle_briefing_generation,
     _handle_bundle_import,
     _handle_pattern_recompute,
     _upsert_alert,
 )
-from app.services.worker.scheduler import _briefing_idempotency_key, enqueue_briefing_jobs
+from app.services.worker.scheduler import (
+    _briefing_idempotency_key,
+    _pattern_recompute_idempotency_key,
+    enqueue_briefing_jobs,
+    enqueue_pattern_recompute_sweep,
+)
 
 # ---------------------------------------------------------------------------
 # Shared test helpers
@@ -46,6 +53,7 @@ def _make_job(
     patient_id: str = "1091",
     status: str = "queued",
     payload_ref: str | None = None,
+    retry_count: int = 0,
 ) -> ProcessingJob:
     """Build a minimal ProcessingJob ORM instance for testing."""
     job = ProcessingJob()
@@ -54,6 +62,7 @@ def _make_job(
     job.patient_id = patient_id
     job.status = status
     job.payload_ref = payload_ref
+    job.retry_count = retry_count
     job.idempotency_key = f"{job_type}:{patient_id}:test"
     return job
 
@@ -149,9 +158,9 @@ async def test_process_one_claims_job_and_marks_succeeded() -> None:
     factory = MagicMock(side_effect=factory_side_effect)
     processor = WorkerProcessor(session_factory=factory)  # type: ignore[arg-type]
 
-    # Replace handler + mark_succeeded with no-op mocks
+    # Replace handler + mark methods with no-op mocks
     processor._mark_succeeded = AsyncMock()  # type: ignore[method-assign]
-    processor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+    processor._mark_failed_or_retry = AsyncMock()  # type: ignore[method-assign]
 
     with patch(
         "app.services.worker.processor._HANDLERS",
@@ -161,7 +170,7 @@ async def test_process_one_claims_job_and_marks_succeeded() -> None:
 
     assert result is True
     processor._mark_succeeded.assert_called_once_with(job.job_id)
-    processor._mark_failed.assert_not_called()
+    processor._mark_failed_or_retry.assert_not_called()
 
 
 async def test_process_one_skips_already_claimed_job() -> None:
@@ -204,7 +213,7 @@ async def test_process_one_marks_failed_on_handler_exception() -> None:
     factory = MagicMock(side_effect=factory_side_effect)
     processor = WorkerProcessor(session_factory=factory)  # type: ignore[arg-type]
     processor._mark_succeeded = AsyncMock()  # type: ignore[method-assign]
-    processor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+    processor._mark_failed_or_retry = AsyncMock()  # type: ignore[method-assign]
 
     failing_handler = AsyncMock(side_effect=ValueError("test error"))
 
@@ -215,7 +224,7 @@ async def test_process_one_marks_failed_on_handler_exception() -> None:
         result = await processor._process_one(job)
 
     assert result is True
-    processor._mark_failed.assert_called_once_with(job.job_id, "test error")
+    processor._mark_failed_or_retry.assert_called_once_with(job.job_id, "test error", 0)
     processor._mark_succeeded.assert_not_called()
 
 
@@ -230,18 +239,18 @@ async def test_process_one_marks_failed_for_unknown_job_type() -> None:
 
     factory = _make_session_factory(session)
     processor = WorkerProcessor(session_factory=factory)
-    processor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+    processor._mark_failed_or_retry = AsyncMock()  # type: ignore[method-assign]
 
     result = await processor._process_one(job)
 
     assert result is True
-    processor._mark_failed.assert_called_once()
-    error_msg = processor._mark_failed.call_args[0][1]  # type: ignore[attr-defined]
+    processor._mark_failed_or_retry.assert_called_once()
+    error_msg = processor._mark_failed_or_retry.call_args[0][1]  # type: ignore[attr-defined]
     assert "unknown_type" in error_msg
 
 
 # ---------------------------------------------------------------------------
-# processor.py — WorkerProcessor._mark_succeeded / _mark_failed
+# processor.py — WorkerProcessor._mark_succeeded / _mark_failed_or_retry
 # ---------------------------------------------------------------------------
 
 
@@ -259,18 +268,54 @@ async def test_mark_succeeded_executes_update_with_correct_status() -> None:
     session.commit.assert_called_once()
 
 
-async def test_mark_failed_executes_update_with_error_message() -> None:
-    """_mark_failed sends UPDATE with status='failed' and the error_message."""
+async def test_mark_failed_or_retry_requeues_when_below_max_retries() -> None:
+    """Below _MAX_RETRIES, job is re-queued with incremented retry_count and retry_after."""
     session = _mock_session()
     session.execute = AsyncMock(return_value=MagicMock())
 
     factory = _make_session_factory(session)
     processor = WorkerProcessor(session_factory=factory)
 
-    await processor._mark_failed("job-abc", "something went wrong")
+    # retry_count=0 → should schedule retry 1
+    await processor._mark_failed_or_retry("job-abc", "transient error", current_retry_count=0)
 
     session.execute.assert_called_once()
     session.commit.assert_called_once()
+    # Verify the UPDATE values contained status='queued' and retry_count=1
+    call_args = session.execute.call_args[0][0]
+    compiled = call_args.compile(compile_kwargs={"literal_binds": True})
+    sql = str(compiled)
+    assert "queued" in sql
+    assert "retry_count" in sql
+
+
+async def test_mark_failed_or_retry_uses_correct_backoff_per_attempt() -> None:
+    """Each retry attempt uses the correct backoff from _RETRY_BACKOFF_SECONDS."""
+    assert _RETRY_BACKOFF_SECONDS[0] == 30
+    assert _RETRY_BACKOFF_SECONDS[1] == 120
+    assert _RETRY_BACKOFF_SECONDS[2] == 480
+    assert len(_RETRY_BACKOFF_SECONDS) == _MAX_RETRIES
+
+
+async def test_mark_failed_or_retry_marks_dead_at_max_retries() -> None:
+    """At _MAX_RETRIES, job is marked dead instead of re-queued."""
+    session = _mock_session()
+    session.execute = AsyncMock(return_value=MagicMock())
+
+    factory = _make_session_factory(session)
+    processor = WorkerProcessor(session_factory=factory)
+
+    # retry_count already at _MAX_RETRIES → should go dead
+    await processor._mark_failed_or_retry(
+        "job-abc", "persistent error", current_retry_count=_MAX_RETRIES
+    )
+
+    session.execute.assert_called_once()
+    session.commit.assert_called_once()
+    call_args = session.execute.call_args[0][0]
+    compiled = call_args.compile(compile_kwargs={"literal_binds": True})
+    sql = str(compiled)
+    assert "dead" in sql
 
 
 # ---------------------------------------------------------------------------
@@ -591,7 +636,8 @@ async def test_enqueue_briefing_jobs_enqueues_one_job_per_patient() -> None:
     patients_result = MagicMock()
     patients_result.scalars.return_value.all.return_value = [patient]
     insert_result = MagicMock()
-    session.execute = AsyncMock(side_effect=[patients_result, insert_result])
+    notify_result = MagicMock()
+    session.execute = AsyncMock(side_effect=[patients_result, insert_result, notify_result])
 
     factory = _make_session_factory(session)
 
@@ -601,8 +647,8 @@ async def test_enqueue_briefing_jobs_enqueues_one_job_per_patient() -> None:
     )
 
     assert count == 1
-    # execute called twice: SELECT patients + INSERT job
-    assert session.execute.call_count == 2
+    # execute called three times: SELECT patients + INSERT job + pg_notify
+    assert session.execute.call_count == 3
     session.commit.assert_called_once()
 
 
@@ -623,8 +669,9 @@ async def test_enqueue_briefing_jobs_multiple_patients() -> None:
     patients_result = MagicMock()
     patients_result.scalars.return_value.all.return_value = patients
     insert_result = MagicMock()
+    notify_result = MagicMock()
     session.execute = AsyncMock(
-        side_effect=[patients_result, insert_result, insert_result, insert_result]
+        side_effect=[patients_result, insert_result, insert_result, insert_result, notify_result]
     )
 
     factory = _make_session_factory(session)
@@ -635,9 +682,345 @@ async def test_enqueue_briefing_jobs_multiple_patients() -> None:
     )
 
     assert count == 3
-    # 1 SELECT + 3 INSERTs
-    assert session.execute.call_count == 4
+    # 1 SELECT + 3 INSERTs + 1 pg_notify
+    assert session.execute.call_count == 5
     session.commit.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Integration test — requires live Supabase connection
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# scheduler.py — _pattern_recompute_idempotency_key
+# ---------------------------------------------------------------------------
+
+
+def test_pattern_recompute_idempotency_key_format() -> None:
+    """_pattern_recompute_idempotency_key returns the expected string format."""
+    key = _pattern_recompute_idempotency_key("1091", date(2026, 4, 15))
+    assert key == "pattern_recompute:1091:2026-04-15"
+
+
+def test_pattern_recompute_idempotency_key_is_unique_per_patient_and_date() -> None:
+    """Different patient or date produce different keys."""
+    key_a = _pattern_recompute_idempotency_key("1091", date(2026, 4, 15))
+    key_b = _pattern_recompute_idempotency_key("9999", date(2026, 4, 15))
+    key_c = _pattern_recompute_idempotency_key("1091", date(2026, 4, 16))
+
+    assert key_a != key_b
+    assert key_a != key_c
+    assert key_b != key_c
+
+
+# ---------------------------------------------------------------------------
+# scheduler.py — enqueue_pattern_recompute_sweep
+# ---------------------------------------------------------------------------
+
+
+async def test_enqueue_pattern_recompute_sweep_no_patients_returns_zero() -> None:
+    """enqueue_pattern_recompute_sweep returns 0 when no monitoring-active patients exist."""
+    session = _mock_session()
+    empty_result = MagicMock()
+    empty_result.scalars.return_value.all.return_value = []
+    session.execute = AsyncMock(return_value=empty_result)
+
+    factory = _make_session_factory(session)
+
+    count = await enqueue_pattern_recompute_sweep(
+        session_factory=factory,
+        target_date=date(2026, 4, 15),
+    )
+
+    assert count == 0
+    session.commit.assert_not_called()
+
+
+async def test_enqueue_pattern_recompute_sweep_enqueues_one_job_per_patient() -> None:
+    """enqueue_pattern_recompute_sweep inserts one job for a single monitoring-active patient."""
+    from app.models.patient import Patient
+
+    patient = Patient()
+    patient.patient_id = "1091"
+    patient.monitoring_active = True
+
+    session = _mock_session()
+    patients_result = MagicMock()
+    patients_result.scalars.return_value.all.return_value = [patient]
+    insert_result = MagicMock()
+    notify_result = MagicMock()
+    session.execute = AsyncMock(side_effect=[patients_result, insert_result, notify_result])
+
+    factory = _make_session_factory(session)
+
+    count = await enqueue_pattern_recompute_sweep(
+        session_factory=factory,
+        target_date=date(2026, 4, 15),
+    )
+
+    assert count == 1
+    assert session.execute.call_count == 3  # SELECT patients + INSERT job + pg_notify
+    session.commit.assert_called_once()
+
+
+async def test_enqueue_pattern_recompute_sweep_multiple_patients() -> None:
+    """enqueue_pattern_recompute_sweep enqueues one job per monitoring-active patient."""
+    from app.models.patient import Patient
+
+    def _patient(pid: str) -> Patient:
+        p = Patient()
+        p.patient_id = pid
+        p.monitoring_active = True
+        return p
+
+    patients = [_patient("1091"), _patient("2001"), _patient("3005")]
+
+    session = _mock_session()
+    patients_result = MagicMock()
+    patients_result.scalars.return_value.all.return_value = patients
+    insert_result = MagicMock()
+    notify_result = MagicMock()
+    session.execute = AsyncMock(
+        side_effect=[patients_result, insert_result, insert_result, insert_result, notify_result]
+    )
+
+    factory = _make_session_factory(session)
+
+    count = await enqueue_pattern_recompute_sweep(
+        session_factory=factory,
+        target_date=date(2026, 4, 15),
+    )
+
+    assert count == 3
+    assert session.execute.call_count == 5  # 1 SELECT + 3 INSERTs + 1 pg_notify
+    session.commit.assert_called_once()
+
+
+async def test_enqueue_pattern_recompute_sweep_does_not_filter_by_appointment_date() -> None:
+    """Sweep includes patients regardless of next_appointment value."""
+    from app.models.patient import Patient
+
+    # patient with no next_appointment — should still be included
+    patient = Patient()
+    patient.patient_id = "1091"
+    patient.monitoring_active = True
+    patient.next_appointment = None
+
+    session = _mock_session()
+    patients_result = MagicMock()
+    patients_result.scalars.return_value.all.return_value = [patient]
+    insert_result = MagicMock()
+    notify_result = MagicMock()
+    session.execute = AsyncMock(side_effect=[patients_result, insert_result, notify_result])
+
+    factory = _make_session_factory(session)
+
+    count = await enqueue_pattern_recompute_sweep(
+        session_factory=factory,
+        target_date=date(2026, 4, 15),
+    )
+
+    assert count == 1
+
+
+# ---------------------------------------------------------------------------
+# _handle_pattern_recompute — mini-briefing trigger (Fix 46)
+# ---------------------------------------------------------------------------
+
+
+def _build_pattern_recompute_session(
+    gap_status: str = "none",
+    inertia: bool = False,
+    deterioration: bool = False,
+) -> AsyncMock:
+    """Build a mock session for _handle_pattern_recompute mini-briefing tests."""
+    session = AsyncMock()
+    session.flush = AsyncMock()
+    session.commit = AsyncMock()
+    session.add = MagicMock()
+
+    upsert_result = MagicMock()
+    session.execute = AsyncMock(return_value=upsert_result)
+    return session
+
+
+@pytest.mark.asyncio
+async def test_pattern_recompute_triggers_mini_briefing_on_gap_urgent() -> None:
+    """compose_mini_briefing must be called when gap status is urgent."""
+    job = _make_job(job_type="pattern_recompute", patient_id="1091")
+    session = AsyncMock()
+    session.flush = AsyncMock()
+
+    gap_result = {"gap_days": 4, "status": "urgent"}
+    inertia_result = {"inertia_detected": False, "avg_systolic": None}
+    adherence_result = {"pattern": "none", "adherence_pct": 91.0}
+    deterioration_result = {"deterioration": False, "slope": 0.1}
+
+    with (
+        patch("app.services.pattern_engine.gap_detector.run_gap_detector", AsyncMock(return_value=gap_result)),
+        patch("app.services.pattern_engine.inertia_detector.run_inertia_detector", AsyncMock(return_value=inertia_result)),
+        patch("app.services.pattern_engine.adherence_analyzer.run_adherence_analyzer", AsyncMock(return_value=adherence_result)),
+        patch("app.services.pattern_engine.deterioration_detector.run_deterioration_detector", AsyncMock(return_value=deterioration_result)),
+        patch("app.services.pattern_engine.risk_scorer.compute_risk_score", AsyncMock(return_value=72.5)),
+        patch("app.services.worker.processor._upsert_alert", new_callable=AsyncMock),
+        patch("app.services.briefing.composer.compose_mini_briefing", new_callable=AsyncMock) as mock_mini,
+    ):
+        await _handle_pattern_recompute(job, session)
+
+    mock_mini.assert_awaited_once_with(session, "1091", "gap_urgent")
+
+
+@pytest.mark.asyncio
+async def test_pattern_recompute_triggers_mini_briefing_on_deterioration() -> None:
+    """compose_mini_briefing must be called when deterioration fires."""
+    job = _make_job(job_type="pattern_recompute", patient_id="1091")
+    session = AsyncMock()
+    session.flush = AsyncMock()
+
+    gap_result = {"gap_days": 0, "status": "none"}
+    inertia_result = {"inertia_detected": False, "avg_systolic": None}
+    adherence_result = {"pattern": "none", "adherence_pct": 91.0}
+    deterioration_result = {"deterioration": True, "slope": 2.4}
+
+    with (
+        patch("app.services.pattern_engine.gap_detector.run_gap_detector", AsyncMock(return_value=gap_result)),
+        patch("app.services.pattern_engine.inertia_detector.run_inertia_detector", AsyncMock(return_value=inertia_result)),
+        patch("app.services.pattern_engine.adherence_analyzer.run_adherence_analyzer", AsyncMock(return_value=adherence_result)),
+        patch("app.services.pattern_engine.deterioration_detector.run_deterioration_detector", AsyncMock(return_value=deterioration_result)),
+        patch("app.services.pattern_engine.risk_scorer.compute_risk_score", AsyncMock(return_value=68.0)),
+        patch("app.services.worker.processor._upsert_alert", new_callable=AsyncMock),
+        patch("app.services.briefing.composer.compose_mini_briefing", new_callable=AsyncMock) as mock_mini,
+    ):
+        await _handle_pattern_recompute(job, session)
+
+    mock_mini.assert_awaited_once_with(session, "1091", "deterioration")
+
+
+@pytest.mark.asyncio
+async def test_pattern_recompute_does_not_trigger_mini_briefing_on_inertia() -> None:
+    """compose_mini_briefing must NOT be called when only inertia fires."""
+    job = _make_job(job_type="pattern_recompute", patient_id="1091")
+    session = AsyncMock()
+    session.flush = AsyncMock()
+
+    gap_result = {"gap_days": 0, "status": "none"}
+    inertia_result = {"inertia_detected": True, "avg_systolic": 158.0}
+    adherence_result = {"pattern": "none", "adherence_pct": 91.0}
+    deterioration_result = {"deterioration": False, "slope": 0.1}
+
+    with (
+        patch("app.services.pattern_engine.gap_detector.run_gap_detector", AsyncMock(return_value=gap_result)),
+        patch("app.services.pattern_engine.inertia_detector.run_inertia_detector", AsyncMock(return_value=inertia_result)),
+        patch("app.services.pattern_engine.adherence_analyzer.run_adherence_analyzer", AsyncMock(return_value=adherence_result)),
+        patch("app.services.pattern_engine.deterioration_detector.run_deterioration_detector", AsyncMock(return_value=deterioration_result)),
+        patch("app.services.pattern_engine.risk_scorer.compute_risk_score", AsyncMock(return_value=60.0)),
+        patch("app.services.worker.processor._upsert_alert", new_callable=AsyncMock),
+        patch("app.services.briefing.composer.compose_mini_briefing", new_callable=AsyncMock) as mock_mini,
+    ):
+        await _handle_pattern_recompute(job, session)
+
+    mock_mini.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# scheduler.py — Fix 60: pg_notify sent after enqueue
+# ---------------------------------------------------------------------------
+
+
+async def test_enqueue_briefing_jobs_sends_pg_notify_before_commit() -> None:
+    """enqueue_briefing_jobs sends a pg_notify call inside the same transaction as INSERTs."""
+    from app.models.patient import Patient
+
+    patient = Patient()
+    patient.patient_id = "1091"
+    patient.monitoring_active = True
+    patient.next_appointment = datetime(2026, 4, 15, 9, 0, tzinfo=UTC)
+
+    session = _mock_session()
+    patients_result = MagicMock()
+    patients_result.scalars.return_value.all.return_value = [patient]
+    session.execute = AsyncMock(
+        side_effect=[patients_result, MagicMock(), MagicMock()]
+    )
+    factory = _make_session_factory(session)
+
+    await enqueue_briefing_jobs(session_factory=factory, target_date=date(2026, 4, 15))
+
+    # At least one execute call must carry a TextClause containing pg_notify
+    notify_found = any(
+        c.args and "pg_notify" in str(c.args[0])
+        for c in session.execute.call_args_list
+    )
+    assert notify_found, "Expected pg_notify in execute calls"
+    session.commit.assert_called_once()
+
+
+async def test_enqueue_pattern_recompute_sweep_sends_pg_notify_before_commit() -> None:
+    """enqueue_pattern_recompute_sweep sends a pg_notify call when jobs are enqueued."""
+    from app.models.patient import Patient
+
+    patient = Patient()
+    patient.patient_id = "1091"
+    patient.monitoring_active = True
+
+    session = _mock_session()
+    patients_result = MagicMock()
+    patients_result.scalars.return_value.all.return_value = [patient]
+    session.execute = AsyncMock(
+        side_effect=[patients_result, MagicMock(), MagicMock()]
+    )
+    factory = _make_session_factory(session)
+
+    await enqueue_pattern_recompute_sweep(session_factory=factory, target_date=date(2026, 4, 15))
+
+    notify_found = any(
+        c.args and "pg_notify" in str(c.args[0])
+        for c in session.execute.call_args_list
+    )
+    assert notify_found, "Expected pg_notify in execute calls"
+    session.commit.assert_called_once()
+
+
+async def test_enqueue_briefing_jobs_no_notify_when_no_patients() -> None:
+    """enqueue_briefing_jobs sends no pg_notify and no commit when no patients qualify."""
+    session = _mock_session()
+    empty_result = MagicMock()
+    empty_result.scalars.return_value.all.return_value = []
+    session.execute = AsyncMock(return_value=empty_result)
+    factory = _make_session_factory(session)
+
+    count = await enqueue_briefing_jobs(session_factory=factory, target_date=date(2026, 4, 15))
+
+    assert count == 0
+    notify_found = any(
+        c.args and "pg_notify" in str(c.args[0])
+        for c in session.execute.call_args_list
+    )
+    assert not notify_found, "pg_notify must not be called when no jobs were enqueued"
+    session.commit.assert_not_called()
+
+
+def test_worker_processor_wake_event_set_wakes_idle_loop() -> None:
+    """_wake_event.set() on WorkerProcessor is callable and sets the event."""
+    processor = WorkerProcessor()
+    assert not processor._wake_event.is_set()
+    processor._wake_event.set()
+    assert processor._wake_event.is_set()
+    processor._wake_event.clear()
+    assert not processor._wake_event.is_set()
+
+
+def test_worker_processor_listen_url_stored() -> None:
+    """listen_url passed to constructor is stored and accessible."""
+    processor = WorkerProcessor(listen_url="postgresql://host/db")
+    assert processor._listen_url == "postgresql://host/db"
+
+
+def test_worker_processor_no_listen_url_by_default() -> None:
+    """listen_url defaults to None — no listener started in unit-test deployments."""
+    processor = WorkerProcessor()
+    assert processor._listen_url is None
 
 
 # ---------------------------------------------------------------------------

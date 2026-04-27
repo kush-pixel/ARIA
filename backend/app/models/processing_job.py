@@ -8,7 +8,7 @@ same key is submitted twice.  Status flow: queued → running → succeeded | fa
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, func, text
+from sqlalchemy import DateTime, SmallInteger, String, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,9 +32,15 @@ class ProcessingJob(Base):
     idempotency_key: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     status: Mapped[str] = mapped_column(
         String, nullable=False
-    )  # queued|running|succeeded|failed
+    )  # queued|running|succeeded|failed|dead
     payload_ref: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(String, nullable=True)
+    retry_count: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, server_default=text("0")
+    )
+    retry_after: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     queued_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, server_default=func.now()
     )

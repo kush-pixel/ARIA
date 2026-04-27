@@ -17,12 +17,14 @@ from app.services.briefing.composer import (
     _bp_category,
     _build_adherence_summary,
     _build_data_limitations,
+    _build_long_term_trajectory,
     _build_medication_status,
     _build_trend_summary,
     _build_urgent_flags,
     _build_visit_agenda,
     _compute_adherence,
     compose_briefing,
+    compose_mini_briefing,
 )
 from app.services.briefing.summarizer import (
     _build_user_message,
@@ -88,6 +90,8 @@ def _make_clinical_context(
     last_med_change: date | None = None,
     last_clinic_systolic: int | None = 185,
     last_clinic_diastolic: int | None = 72,
+    historic_bp_systolic: list[int] | None = None,
+    historic_bp_dates: list[str] | None = None,
 ) -> MagicMock:
     """Create a mock ClinicalContext ORM instance."""
     ctx = MagicMock()
@@ -99,6 +103,8 @@ def _make_clinical_context(
     ctx.last_med_change = last_med_change or date(2026, 1, 15)
     ctx.last_clinic_systolic = last_clinic_systolic
     ctx.last_clinic_diastolic = last_clinic_diastolic
+    ctx.historic_bp_systolic = historic_bp_systolic
+    ctx.historic_bp_dates = historic_bp_dates
     ctx.social_context = "Lives alone, retired."
     return ctx
 
@@ -176,6 +182,99 @@ class TestBuildTrendSummary:
         readings = [_make_reading(163.0, 98.0) for _ in range(14)]
         result = _build_trend_summary(readings, None, None, monitoring_active=True)
         assert "stable" in result
+
+
+# ---------------------------------------------------------------------------
+# _build_long_term_trajectory — Fix 47
+# ---------------------------------------------------------------------------
+
+class TestBuildLongTermTrajectory:
+    """Tests for _build_long_term_trajectory()."""
+
+    def test_none_when_both_arrays_none(self) -> None:
+        assert _build_long_term_trajectory(None, None) is None
+
+    def test_none_when_systolic_none(self) -> None:
+        assert _build_long_term_trajectory(None, ["2026-01-15"]) is None
+
+    def test_none_when_dates_none(self) -> None:
+        assert _build_long_term_trajectory([160], None) is None
+
+    def test_none_when_mismatched_lengths(self) -> None:
+        assert _build_long_term_trajectory([160, 155], ["2026-01-15"]) is None
+
+    def test_none_when_fewer_than_two_in_window(self) -> None:
+        # Only one reading in the 90-day window anchored on max date
+        assert _build_long_term_trajectory([160], ["2026-01-15"]) is None
+
+    def test_improvement_trend_large_decline(self) -> None:
+        # 170 -> 155 over ~60 days = delta -15, improvement
+        result = _build_long_term_trajectory(
+            [170, 155],
+            ["2026-01-15", "2026-03-15"],
+        )
+        assert result is not None
+        assert "improvement trend" in result
+        assert "170" in result
+        assert "January" in result
+
+    def test_worsening_trend_large_rise(self) -> None:
+        # 140 -> 162 over ~60 days = delta +22, worsening
+        result = _build_long_term_trajectory(
+            [140, 162],
+            ["2026-01-15", "2026-03-15"],
+        )
+        assert result is not None
+        assert "worsening trend" in result
+        assert "140" in result
+
+    def test_stable_elevation_small_delta(self) -> None:
+        # 158 -> 160 = delta +2, stable
+        result = _build_long_term_trajectory(
+            [158, 160],
+            ["2026-01-15", "2026-03-15"],
+        )
+        assert result is not None
+        assert "stable elevation" in result
+        assert "January" in result
+
+    def test_window_anchored_on_max_date_not_today(self) -> None:
+        # All readings in 2013 — well outside 90 days of today (2026-04-27)
+        # Should still compute trajectory relative to 2013-09-26
+        systolics = [170, 165, 160, 158]
+        dates = ["2013-01-15", "2013-04-20", "2013-07-10", "2013-09-26"]
+        result = _build_long_term_trajectory(systolics, dates)
+        # max date is 2013-09-26; 90 days back = 2013-06-27; so 2013-07-10 and 2013-09-26 included
+        assert result is not None
+        assert "trajectory" in result
+
+    def test_ignores_readings_outside_90day_window(self) -> None:
+        # Oldest reading is 200 days before max — should be excluded from window
+        # Only last 2 readings (within 90 days) should count
+        systolics = [180, 158, 156]
+        dates = ["2026-01-01", "2026-03-20", "2026-04-15"]
+        # max = 2026-04-15; cutoff = 2026-01-15; so 2026-01-01 is excluded
+        result = _build_long_term_trajectory(systolics, dates)
+        # Only 2026-03-20 (158) and 2026-04-15 (156) are in window: delta = -2 → stable
+        assert result is not None
+        assert "stable" in result
+        assert "180" not in result  # first reading excluded
+
+    def test_unparseable_dates_skipped(self) -> None:
+        # One bad date, two good ones — should still compute
+        result = _build_long_term_trajectory(
+            [170, 165, 155],
+            ["not-a-date", "2026-02-15", "2026-04-15"],
+        )
+        assert result is not None
+
+    def test_output_starts_with_3_month_trajectory(self) -> None:
+        result = _build_long_term_trajectory(
+            [170, 155],
+            ["2026-01-15", "2026-03-15"],
+        )
+        assert result is not None
+        assert result.startswith("3-month trajectory:")
 
 
 # ---------------------------------------------------------------------------
@@ -602,6 +701,32 @@ class TestComposeBriefing:
         briefing = await compose_briefing(session, "1091", date(2026, 4, 14))
         assert "HbA1c" in briefing.llm_response["overdue_labs"]
 
+    @pytest.mark.asyncio
+    async def test_long_term_trajectory_appended_when_historic_data_present(self) -> None:
+        """Fix 47: 3-month trajectory from clinic BP history appears in trend_summary."""
+        patient = _make_patient()
+        ctx = _make_clinical_context(
+            historic_bp_systolic=[170, 158],
+            historic_bp_dates=["2026-01-15", "2026-03-20"],
+        )
+        session = self._make_session(patient, ctx, [], [], [])
+
+        briefing = await compose_briefing(session, "1091", date(2026, 4, 14))
+        assert "3-month trajectory" in briefing.llm_response["trend_summary"]
+
+    @pytest.mark.asyncio
+    async def test_no_trajectory_when_historic_data_absent(self) -> None:
+        """Fix 47: trend_summary is unchanged when historic_bp_systolic is None."""
+        patient = _make_patient()
+        ctx = _make_clinical_context(
+            historic_bp_systolic=None,
+            historic_bp_dates=None,
+        )
+        session = self._make_session(patient, ctx, [], [], [])
+
+        briefing = await compose_briefing(session, "1091", date(2026, 4, 14))
+        assert "3-month trajectory" not in briefing.llm_response["trend_summary"]
+
 
 # ---------------------------------------------------------------------------
 # Summarizer helpers
@@ -668,3 +793,116 @@ class TestSummarizerHelpers:
         msg = _build_user_message(payload)
         assert "None" in msg
         assert "not calculated" in msg
+
+
+# ---------------------------------------------------------------------------
+# compose_mini_briefing — Fix 46
+# ---------------------------------------------------------------------------
+
+def _make_async_session_for_mini(
+    patient: MagicMock,
+    ctx: MagicMock,
+    readings: list,
+    alerts: list,
+    existing_briefing: MagicMock | None = None,
+) -> AsyncMock:
+    """Build an AsyncMock session that returns fixture data for compose_mini_briefing."""
+    session = AsyncMock()
+
+    def _make_scalar_result(value):
+        r = MagicMock()
+        r.scalar_one_or_none = MagicMock(return_value=value)
+        return r
+
+    def _make_scalars_result(items):
+        r = MagicMock()
+        inner = MagicMock()
+        inner.all = MagicMock(return_value=items)
+        r.scalars = MagicMock(return_value=inner)
+        return r
+
+    # execute() is called 5 times: dedup check, patient, ctx, readings, alerts
+    session.execute = AsyncMock(side_effect=[
+        _make_scalar_result(existing_briefing),  # dedup check
+        _make_scalar_result(patient),            # patient fetch
+        _make_scalar_result(ctx),                # ctx fetch
+        _make_scalars_result(readings),          # readings
+        _make_scalars_result(alerts),            # alerts
+    ])
+    session.flush = AsyncMock()
+    session.commit = AsyncMock()
+    session.add = MagicMock()
+    return session
+
+
+class TestComposeMinieBriefing:
+    """Tests for compose_mini_briefing() — Fix 46."""
+
+    @pytest.mark.asyncio
+    async def test_compose_mini_briefing_sets_appointment_date_none(self) -> None:
+        """appointment_date must be None on the persisted Briefing row."""
+        patient = _make_patient()
+        ctx = _make_clinical_context()
+        readings = [_make_reading(158.0, 96.0)]
+        alerts = [_make_alert("gap_urgent", gap_days=4)]
+        session = _make_async_session_for_mini(patient, ctx, readings, alerts)
+
+        result = await compose_mini_briefing(session, "1091", "gap_urgent")
+
+        assert result.appointment_date is None
+
+    @pytest.mark.asyncio
+    async def test_compose_mini_briefing_trigger_appears_in_urgent_flags(self) -> None:
+        """The triggering gap_urgent alert must appear in urgent_flags payload."""
+        patient = _make_patient()
+        ctx = _make_clinical_context()
+        readings = [_make_reading(162.0, 99.0)]
+        alerts = [_make_alert("gap_urgent", gap_days=5)]
+        session = _make_async_session_for_mini(patient, ctx, readings, alerts)
+
+        result = await compose_mini_briefing(session, "1091", "gap_urgent")
+
+        payload = result.llm_response
+        assert any("gap" in f.lower() for f in payload["urgent_flags"])
+
+    @pytest.mark.asyncio
+    async def test_compose_mini_briefing_deduplicates_same_day(self) -> None:
+        """Second call on the same day returns the existing row, no new insert."""
+        patient = _make_patient()
+        ctx = _make_clinical_context()
+        existing = MagicMock()
+        existing.briefing_id = "existing-mini-001"
+
+        session = AsyncMock()
+
+        def _make_scalar_result(value):
+            r = MagicMock()
+            r.scalar_one_or_none = MagicMock(return_value=value)
+            return r
+
+        # Only the dedup check execute is needed — returns existing row
+        session.execute = AsyncMock(return_value=_make_scalar_result(existing))
+        session.flush = AsyncMock()
+        session.commit = AsyncMock()
+        session.add = MagicMock()
+
+        result = await compose_mini_briefing(session, "1091", "gap_urgent")
+
+        assert result is existing
+        session.add.assert_not_called()
+        session.commit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_compose_mini_briefing_uses_7day_window(self) -> None:
+        """trend_summary must reference 7-day window, not 28-day."""
+        patient = _make_patient()
+        ctx = _make_clinical_context()
+        readings = [_make_reading(160.0, 97.0) for _ in range(5)]
+        alerts = [_make_alert("deterioration")]
+        session = _make_async_session_for_mini(patient, ctx, readings, alerts)
+
+        result = await compose_mini_briefing(session, "1091", "deterioration")
+
+        payload = result.llm_response
+        assert "7-day" in payload["trend_summary"]
+        assert "28-day" not in payload["trend_summary"]

@@ -729,14 +729,14 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 
 ### Phase 4 — Scheduler and worker
 
-| # | Fix | Files |
-|---|---|---|
-| 10 | Daily `pattern_recompute` sweep for all active patients | scheduler.py |
-| 21 | `next_appointment` update endpoint | patients.py API |
-| 47 | Long-term trend layer in briefing | composer.py |
-| 46 | Mini-briefing for between-visit urgent alerts | processor.py, composer.py |
-| 40 | Dead-letter queue (max 3 retries) | processor.py |
-| 60 | Replace 30s polling with PostgreSQL LISTEN/NOTIFY | processor.py, scheduler.py, ingestion.py |
+| # | Fix | Files | Status |
+|---|---|---|---|
+| 10 | Daily `pattern_recompute` sweep for all active patients | scheduler.py | DONE |
+| 21 | `next_appointment` update endpoint | patients.py API | DONE |
+| 47 | Long-term trend layer in briefing | composer.py | DONE |
+| 46 | Mini-briefing for between-visit urgent alerts | processor.py, composer.py | DONE |
+| 40 | Dead-letter queue (max 3 retries) | processor.py | DONE |
+| 60 | Replace 30s polling with PostgreSQL LISTEN/NOTIFY | processor.py, scheduler.py | DONE |
 
 ---
 

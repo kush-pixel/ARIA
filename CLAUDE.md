@@ -892,3 +892,6 @@ Testing:
   - Unit tests: fixture-based, no real patient data
   - Integration tests: @pytest.mark.integration marker
   - Run unit: python -m pytest tests/ -v -m "not integration"
+
+# SPECIAL INSTRUCTION
+Do not make any changes until you have 95% confidence in what you need to build. Ask me follow up questions until you reach that confidence.

@@ -122,6 +122,18 @@ INDEXES: list[tuple[str, str]] = [
         "ALTER TABLE patients ADD COLUMN IF NOT EXISTS risk_score_computed_at TIMESTAMPTZ",
     ),
     (
+        "processing_jobs_retry_count_col",
+        "ALTER TABLE processing_jobs ADD COLUMN IF NOT EXISTS retry_count SMALLINT NOT NULL DEFAULT 0",
+    ),
+    (
+        "processing_jobs_retry_after_col",
+        "ALTER TABLE processing_jobs ADD COLUMN IF NOT EXISTS retry_after TIMESTAMPTZ",
+    ),
+    (
+        "briefings_appointment_date_nullable",
+        "ALTER TABLE briefings ALTER COLUMN appointment_date DROP NOT NULL",
+    ),
+    (
         "idx_alert_feedback_patient_detector",
         "CREATE INDEX IF NOT EXISTS idx_alert_feedback_patient_detector "
         "ON alert_feedback (patient_id, detector_type, created_at DESC)",
