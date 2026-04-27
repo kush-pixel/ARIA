@@ -21,8 +21,8 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - backend/app/config.py — Pydantic v2 Settings, 7 fields (DATABASE_URL, ANTHROPIC_API_KEY, APP_SECRET_KEY, APP_ENV, APP_DEBUG, DEMO_MODE, BRIEFING_TRIGGER)
 - backend/app/db/base.py — async engine (auto-converts postgresql:// → postgresql+asyncpg://), AsyncSessionLocal factory, DeclarativeBase
 - backend/app/db/session.py — get_session() FastAPI dependency
-- backend/app/models/ — all 8 ORM models (patients, clinical_context, readings, medication_confirmations, alerts, briefings, processing_jobs, audit_events)
-- scripts/setup_db.py — creates 8 tables + 11 indexes; safe to re-run (IF NOT EXISTS)
+- backend/app/models/ — all 8 ORM models (patients, clinical_context, readings, medication_confirmations, alerts, briefings, processing_jobs, audit_events); patients model now includes risk_score_computed_at TIMESTAMPTZ column (Fix 61)
+- scripts/setup_db.py — creates 8 tables + 13 indexes/migrations; safe to re-run (IF NOT EXISTS / ADD COLUMN IF NOT EXISTS); includes risk_score_computed_at migration (Fix 61)
 - backend/app/utils/logging_utils.py — get_logger(name) returns a named stdlib Logger with ISO timestamp format; used by all backend modules
 - backend/app/services/fhir/adapter.py — iEMR JSON → FHIR R4 Bundle; 6 resource types (Patient, Condition, MedicationRequest, Observation, AllergyIntolerance, ServiceRequest); most-recent-wins deduplication keyed by iEMR code for all types except Observation; VITALS_DATETIME used for effectiveDateTime (never ADMIT_DATE); non-standard `_age` extension passes age to ingestion layer; _build_med_history() collects full medication timeline (104 events for patient 1091) deduplicated by (name, date, activity), passed as _aria_med_history metadata on bundle dict. Data quality fixes applied 2026-04-21: (1) Z00.xx encounter-type codes filtered from Conditions, (2) discontinued medications excluded via sentinel tombstone + cross-MED_CODE name propagation, (3) supplies/tests/device scripts filtered from MedicationRequests via _NON_DRUG_MARKERS/_NON_DRUG_EXACT, (4) secondary name-level deduplication collapses same drug appearing under multiple MED_CODEs, (5) non-clinical PLAN items (physician names, redacted vendors, patient education) filtered from ServiceRequests. Patient 1091: medications reduced from 38 → 14 (all actual drugs); conditions reduced from 18 → 17 (PREVENTIVE CARE removed); follow-up items reduced from 10 → 6 (admin/education entries removed).
 - backend/tests/test_fhir_adapter.py — 42 tests (41 unit + 1 integration); all passing; includes TestBuildMedHistory (7 cases), test_bundle_contains_aria_med_history_key, and 6 new tests covering Z00.xx filtering, discontinued medication exclusion, cross-MED_CODE discontinue propagation, and non-clinical service request filtering
@@ -48,14 +48,15 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - backend/tests/test_briefing_composer.py — 61 unit tests (all passing); covers all helper functions, all 9 briefing fields, clinical language enforcement, async compose_briefing with mocked session, error handling, summarizer helpers
 - backend/tests/test_llm_validator.py — 57 unit tests (all passing); fixture-based, no real DB or API calls; covers all 14 check functions individually + 4 full validate_llm_output integration tests; asyncio mode=auto; tests: 3 PHI leak, 3 prompt injection, 11 guardrail (9 parametrized + 2), 3 sentence count, 4 risk score, 4 adherence language, 3 titration window, 3 urgent flags, 3 overdue labs, 6 problem assessments (empty list, hallucinated condition with non-empty problems, synonym acceptance, known condition passes, no condition mention, grounding via problem_assessments keys), 3 medication hallucination, 4 BP plausibility, 3 contradiction, 4 full pipeline (audit event on pass/fail, first-failed-check ordering, compliant summary)
 
-- backend/app/services/pattern_engine/risk_scorer.py — Layer 2 compute_risk_score(patient_id, session); verifies patient exists, queries 28-day readings, clinical_context, medication_confirmations directly; computes weighted 0.0–100.0 priority score from systolic-vs-baseline, medication inertia, inverted adherence, reading gap, and comorbidity count; handles missing data with neutral/default signals; rounds to 2 decimals and persists patients.risk_score; no audit_event required for this computation
-- backend/tests/test_risk_scorer.py — 14 unit tests passing with mocked AsyncSession; covers high/low risk scenarios, no readings, no confirmations, NULL last_med_change, clinic systolic fallback, patient not found, clamping, persistence, rounding/commit behavior, and per-signal weight verification
+- backend/app/services/pattern_engine/risk_scorer.py — Layer 2 compute_risk_score(patient_id, session); fetches full Patient object (for next_appointment); queries 28-day readings, clinical_context, medication_confirmations; computes weighted 0.0–100.0 priority score from: systolic-vs-baseline (30%), medication inertia (25%, saturates at 180 days), inverted adherence (20%), reading gap (15%, normalised against adaptive window), severity-weighted comorbidity (10%); comorbidity uses ICD-10 prefix weights — CHF/Stroke/TIA=25pts each, Diabetes/CKD/CAD=15pts each, other=5pts, clamped to 100 (Fix 25); gap normalization uses _compute_window_days() — same adaptive window formula as Layer 1 detectors, min 14/max 90/fallback 28 (Fix 58); inertia saturates at 180 days not 90 (Fix 58); persists patients.risk_score AND patients.risk_score_computed_at=now() on every update (Fix 61); no audit_event required for this computation
+- backend/tests/test_risk_scorer.py — 14 unit tests passing with mocked AsyncSession; updated for Fix 25/58/61: _session_for() now returns Patient mock object (not string); test_signal_weights parametrize updated (inertia max at 180d, gap max at 28d with window fallback, comorbidity max uses ICD-10 codes); test_score_clamped_0_100 uses CHF+Stroke+TIA+DM+CKD+CAD codes to hit 100; test_persists_to_patients_table expected score updated 38.67→27.17 and UPDATE assertion extended to include risk_score_computed_at
 
-- backend/app/services/pattern_engine/gap_detector.py — Layer 1 run_gap_detector(session, patient_id) → GapResult; tier-aware thresholds (high: flag≥1d/urgent≥3d, medium: flag≥3d/urgent≥5d, low: flag≥7d/urgent≥14d); returns gap_days, flagged, urgent booleans; no readings → gap_days=None, flagged=False
-- backend/app/services/pattern_engine/inertia_detector.py — Layer 1 run_inertia_detector(session, patient_id) → InertiaResult; all 4 conditions required simultaneously: avg systolic≥140, ≥5 elevated readings, elevated span >7 days, no med change on/after first elevated reading; fail-safe: any unmet condition → detected=False
-- backend/app/services/pattern_engine/adherence_analyzer.py — Layer 1 run_adherence_analyzer(session, patient_id) → AdherenceResult; 28-day adherence rate from confirmations vs avg systolic; Pattern A (elevated+low adherence)="possible adherence concern", Pattern B (elevated+high adherence)="treatment review warranted", Pattern C (normal+low adherence)="contextual review", none=no concern; clinical language enforced at code level
-- backend/app/services/pattern_engine/deterioration_detector.py — Layer 1 run_deterioration_detector(session, patient_id) → DeteriorationResult; dual-signal: least-squares positive slope over 14 days AND recent 3-day avg > days 4–10 baseline avg; both signals required to reduce false positives; <7 readings → detected=False; pure Python slope (no numpy)
-- backend/tests/test_pattern_engine.py — 39 unit tests (all passing); covers all 4 Layer 1 detectors and their edge cases (no readings, sparse data, borderline thresholds, all pattern types)
+- backend/app/services/pattern_engine/threshold_utils.py — shared utility module; compute_slope(), compute_patient_threshold(), classify_comorbidity_concern(), get_last_med_change_date(); apply_comorbidity_adjustment() updated 2026-04-26: now fires on CHF/Stroke/TIA alone (not just cardio+metabolic simultaneously) per AUDIT.md Fix 5 — patient 1091 (CHF-only) now correctly receives −7 mmHg adjustment; added _TITRATION_WINDOWS dict (diuretics/beta-blockers→14d, ACE/ARBs→28d, amlodipine→56d, default→42d), _infer_drug_class(), get_titration_window() per AUDIT.md Fix 3/26
+- backend/app/services/pattern_engine/gap_detector.py — Layer 1 run_gap_detector(session, patient_id) → GapResult; tier-aware thresholds (high: flag≥1d/urgent≥3d, medium: flag≥3d/urgent≥5d, low: flag≥7d/urgent≥14d); returns gap_days, status, threshold_used; no readings → gap_days=inf, status=urgent
+- backend/app/services/pattern_engine/inertia_detector.py — Layer 1 run_inertia_detector(session, patient_id) → InertiaResult; all 5 conditions required: (1) avg systolic ≥ patient_threshold, (2) ≥5 elevated readings, (3) elevated span >7 days, (4) no med change on/after first elevated reading — uses med_history JSONB traversal (NOT last_med_change stale field), (5) 7-day recent avg ≥ patient_threshold (slope direction check: BP not declining); patient_threshold from threshold_utils (adaptive, comorbidity-adjusted); fail-safe: any unmet condition → detected=False
+- backend/app/services/pattern_engine/adherence_analyzer.py — Layer 1 run_adherence_analyzer(session, patient_id) → AdherenceResult; 28-day adherence rate from confirmations vs avg systolic; Pattern A="possible adherence concern", Pattern B="treatment review warranted", Pattern C="contextual review"; updated 2026-04-26: (1) removed hardcoded _HIGH_BP_SYSTOLIC_THRESHOLD=140 — now queries ClinicalContext first and uses compute_patient_threshold()+apply_comorbidity_adjustment() identical to inertia/deterioration; (2) Pattern B suppression uses get_titration_window() drug-class-aware gate instead of hardcoded 14d; (3) _check_pattern_b_suppression() receives patient_threshold+med_history as args, no longer queries ClinicalContext separately (eliminated duplicate DB query); suppression MUST NOT apply when no recent med change recorded; clinical language enforced at code level
+- backend/app/services/pattern_engine/deterioration_detector.py — Layer 1 run_deterioration_detector(session, patient_id) → DeteriorationResult; three signals all required: (1) positive least-squares slope over 14 days, (2) recent 3-day avg > days 4–10 baseline, (3) recent_avg ≥ patient_threshold (absolute gate — prevents firing on normotensive 115→119 rise); step-change sub-detector (OR gate): 7-day rolling mean minus 3-weeks-ago 7-day mean ≥15 mmHg AND recent_7d ≥ patient_threshold flags deterioration regardless of linear slope; <7 readings → detected=False; _least_squares_slope kept as backward-compat alias to compute_slope for test imports
+- backend/tests/test_pattern_engine.py — 64 unit tests (all passing); updated 2026-04-26: test_comorbidity_no_adjustment_when_cardio_only renamed to test_comorbidity_adjustment_when_severe_cardio_only (assertion updated to 133.0); test_comorbidity_no_adjustment_when_metabolic_only added; "too old" suppression gate updated from 30d→50d to match default 42d window; all adherence tests updated: _cc_scalar(_cc()) added as first session mock (CC query now first in run_adherence_analyzer); Pattern B suppression tests restructured (cc at position 1, old position-4 cc removed); 5 new titration window tests (beta-blocker/ACE/amlodipine/no-history/most-recent-drug)
 - frontend/src/ — dashboard shell with mock data (Krishna)
   - All 24 components and pages created (PatientList, BriefingCard, SparklineChart, AdherenceSummary, VisitAgenda, AlertInbox, RiskTierBadge, RiskScoreBar, Sidebar, ThemeToggle, Admin page)
   - npm run build passing with 0 TypeScript errors, 0 lint errors
@@ -66,7 +67,7 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - frontend/src/components/dashboard/AlertInbox.tsx — acknowledge button calls acknowledgeAlert() in api.ts; no longer UI-only
 
 - backend/app/main.py — FastAPI app entry point; CORS (localhost:3000); all 7 routers registered; WorkerProcessor starts/stops on lifespan
-- backend/app/api/patients.py — GET /api/patients (sorted tier→score DESC), GET /api/patients/{id}
+- backend/app/api/patients.py — GET /api/patients (sorted tier→score DESC), GET /api/patients/{id}; _serialise() now includes risk_score_computed_at (Fix 61)
 - backend/app/api/briefings.py — GET /api/briefings/{patient_id}; marks read_at; writes audit event
 - backend/app/api/alerts.py — GET /api/alerts (unacknowledged only), POST /api/alerts/{id}/acknowledge + audit event
 - backend/app/api/readings.py — GET /api/readings?patient_id= (28-day window), POST /api/readings (manual entry + audit)
@@ -77,6 +78,8 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - backend/app/api/shadow_mode.py — GET /api/shadow-mode/results; serves pre-computed shadow mode results from data/shadow_mode_results.json; no DB dependency; returns 404 if results not yet generated
 - scripts/run_shadow_mode.py — shadow mode validation script; **COMPLETE, PASSING at 94.3%** (see Shadow Mode section below)
 - frontend/src/app/shadow-mode/page.tsx — shadow mode results page; shows visit-by-visit ARIA vs physician comparison, between-visit alert timeline, detector breakdowns, agreement metrics
+- frontend/src/lib/types.ts — Patient interface now includes risk_score_computed_at: string | null (Fix 61)
+- frontend/src/components/dashboard/PatientList.tsx — staleness badge: amber AlertTriangle icon + "Score stale" label shown beneath RiskScoreBar when risk_score_computed_at > 26 hours ago; isScoreStale() helper added (Fix 61)
 
 - Item 22 COMPLETE: per-observation idempotency — ingestion.py uses ON CONFLICT DO NOTHING per reading; batch COUNT guard removed; setup_db.py adds idx_readings_patient_datetime_source UNIQUE index and idx_confirmations_patient_med_scheduled UNIQUE index (both IF NOT EXISTS); test_ingestion.py updated to match new execute call order
 - Item 19 COMPLETE: parametric baseline using median(historic_bp_systolic); _get_patient_baseline() async helper added to reading_generator.py; falls back to PATIENT_A_MORNING_MEAN=163.0 when <2 clinic readings; 3 new tests in TestGetPatientBaseline
@@ -94,6 +97,7 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 - briefings table: added model_version TEXT (nullable) and prompt_hash TEXT (nullable) columns for Layer 3 LLM audit trail (per CLAUDE.md: "Log: model_version, prompt_hash, generated_at in briefing row")
 - readings rows inserted by ingestion.py for clinic BP readings from FHIR Observations use session="ad_hoc" and source="clinic" to distinguish them from home monitoring readings (source="generated" | "manual" | "ble_auto")
 - clinical_context table: added med_history JSONB column (ALTER TABLE … ADD COLUMN IF NOT EXISTS); stores full medication timeline as list[{name, rxnorm, date, activity}] sorted chronologically; 104 entries for patient 1091
+- patients table: added risk_score_computed_at TIMESTAMPTZ column (ALTER TABLE … ADD COLUMN IF NOT EXISTS); set on every risk_score update; frontend shows staleness badge when > 26 hours old (Fix 61)
 
 ---
 
@@ -239,6 +243,75 @@ The 57 audit items are categorised as: Critical (7), High (14), Medium (13), Low
 - New file: `backend/tests/test_llm_validator.py` — 51 tests, all passing
 - AUDIT.md expanded to 57 items (Fixes 48–57 added); CLAUDE.md updated (briefings table, test list, audit_events action column); AGENTS.md, all .claude agents/skills verified complete
 - Groq/Gemini revert (earlier same day): summarizer.py and config.py reverted to Anthropic-only after branch merge introduced non-spec LLM keys
+
+---
+
+## Pattern Engine — Hardcode Audit + Threshold Consistency — 2026-04-26
+
+**Author:** Kush Patel  
+**Files changed:** `threshold_utils.py`, `adherence_analyzer.py`, `tests/test_pattern_engine.py`  
+**Tests:** 58 → 64 unit tests, all passing. `ruff check app/services/pattern_engine/` — all checks passed.
+
+### Fix: Comorbidity adjustment now covers severe-single comorbidity (AUDIT.md Fix 5)
+`apply_comorbidity_adjustment()` in `threshold_utils.py` previously required **both** cardio AND metabolic comorbidities to trigger the −7 mmHg threshold adjustment. AUDIT.md Fix 5 specifies it should also fire when any single severe-weight comorbidity (CHF/Stroke/TIA) is in elevated concern. Since `_CARDIO_PREFIXES` already maps exclusively to CHF (I50)/Stroke (I63)/TIA (G45), the condition simplified from `if cardio and metabolic` to `if cardio`. Patient 1091 (CHF only, no T2DM) now correctly receives a threshold of 133 mmHg instead of 140 across all four Layer 1 detectors.
+
+### Fix: TITRATION_WINDOWS drug-class-aware Pattern B gate (AUDIT.md Fix 3/26)
+Added `_TITRATION_WINDOWS` dict, `_infer_drug_class()`, and `get_titration_window()` to `threshold_utils.py`. Pattern B suppression in `adherence_analyzer.py` previously used a hardcoded `_SUPPRESSION_MED_CHANGE_DAYS = 14`. This was too short for ACE inhibitors/ARBs (28d) and far too short for amlodipine (56d), causing Pattern B to fire incorrectly on patients still in their titration window. Drug class inferred from the most recent `med_history` entry's name using suffix patterns (`-olol`, `-pril`, `-sartan`) and exact name match for amlodipine.
+
+### Fix: Adherence analyzer uses patient-adaptive threshold (consistency with inertia/deterioration)
+Removed hardcoded `_HIGH_BP_SYSTOLIC_THRESHOLD = 140` from `adherence_analyzer.py`. The `high_bp` classification and Pattern B suppression `recent_7d_avg` comparison now both use the same `patient_threshold` computed via `compute_patient_threshold()` + `apply_comorbidity_adjustment()` — identical to what inertia and deterioration do. The ClinicalContext query was moved to the top of `run_adherence_analyzer()` and its result passed into `_check_pattern_b_suppression()`, eliminating the duplicate CC query that previously existed at Query 4.
+
+---
+
+## Pattern Engine — v5.0 Spec Implementation — 2026-04-26
+
+**Author:** Prakriti Sharma  
+**Files changed:** `threshold_utils.py` (new), `inertia_detector.py`, `adherence_analyzer.py`, `deterioration_detector.py`, `tests/test_pattern_engine.py`  
+**Tests:** 39 → 58 unit tests, all passing. `ruff check app/services/pattern_engine/` — all checks passed.
+
+### threshold_utils.py (new file)
+Shared utility module imported by all four Layer 1 detectors. Centralises patient-adaptive threshold computation and comorbidity adjustment so no detector hardcodes 140 mmHg.
+
+Key functions:
+- `compute_slope()` — pure-Python least-squares (no numpy); moved from `deterioration_detector.py`; `_least_squares_slope` alias kept in that file for test compat
+- `compute_patient_threshold(historic_bp_systolic)` — returns `max(130, mean + 1.5×SD)` capped at 145; fallback 140 when <3 readings; returns `(threshold, mode_str)`
+- `classify_comorbidity_concern(problem_codes)` — ICD-10 prefix matching for cardio (I50/I63/G45) and metabolic (E11/N18) groups; degraded mode (presence = concern) until Phase 1 `problem_assessments` JSONB is available
+- `apply_comorbidity_adjustment(threshold, concern_state)` — −7 mmHg adjustment (floor 130) only when **both** cardio AND metabolic simultaneously in elevated concern; returns `(adjusted_threshold, mode_str)`
+- `get_last_med_change_date(med_history, last_med_change_fallback)` — traverses `med_history` JSONB list to find max date; falls back to `last_med_change` field if no JSONB history
+
+### inertia_detector.py — Phase 2 updates
+- **Query restructure:** added upfront `SELECT ClinicalContext WHERE patient_id=?` (scalar_one_or_none) before readings query; provides historic_bp_systolic, problem_codes, med_history, last_med_change in a single round-trip
+- **Patient-adaptive threshold:** calls `compute_patient_threshold` + `apply_comorbidity_adjustment` from threshold_utils; replaced all hardcoded 140 references
+- **Condition 4 — med_history traversal:** uses `get_last_med_change_date(med_history, last_med_change)` instead of querying `ClinicalContext.last_med_change` alone; any med_history entry with date ≥ first elevated reading blocks inertia (dose increases count as physician response)
+- **Condition 5 (new) — slope direction check:** computes 7-day recent avg from already-fetched readings; if recent_7d_avg < patient_threshold → BP is declining → do NOT flag inertia
+
+### adherence_analyzer.py — Phase 0 Fix #3+26
+- **Pattern B interpretation:** updated from "possible treatment-review case — elevated BP with high adherence signal" to "treatment review warranted" (per AGENTS.md clinical language spec)
+- **Pattern B suppression:** when Pattern B would fire, runs two additional queries (individual readings for slope + ClinicalContext for med change date); suppresses to `pattern="none"` / `"treatment appears effective — monitoring"` when slope < −0.3 AND 7-day avg < 140 AND days_since_med_change ≤ 14; suppression MUST NOT apply when no recent medication change is recorded (days_since = ∞ → gate fails)
+- Clinical language constraint still enforced: `_INTERPRETATIONS` contains no "non-adherent" or "medication failure" strings
+
+### deterioration_detector.py — Phase 0 Fix #2 + Phase 2
+- **Query restructure:** added upfront `SELECT ClinicalContext WHERE patient_id=?` for historic_bp_systolic + problem_codes; computes patient_threshold before readings query
+- **Signal 3 (absolute gate):** `recent_avg >= patient_threshold` added as third required signal; prevents firing when a normotensive patient rises from e.g. 115 → 119 mmHg
+- **Step-change sub-detector (OR gate):** `recent_7d_avg − old_7d_avg ≥ 15 mmHg AND recent_7d_avg ≥ patient_threshold` flags deterioration regardless of linear slope direction; catches acute BP step-changes that least-squares regression smooths over; only compares weeks that have data (if 14-day window, old_7d is empty → sub-detector never fires on existing tests)
+- `_least_squares_slope` kept as module-level alias (`= compute_slope`) for backward compat with test imports
+## AUDIT.md Fixes Implemented — 2026-04-26
+
+### Fix 25 — Comorbidity risk score saturated at 5 problems
+**File:** `backend/app/services/pattern_engine/risk_scorer.py` line 161
+**Issue:** `_clamp(_comorbidity_count(context) / 5.0 * 100.0)` treated every patient with 5+ coded problems identically. Patient 1091 has 17 problems — the signal was maxed out and useless for differentiation within the high-risk cohort.
+**Fix:** Replaced `_comorbidity_count()` with `_comorbidity_severity_score()` using ICD-10 prefix matching. Weights: CHF (I50) / Stroke (I63, I64) / TIA (G45) = 25 pts each; Diabetes (E11) / CKD (N18) / CAD (I25) = 15 pts each; any other coded problem = 5 pts. Total clamped to 100. CHF + Diabetes now scores 40/100 vs CHF + Stroke at 50/100 — clinically meaningful differentiation.
+
+### Fix 58 — sig_gap saturated at 14 days; sig_inertia saturated at 90 days
+**File:** `backend/app/services/pattern_engine/risk_scorer.py` lines 150/159
+**Issue:** `sig_gap = _clamp(gap_days / 14.0 * 100.0)` — a 45-day gap and a 14-day gap both scored 100/100, making the signal useless for quarterly-schedule patients. `sig_inertia = _clamp(days / 90.0 * 100.0)` — saturated at 3 months, any patient without a med change for 91 days to 5 years was treated identically.
+**Fix:** Added `_compute_window_days(patient, context)` using the same adaptive window formula as Layer 1 detectors: `min(90, max(14, (next_appointment - last_visit_date).days))`, fallback 28. `sig_gap` now normalises against `window_days` instead of 14. `sig_inertia` divisor changed from 90.0 → 180.0 (saturates at 6 months). Patient query upgraded from `select(Patient.patient_id)` to `select(Patient)` to obtain `next_appointment`.
+
+### Fix 61 — No staleness indicator on patients.risk_score
+**Files:** `backend/app/models/patient.py`, `backend/app/services/pattern_engine/risk_scorer.py`, `scripts/setup_db.py`, `backend/app/api/patients.py`, `frontend/src/lib/types.ts`, `frontend/src/components/dashboard/PatientList.tsx`
+**Issue:** `patients.risk_score` had no timestamp. A stale score from a failed midnight sweep displayed with no visual warning — clinically misleading during active patient episodes.
+**Fix:** Added `risk_score_computed_at TIMESTAMPTZ` column to Patient ORM model and DB (migration in setup_db.py). `compute_risk_score()` now sets both `risk_score` and `risk_score_computed_at = now` in the same UPDATE. API `_serialise()` exposes the field. Frontend `PatientList.tsx` shows an amber AlertTriangle badge + "Score stale" label under RiskScoreBar when `risk_score_computed_at` is older than 26 hours (single missed sweep tolerable, second is not).
+**Tests:** All 14 risk scorer tests updated and passing — mock structure, expected scores, and UPDATE assertion corrected for all three fixes.
 
 ---
 
