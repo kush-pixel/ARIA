@@ -15,6 +15,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from app.api import (
     adherence,
@@ -31,6 +33,7 @@ from app.api import (
 )
 from app.config import settings
 from app.db.base import AsyncSessionLocal
+from app.limiter import limiter  # shared limiter instance (Fix 37)
 from app.services.worker.processor import WorkerProcessor
 from app.utils.logging_utils import get_logger
 
@@ -70,6 +73,10 @@ app = FastAPI(
     description="Between-visit hypertension management decision support for clinicians.",
     lifespan=lifespan,
 )
+
+# Wire rate limiter (Fix 37) — routes apply @limiter.limit() decorators
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,

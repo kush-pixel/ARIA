@@ -14,3 +14,4 @@ python-jose[cryptography]>=3.3.0,<3.4.0
 passlib[bcrypt]>=1.7.4,<1.8.0
 apscheduler>=3.10.0,<3.11.0
 requests>=2.32.0,<2.33.0
+slowapi>=0.1.9

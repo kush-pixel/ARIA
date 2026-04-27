@@ -103,24 +103,45 @@ INDEXES: list[tuple[str, str]] = [
         "CREATE INDEX IF NOT EXISTS idx_patients_risk_score "
         "ON patients (risk_tier, risk_score DESC)",
     ),
+    # Phase 1 — clinical_context column migrations (Fix 6, 7, 8, 9)
     (
         "clinical_context_med_history_col",
         "ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS med_history JSONB",
     ),
     (
-        "idx_readings_patient_datetime_source",
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_readings_patient_datetime_source "
-        "ON readings (patient_id, effective_datetime, source)",
+        "clinical_context_problem_assessments_col",
+        "ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS problem_assessments JSONB",
     ),
     (
-        "idx_confirmations_patient_med_scheduled",
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_confirmations_patient_med_scheduled "
-        "ON medication_confirmations (patient_id, medication_name, scheduled_time)",
+        "clinical_context_allergy_reactions_col",
+        "ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS allergy_reactions TEXT[]",
     ),
+    (
+        "clinical_context_last_clinic_pulse_col",
+        "ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS last_clinic_pulse SMALLINT",
+    ),
+    (
+        "clinical_context_last_clinic_weight_kg_col",
+        "ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS last_clinic_weight_kg NUMERIC(5,1)",
+    ),
+    (
+        "clinical_context_last_clinic_spo2_col",
+        "ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS last_clinic_spo2 NUMERIC(4,1)",
+    ),
+    (
+        "clinical_context_historic_spo2_col",
+        "ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS historic_spo2 NUMERIC[]",
+    ),
+    (
+        "clinical_context_recent_labs_col",
+        "ALTER TABLE clinical_context ADD COLUMN IF NOT EXISTS recent_labs JSONB",
+    ),
+    # Phase 0 — patients column migration (Fix 61)
     (
         "patients_risk_score_computed_at_col",
         "ALTER TABLE patients ADD COLUMN IF NOT EXISTS risk_score_computed_at TIMESTAMPTZ",
     ),
+    # Phase 4 — processing_jobs retry support + briefings nullable fix
     (
         "processing_jobs_retry_count_col",
         "ALTER TABLE processing_jobs ADD COLUMN IF NOT EXISTS retry_count SMALLINT NOT NULL DEFAULT 0",
@@ -133,6 +154,18 @@ INDEXES: list[tuple[str, str]] = [
         "briefings_appointment_date_nullable",
         "ALTER TABLE briefings ALTER COLUMN appointment_date DROP NOT NULL",
     ),
+    # Generator prerequisite unique indexes
+    (
+        "idx_readings_patient_datetime_source",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_readings_patient_datetime_source "
+        "ON readings (patient_id, effective_datetime, source)",
+    ),
+    (
+        "idx_confirmations_patient_med_scheduled",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_confirmations_patient_med_scheduled "
+        "ON medication_confirmations (patient_id, medication_name, scheduled_time)",
+    ),
+    # Fix 42 — alert_feedback indexes
     (
         "idx_alert_feedback_patient_detector",
         "CREATE INDEX IF NOT EXISTS idx_alert_feedback_patient_detector "
@@ -178,9 +211,57 @@ INDEXES: list[tuple[str, str]] = [
     ),
 ]
 
+# ---------------------------------------------------------------------------
+# DB-level audit trigger for readings table (Fix 38)
+# asyncpg cannot execute multiple statements in one call, so we split the
+# trigger setup into three separate statements executed individually.
+# ---------------------------------------------------------------------------
+_TRIGGER_FUNCTION_SQL = """
+CREATE OR REPLACE FUNCTION aria_readings_audit_trigger()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_actor_id   TEXT;
+    v_request_id TEXT;
+BEGIN
+    v_actor_id   := current_setting('aria.actor_id',   true);
+    v_request_id := current_setting('aria.request_id', true);
+    INSERT INTO audit_events (
+        actor_type,
+        actor_id,
+        patient_id,
+        action,
+        resource_type,
+        resource_id,
+        outcome,
+        request_id,
+        details
+    ) VALUES (
+        COALESCE(NULLIF(v_actor_id, ''), 'system'),
+        NULLIF(v_actor_id, ''),
+        NEW.patient_id,
+        'reading_ingested',
+        'Reading',
+        NEW.reading_id::TEXT,
+        'success',
+        NULLIF(v_request_id, ''),
+        'DB trigger audit record'
+    );
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql
+"""
+
+_DROP_TRIGGER_SQL = "DROP TRIGGER IF EXISTS trg_readings_audit ON readings"
+
+_CREATE_TRIGGER_SQL = (
+    "CREATE TRIGGER trg_readings_audit "
+    "AFTER INSERT ON readings "
+    "FOR EACH ROW EXECUTE FUNCTION aria_readings_audit_trigger()"
+)
+
 
 async def create_all() -> None:
-    """Create tables then indexes, printing a confirmation line for each."""
+    """Create tables, indexes, column migrations, and DB triggers."""
     async with engine.begin() as conn:
         # Create all tables registered with Base.metadata
         await conn.run_sync(Base.metadata.create_all, checkfirst=True)
@@ -189,16 +270,26 @@ async def create_all() -> None:
     for table_name in Base.metadata.tables:
         print(f"[OK] Table: {table_name}")
 
-    # Create indexes individually so we can print per-index confirmation
+    # Create indexes and column migrations individually (safe to re-run)
     async with engine.begin() as conn:
         for index_name, ddl in INDEXES:
             await conn.execute(text(ddl))
-            print(f"[OK] Index: {index_name}")
+            print(f"[OK] Index/migration: {index_name}")
+
+    # Install DB-level audit trigger for readings table (Fix 38)
+    # Three separate statements — asyncpg cannot execute multi-statement SQL in one call.
+    async with engine.begin() as conn:
+        await conn.execute(text(_TRIGGER_FUNCTION_SQL))
+    async with engine.begin() as conn:
+        await conn.execute(text(_DROP_TRIGGER_SQL))
+    async with engine.begin() as conn:
+        await conn.execute(text(_CREATE_TRIGGER_SQL))
+    print("[OK] Trigger: trg_readings_audit on readings")
 
     print()
     print(
-        f"Done. {len(Base.metadata.tables)} tables, {len(INDEXES)} indexes "
-        f"created or already exist."
+        f"Done. {len(Base.metadata.tables)} tables, {len(INDEXES)} indexes/migrations, "
+        f"1 audit trigger created or already exist."
     )
 
 

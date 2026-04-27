@@ -1,5 +1,43 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-27 by Nesh (Phase 4 complete — Fixes 10, 21, 40, 46, 47, 60 implemented; 428 unit tests passing, ruff clean)
+Last updated: 2026-04-27 by Kush (Phase 1 + Phase 8 — AUDIT.md Fixes 6,7,8,9,12,16,35,36,37,38; rate limiting, DB audit trigger, HMAC prep)
+Previous: 2026-04-27 by Nesh (Phase 4 complete — Fixes 10, 21, 40, 46, 47, 60 implemented; 428 unit tests passing, ruff clean)
+Previous: 2026-04-27 by Sahil (Phase 5 complete + Phase 7 complete except Fix 43; 426 unit tests passing, ruff clean)
+Previous: 2026-04-26 by Yash (AUDIT.md Fixes 25, 58, 61 — severity-weighted comorbidity, adaptive gap/inertia normalization, risk_score_computed_at staleness indicator)
+
+---
+
+## Phase 1 + Phase 8 — Ingestion Data Fixes + Security Infrastructure — 2026-04-27
+
+**Author:** Kush Patel
+**Files changed:** `backend/app/services/fhir/adapter.py`, `backend/app/services/fhir/ingestion.py`, `backend/app/models/clinical_context.py`, `scripts/setup_db.py`, `backend/app/limiter.py` (new), `backend/app/config.py`, `backend/app/main.py`, `backend/app/api/readings.py`, `backend/app/api/ingest.py`, `backend/app/api/alerts.py`, `backend/requirements.txt`, `backend/tests/test_fhir_adapter.py`, `backend/tests/test_ingestion.py`
+**Tests:** 35 new adapter tests + 18 new ingestion tests, all passing. `ruff check app/` — all checks passed.
+
+### Fix 6 — Vital signs other than BP silently dropped
+PULSE, WEIGHT, PULSEOXYGEN, and TEMPERATURE from iEMR VITALS now emitted as Observations (LOINC 8867-4/29463-7/59408-5/8310-5). `ingestion.py` routes by LOINC code → `last_clinic_pulse`, `last_clinic_weight_kg`, `last_clinic_spo2`, `historic_spo2[]` in `clinical_context`. SpO2 84% for CHF patient (Nov 2011) now captured. Observation count: 65 → 190 for patient 1091.
+
+### Fix 7 — Physician assessment texts discarded
+`_build_problem_assessments()` collects per-visit `PROBLEM_ASSESSMENT_TEXT`, `PROBLEM_STATUS2_FLAG`, and `PROBLEM_STATUS2` across all visits → `_aria_problem_assessments` → `clinical_context.problem_assessments` JSONB (221 entries for patient 1091). Enables Phase 2 comorbidity-adjusted threshold with real physician labels.
+
+### Fix 8 — Social history never populated
+`_build_social_context()` joins `SOCIAL_HX_DESCRIPTION + SOCIAL_HX_COMMENT` from the most recent visit → `_aria_social_context` → `clinical_context.social_context`.
+
+### Fix 9 — Inactive allergies included; reactions not captured
+`_build_allergy_intolerances()` filters `ALLERGY_STATUS != "Active"`. Reaction text from `ALLERGY_DETAIL[0].ALLERGY_REACTION` → `reaction[0].manifestation[0].text` → `clinical_context.allergy_reactions[]` (parallel to `allergies[]`).
+
+### Fix 12 — `last_visit_date` only reflected BP clinic dates
+`_build_visit_dates()` collects all 124 ADMIT_DATE values → `last_visit_date = max(_aria_visit_dates)`. Corrected from BP-only to 2015-11-24 for patient 1091.
+
+### Fix 16 — Lab values skeleton
+`recent_labs JSONB` column added. `ingestion.py` reads `_aria_recent_labs` if present (NULL for patient 1091 — no structured lab LOINC obs in iEMR). Infrastructure ready for future data.
+
+### Fix 35 — HMAC pseudonymization prep
+`_pseudonymize_patient_id()` wired into `convert_iemr_to_fhir(pseudonym_key=...)`. Inactive until `PATIENT_PSEUDONYM_KEY` set + DB reset + re-ingestion.
+
+### Fix 36 + Fix 37 + Fix 38 — Security infrastructure
+- `jwt_expiry_minutes: int = 60` added to `Settings` (Fix 36)
+- `backend/app/limiter.py` (new): shared slowapi `Limiter`. Applied: readings (60/min), ingest (5/min), alerts (30/min) (Fix 37)
+- `trg_readings_audit` AFTER INSERT trigger on `readings` writes `audit_events` row for direct DB writes (Fix 38)
+
 ---
 
 ## Phase 0 — Standalone Correctness Fixes — 2026-04-27

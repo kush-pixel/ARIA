@@ -12,10 +12,19 @@ overwrite earlier ones so the final set reflects the *most recent* state of
 each problem, medication, allergy, and follow-up plan.  Observations
 (clinic BP readings) are never deduplicated — every vitals entry becomes
 its own resource to preserve the full BP history.
+
+Non-FHIR metadata injected into the bundle dict
+-------------------------------------------------
+``_aria_med_history``         — full medication timeline (list of dicts)
+``_aria_problem_assessments`` — per-visit physician assessment texts (list of dicts)
+``_aria_visit_dates``         — all ADMIT_DATE values as ISO date strings (list)
+``_aria_social_context``      — joined SOCIAL_HX text from most recent visit (str|None)
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac as _hmac
 from datetime import datetime
 from typing import Any
 
@@ -45,6 +54,15 @@ _LOINC_DIASTOLIC = "8462-4"
 # UCUM unit code for millimetres of mercury
 # mm[Hg] is correct UCUM syntax — the brackets are intentional
 _UCUM_MMHG = "mm[Hg]"
+
+# Additional vital-sign LOINC codes (Fix 6)
+_LOINC_PULSE  = "8867-4"   # Heart rate / pulse
+_LOINC_WEIGHT = "29463-7"  # Body weight
+_LOINC_SPO2   = "59408-5"  # Oxygen saturation by pulse oximetry
+_LOINC_TEMP   = "8310-5"   # Body temperature
+
+# Pounds → kilograms conversion factor
+_LB_TO_KG = 0.453592
 
 # Non-standard extension key used to pass age from adapter to
 # ingestion layer. Both files must use this same constant.
@@ -159,6 +177,26 @@ def _extract_rxnorm(code_mappings: dict[str, Any] | None) -> str | None:
             if code:
                 return str(code)
     return None
+
+
+def _pseudonymize_patient_id(med_rec_no: str, secret_key: str) -> str:
+    """Return a 16-char HMAC-SHA256 hex prefix for the given MED_REC_NO.
+
+    Deterministic and non-reversible without the key.
+    Only called when ``PATIENT_PSEUDONYM_KEY`` is set in config.
+
+    Args:
+        med_rec_no: The raw iEMR medical record number (e.g. ``"1091"``).
+        secret_key: The HMAC secret from ``PATIENT_PSEUDONYM_KEY`` in config.
+
+    Returns:
+        16-character lowercase hex string derived from HMAC-SHA256.
+    """
+    return _hmac.new(
+        secret_key.encode(),
+        med_rec_no.encode(),
+        hashlib.sha256,
+    ).hexdigest()[:16]
 
 
 # ---------------------------------------------------------------------------
@@ -418,6 +456,37 @@ def _build_med_history(visits: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return history
 
 
+def _build_simple_observation(
+    loinc_code: str,
+    display: str,
+    value: float,
+    unit: str,
+    ucum_code: str,
+    effective_dt: str | None,
+) -> dict[str, Any]:
+    """Build a single-value FHIR Observation with ``valueQuantity``.
+
+    Used for pulse, weight, SpO2, and temperature — which are scalar values
+    rather than BP panels (which use ``component`` instead).
+    """
+    obs: dict[str, Any] = {
+        "resourceType": "Observation",
+        "status": "final",
+        "code": {
+            "coding": [{"system": _LOINC_SYSTEM, "code": loinc_code, "display": display}]
+        },
+        "valueQuantity": {
+            "value": value,
+            "unit": unit,
+            "system": _UCUM_SYSTEM,
+            "code": ucum_code,
+        },
+    }
+    if effective_dt:
+        obs["effectiveDateTime"] = effective_dt
+    return obs
+
+
 def _build_observations(visits: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Build FHIR Observation resources from iEMR VITALS arrays.
 
@@ -425,7 +494,9 @@ def _build_observations(visits: list[dict[str, Any]]) -> list[dict[str, Any]]:
     CRITICAL: ``effectiveDateTime`` is taken from ``VITALS_DATETIME``,
     never from ``ADMIT_DATE``.
 
-    Entries missing ``SYSTOLIC_BP`` or ``DIASTOLIC_BP`` are skipped.
+    BP panel observations (LOINC 55284-4) use ``component`` structure.
+    Scalar vitals (pulse, weight, SpO2, temperature) use ``valueQuantity``.
+    BP entries missing ``SYSTOLIC_BP`` or ``DIASTOLIC_BP`` are skipped.
 
     Args:
         visits: All VISIT dicts for this patient.
@@ -438,6 +509,9 @@ def _build_observations(visits: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for visit in visits:
         for vitals in visit.get("VITALS", []):
             try:
+                effective_dt = _parse_iemr_datetime(vitals.get("VITALS_DATETIME"))
+
+                # BP panel — required fields; skip entire vitals row if absent
                 systolic_raw = vitals.get("SYSTOLIC_BP")
                 diastolic_raw = vitals.get("DIASTOLIC_BP")
                 if systolic_raw is None or diastolic_raw is None:
@@ -446,9 +520,7 @@ def _build_observations(visits: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 systolic = int(systolic_raw)
                 diastolic = int(diastolic_raw)
 
-                effective_dt = _parse_iemr_datetime(vitals.get("VITALS_DATETIME"))
-
-                resource: dict[str, Any] = {
+                bp_resource: dict[str, Any] = {
                     "resourceType": "Observation",
                     "status": "final",
                     "code": {
@@ -498,9 +570,42 @@ def _build_observations(visits: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     ],
                 }
                 if effective_dt:
-                    resource["effectiveDateTime"] = effective_dt
+                    bp_resource["effectiveDateTime"] = effective_dt
+                resources.append(bp_resource)
 
-                resources.append(resource)
+                # Pulse (LOINC 8867-4)
+                pulse_raw = vitals.get("PULSE")
+                if pulse_raw is not None:
+                    resources.append(_build_simple_observation(
+                        _LOINC_PULSE, "Heart rate", float(pulse_raw),
+                        "/min", "/min", effective_dt,
+                    ))
+
+                # Weight — iEMR stores in LB; convert to kg (LOINC 29463-7)
+                weight_raw = vitals.get("WEIGHT")
+                if weight_raw is not None:
+                    weight_kg = round(float(weight_raw) * _LB_TO_KG, 1)
+                    resources.append(_build_simple_observation(
+                        _LOINC_WEIGHT, "Body weight", weight_kg,
+                        "kg", "kg", effective_dt,
+                    ))
+
+                # SpO2 (LOINC 59408-5)
+                spo2_raw = vitals.get("PULSEOXYGEN")
+                if spo2_raw is not None:
+                    resources.append(_build_simple_observation(
+                        _LOINC_SPO2, "Oxygen saturation by pulse oximetry",
+                        float(spo2_raw), "%", "%", effective_dt,
+                    ))
+
+                # Temperature (LOINC 8310-5)
+                temp_raw = vitals.get("TEMPERATURE")
+                if temp_raw is not None:
+                    resources.append(_build_simple_observation(
+                        _LOINC_TEMP, "Body temperature", float(temp_raw),
+                        "[degF]", "[degF]", effective_dt,
+                    ))
+
             except (KeyError, TypeError, ValueError) as exc:
                 logger.warning("Skipping malformed VITALS entry: %s", exc)
 
@@ -509,6 +614,14 @@ def _build_observations(visits: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _build_allergy_intolerances(visits: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Build deduplicated FHIR AllergyIntolerance resources from iEMR ALLERGY arrays.
+
+    Filters:
+    - ``ALLERGY_STATUS == "Active"`` only — inactive allergies must not appear
+      in briefings (Fix 9).
+
+    Captures:
+    - ``ALLERGY_REACTION`` from the first ``ALLERGY_DETAIL`` entry, stored in
+      ``reaction[0].manifestation[0].text`` for display in the briefing (Fix 9).
 
     Later visits overwrite earlier ones (most-recent wins).
 
@@ -523,6 +636,10 @@ def _build_allergy_intolerances(visits: list[dict[str, Any]]) -> list[dict[str, 
     for visit in visits:
         for allergy in visit.get("ALLERGY", []):
             try:
+                # Only include allergies explicitly marked Active (Fix 9)
+                if allergy.get("ALLERGY_STATUS") != "Active":
+                    continue
+
                 key = str(allergy.get("ALLERGY_CODE", allergy.get("code", "")))
                 description = allergy.get("ALLERGY_DESCRIPTION") or allergy.get("value", "")
 
@@ -538,6 +655,16 @@ def _build_allergy_intolerances(visits: list[dict[str, Any]]) -> list[dict[str, 
                     },
                     "code": {"text": description},
                 }
+
+                # Capture reaction type from ALLERGY_DETAIL (Fix 9)
+                detail_list = allergy.get("ALLERGY_DETAIL", [])
+                if detail_list:
+                    reaction_text = detail_list[0].get("ALLERGY_REACTION", "")
+                    if reaction_text:
+                        resource["reaction"] = [
+                            {"manifestation": [{"text": reaction_text}]}
+                        ]
+
                 seen[key] = resource
             except (KeyError, TypeError) as exc:
                 logger.warning("Skipping malformed ALLERGY entry: %s", exc)
@@ -598,6 +725,136 @@ def _build_service_requests(visits: list[dict[str, Any]]) -> list[dict[str, Any]
     return list(seen.values())
 
 
+def _build_problem_assessments(visits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collect per-visit physician problem assessment texts across all visits.
+
+    Extracts ``PROBLEM_STATUS2_FLAG``, ``PROBLEM_STATUS2`` (status text), and
+    ``PROBLEM_ASSESSMENT_TEXT`` (free-text physician note) for every active
+    problem across every visit.  Problems without assessment text are skipped.
+
+    Result is sorted by ``visit_date`` DESC (most recent first; None dates last)
+    and deduplicated on ``(problem_code_or_name, visit_date)`` so re-running
+    on the same iEMR data is idempotent.
+
+    Stored as ``_aria_problem_assessments`` in the bundle dict and consumed by
+    ``ingestion.py`` → ``clinical_context.problem_assessments`` JSONB column.
+    Required by Phase 2 comorbidity-adjusted threshold (Fix 7).
+
+    Args:
+        visits: All VISIT dicts for this patient, ordered oldest-first.
+
+    Returns:
+        List of dicts::
+
+            [{
+                "problem_code":   str | None,   # ICD-10 code
+                "visit_date":     str | None,   # ISO date "YYYY-MM-DD"
+                "htn_flag":       bool,         # True when problem is HTN
+                "status_text":    str,          # PROBLEM_STATUS2 text
+                "assessment_text": str,         # PROBLEM_ASSESSMENT_TEXT (stripped)
+                "status_flag":    int | None,   # 1=Red/urgent 2=Yellow 3=Green
+            }, ...]
+    """
+    assessments: list[dict[str, Any]] = []
+    seen: set[tuple[str | None, str | None]] = set()
+
+    for visit in visits:
+        visit_date: str | None = None
+        admit = visit.get("ADMIT_DATE")
+        if admit:
+            parsed = _parse_iemr_datetime(admit)
+            if parsed:
+                visit_date = parsed[:10]
+
+        for prob in visit.get("PROBLEM", []):
+            try:
+                assessment_text = (prob.get("PROBLEM_ASSESSMENT_TEXT") or "").strip()
+                if not assessment_text:
+                    continue
+
+                icd10 = _extract_icd10(prob.get("code_mappings"), None)
+                description = prob.get("PROBLEM_DESCRIPTION") or prob.get("value", "")
+                dedup_key = (icd10 or description, visit_date)
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
+
+                flag_raw = prob.get("PROBLEM_STATUS2_FLAG")
+                status_flag: int | None = None
+                if flag_raw is not None and str(flag_raw).strip().isdigit():
+                    status_flag = int(str(flag_raw).strip())
+
+                assessments.append({
+                    "problem_code": icd10,
+                    "visit_date": visit_date,
+                    "htn_flag": "HYPERTENSION" in description.upper(),
+                    "status_text": prob.get("PROBLEM_STATUS2") or "",
+                    "assessment_text": assessment_text,
+                    "status_flag": status_flag,
+                })
+            except (KeyError, TypeError) as exc:
+                logger.warning("Skipping malformed PROBLEM entry in assessments: %s", exc)
+
+    # Sort DESC by visit_date (None dates last)
+    assessments.sort(
+        key=lambda x: (x["visit_date"] is None, x["visit_date"] or ""),
+        reverse=True,
+    )
+    return assessments
+
+
+def _build_visit_dates(visits: list[dict[str, Any]]) -> list[str]:
+    """Return sorted, deduplicated ISO date strings for all ADMIT_DATE values.
+
+    Used to fix ``last_visit_date`` which previously only considered BP clinic
+    dates (53 visits), missing 71 non-vitals visits (Fix 12).
+
+    Args:
+        visits: All VISIT dicts for this patient, ordered oldest-first.
+
+    Returns:
+        Sorted list of ISO date strings ``"YYYY-MM-DD"`` (ASC, no duplicates).
+    """
+    dates: set[str] = set()
+    for visit in visits:
+        admit = visit.get("ADMIT_DATE")
+        if admit:
+            parsed = _parse_iemr_datetime(admit)
+            if parsed:
+                dates.add(parsed[:10])
+    return sorted(dates)
+
+
+def _build_social_context(visits: list[dict[str, Any]]) -> str | None:
+    """Join SOCIAL_HX entries from the most recent visit that has them.
+
+    Searches visits in reverse chronological order and returns a semicolon-
+    joined string of ``"DESCRIPTION: comment"`` entries from the first visit
+    that has a non-empty ``SOCIAL_HX`` array (Fix 8).
+
+    Args:
+        visits: All VISIT dicts for this patient, ordered oldest-first.
+
+    Returns:
+        Semicolon-joined social history string, or ``None`` if no entries found.
+    """
+    for visit in reversed(visits):
+        entries = visit.get("SOCIAL_HX", [])
+        if not entries:
+            continue
+        parts: list[str] = []
+        for entry in entries:
+            desc = entry.get("SOCIAL_HX_DESCRIPTION", "").strip()
+            comment = entry.get("SOCIAL_HX_COMMENT", "").strip().rstrip(".")
+            if comment and comment != desc:
+                parts.append(f"{desc}: {comment}" if desc else comment)
+            elif desc:
+                parts.append(desc)
+        if parts:
+            return "; ".join(parts)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -606,6 +863,7 @@ def _build_service_requests(visits: list[dict[str, Any]]) -> list[dict[str, Any]
 def convert_iemr_to_fhir(
     iemr_data: dict[str, Any],
     patient_id: str | None = None,
+    pseudonym_key: str = "",
 ) -> dict[str, Any]:
     """Convert an iEMR patient record to a FHIR R4 Bundle.
 
@@ -621,10 +879,15 @@ def convert_iemr_to_fhir(
         patient_id: The patient's MED_REC_NO (e.g. ``"1091"``).  When
             ``None``, the first key of *iemr_data* is used as a fallback
             (useful in tests where the key IS the patient ID).
+        pseudonym_key: Optional HMAC secret from ``PATIENT_PSEUDONYM_KEY``
+            in config.  When non-empty, the patient ID is replaced with a
+            16-char HMAC-SHA256 hex prefix before any data enters the DB.
+            Activating this requires clearing the DB and re-ingesting (Fix 35).
 
     Returns:
         FHIR R4 Bundle dict of type ``"collection"`` containing all
-        extracted resources.
+        extracted resources, plus non-FHIR metadata keys consumed by
+        ``ingestion.py``.
 
     Raises:
         ValueError: If *iemr_data* is empty or contains no visits.
@@ -640,6 +903,12 @@ def convert_iemr_to_fhir(
     # Resolve the patient ID: prefer the explicit argument, fall back to the
     # first key (which equals the patient ID in fixture / test data).
     resolved_id: str = patient_id if patient_id is not None else first_key
+
+    # Apply HMAC pseudonymization if key is configured (Fix 35).
+    # NOTE: activating this after initial ingestion requires clearing the DB
+    # and re-running the full pipeline (patient_id "1091" → 16-char hash).
+    if pseudonym_key:
+        resolved_id = _pseudonymize_patient_id(resolved_id, pseudonym_key)
 
     visits: list[dict[str, Any]] = patient_record.get("VISIT", [])
 
@@ -659,6 +928,9 @@ def convert_iemr_to_fhir(
     allergy_intolerances = _build_allergy_intolerances(visits)
     service_requests = _build_service_requests(visits)
     med_history = _build_med_history(visits)
+    problem_assessments = _build_problem_assessments(visits)
+    visit_dates = _build_visit_dates(visits)
+    social_context = _build_social_context(visits)
 
     all_resources: list[dict[str, Any]] = (
         [patient_resource]
@@ -678,11 +950,19 @@ def convert_iemr_to_fhir(
         len(allergy_intolerances),
         len(service_requests),
     )
-    logger.info("med_history: %d entries collected", len(med_history))
+    logger.info(
+        "Non-FHIR metadata: med_history=%d problem_assessments=%d visit_dates=%d",
+        len(med_history),
+        len(problem_assessments),
+        len(visit_dates),
+    )
 
     return {
         "resourceType": "Bundle",
         "type": "collection",
         "entry": [{"resource": r} for r in all_resources],
-        "_aria_med_history": med_history,  # non-FHIR metadata — consumed by ingestion.py
+        "_aria_med_history": med_history,            # full medication timeline
+        "_aria_problem_assessments": problem_assessments,  # physician assessment texts
+        "_aria_visit_dates": visit_dates,            # all 124 visit dates (Fix 12)
+        "_aria_social_context": social_context,      # SOCIAL_HX free text (Fix 8)
     }

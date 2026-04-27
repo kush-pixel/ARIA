@@ -26,6 +26,8 @@ from app.models.reading import Reading
 from app.services.fhir.ingestion import (
     _determine_risk_tier,
     _extract_obs_components,
+    _get_obs_loinc,
+    _get_obs_scalar_value,
     _group_entries,
     _parse_authored_on,
     ingest_fhir_bundle,
@@ -72,9 +74,12 @@ def _observation_resource(
     diastolic: int = 90,
     effective_dt: str = "2020-06-15T09:00:00",
 ) -> dict:
+    # Top-level LOINC 55284-4 (BP panel) is required so _get_obs_loinc() can
+    # identify this as a BP observation (matching what adapter.py produces).
     return {
         "resourceType": "Observation",
         "status": "final",
+        "code": {"coding": [{"system": "http://loinc.org", "code": "55284-4"}]},
         "component": [
             {
                 "code": {"coding": [{"system": "http://loinc.org", "code": "8480-6"}]},
@@ -404,8 +409,7 @@ async def test_ingest_reading_inserted(full_bundle: dict) -> None:
     summary = await ingest_fhir_bundle(full_bundle, session)
     assert summary["readings_inserted"] == 1
 
-    # Confirm the INSERT statement was executed (index 3 = first reading insert)
-    # and no Reading was passed to session.add (old batch path is gone).
+    # Readings go via session.execute (ON CONFLICT path), not session.add.
     added = [c.args[0] for c in session.add.call_args_list]
     readings = [obj for obj in added if isinstance(obj, Reading)]
     assert len(readings) == 0  # readings now go via session.execute, not session.add
@@ -517,6 +521,276 @@ async def test_ingest_med_history_stored(full_bundle: dict) -> None:
     compiled = stmt.compile()
     assert "med_history" in str(compiled)
     assert compiled.params.get("med_history") == full_bundle["_aria_med_history"]
+
+
+# ---------------------------------------------------------------------------
+# New ingestion tests — Phase 1 Fixes 6, 7, 8, 9, 12, 16
+# ---------------------------------------------------------------------------
+
+
+def _scalar_obs_resource(loinc_code: str, value: float, unit: str, effective_dt: str = "2020-06-15T09:00:00") -> dict:
+    """Build a FHIR Observation with valueQuantity (pulse, weight, SpO2, temp)."""
+    return {
+        "resourceType": "Observation",
+        "status": "final",
+        "code": {"coding": [{"system": "http://loinc.org", "code": loinc_code}]},
+        "valueQuantity": {"value": value, "unit": unit, "system": "http://unitsofmeasure.org", "code": unit},
+        "effectiveDateTime": effective_dt,
+    }
+
+
+def _allergy_resource_with_reaction(text: str, reaction: str) -> dict:
+    """AllergyIntolerance resource with reaction/manifestation."""
+    return {
+        "resourceType": "AllergyIntolerance",
+        "clinicalStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical", "code": "active"}]},
+        "code": {"text": text},
+        "reaction": [{"manifestation": [{"text": reaction}]}],
+    }
+
+
+def _make_extended_mock_session(reading_rowcount: int = 1, extra_results: int = 0) -> MagicMock:
+    """Mock session with extra execute side effects for bundles with many obs."""
+    existing_patient = MagicMock()
+    existing_patient.scalar_one_or_none.return_value = None
+    insert_patient_result = MagicMock()
+    upsert_cc_result = MagicMock()
+    reading_insert_result = MagicMock()
+    reading_insert_result.rowcount = reading_rowcount
+
+    side_effects = [
+        existing_patient,
+        insert_patient_result,
+        upsert_cc_result,
+        reading_insert_result,
+    ] + [MagicMock() for _ in range(extra_results)]
+
+    session = MagicMock()
+    session.execute = AsyncMock(side_effect=side_effects)
+    session.add = MagicMock()
+    session.commit = AsyncMock()
+    session.rollback = AsyncMock()
+    return session
+
+
+# --- _get_obs_loinc / _get_obs_scalar_value helpers ---
+
+
+def test_get_obs_loinc_extracts_code() -> None:
+    obs = {"code": {"coding": [{"code": "8867-4"}]}}
+    assert _get_obs_loinc(obs) == "8867-4"
+
+
+def test_get_obs_loinc_missing_returns_empty() -> None:
+    assert _get_obs_loinc({}) == ""
+
+
+def test_get_obs_scalar_value_extracts_float() -> None:
+    obs = {"valueQuantity": {"value": 63.0}}
+    assert _get_obs_scalar_value(obs) == 63.0
+
+
+def test_get_obs_scalar_value_none_when_absent() -> None:
+    assert _get_obs_scalar_value({}) is None
+
+
+# --- Fix 12: last_visit_date from _aria_visit_dates ---
+
+
+@pytest.mark.asyncio
+async def test_last_visit_date_from_aria_visit_dates(full_bundle: dict) -> None:
+    """last_visit_date must be max(_aria_visit_dates) when the key is present."""
+    from datetime import date
+
+    full_bundle["_aria_visit_dates"] = ["2020-06-15", "2021-03-01", "2019-12-31"]
+    session = _make_mock_session()
+    await ingest_fhir_bundle(full_bundle, session)
+
+    upsert_call = session.execute.call_args_list[2]
+    compiled = upsert_call.args[0].compile()
+    assert compiled.params.get("last_visit_date") == date(2021, 3, 1)
+
+
+@pytest.mark.asyncio
+async def test_last_visit_date_fallback_to_obs_when_no_visit_dates(full_bundle: dict) -> None:
+    """Without _aria_visit_dates, last_visit_date falls back to last BP observation."""
+    from datetime import date
+
+    full_bundle.pop("_aria_visit_dates", None)
+    session = _make_mock_session()
+    await ingest_fhir_bundle(full_bundle, session)
+
+    upsert_call = session.execute.call_args_list[2]
+    compiled = upsert_call.args[0].compile()
+    assert compiled.params.get("last_visit_date") == date(2020, 6, 15)
+
+
+# --- Fix 7: problem_assessments from _aria_problem_assessments ---
+
+
+@pytest.mark.asyncio
+async def test_problem_assessments_stored_in_cc_values(full_bundle: dict) -> None:
+    """problem_assessments from _aria_problem_assessments is persisted to ClinicalContext."""
+    assessments = [
+        {"problem_code": "I10", "visit_date": "2020-06-15", "htn_flag": True,
+         "status_text": "Under Evaluation", "assessment_text": "HTN high today.", "status_flag": 2}
+    ]
+    full_bundle["_aria_problem_assessments"] = assessments
+    session = _make_mock_session()
+    await ingest_fhir_bundle(full_bundle, session)
+
+    upsert_call = session.execute.call_args_list[2]
+    compiled = upsert_call.args[0].compile()
+    assert "problem_assessments" in str(compiled)
+    assert compiled.params.get("problem_assessments") == assessments
+
+
+# --- Fix 8: social_context from _aria_social_context ---
+
+
+@pytest.mark.asyncio
+async def test_social_context_stored_in_cc_values(full_bundle: dict) -> None:
+    """social_context from _aria_social_context is persisted to ClinicalContext."""
+    full_bundle["_aria_social_context"] = "SMOKING: Never smoked"
+    session = _make_mock_session()
+    await ingest_fhir_bundle(full_bundle, session)
+
+    upsert_call = session.execute.call_args_list[2]
+    compiled = upsert_call.args[0].compile()
+    assert compiled.params.get("social_context") == "SMOKING: Never smoked"
+
+
+# --- Fix 9: allergy_reactions parallel array ---
+
+
+@pytest.mark.asyncio
+async def test_allergy_reactions_stored_parallel_to_allergies() -> None:
+    """allergy_reactions list mirrors allergies list with reaction text or empty string."""
+    bundle = _make_bundle([
+        _patient_resource(),
+        _observation_resource(145, 90, "2020-06-15T09:00:00"),
+        _allergy_resource("SULFA"),                        # no reaction
+        _allergy_resource_with_reaction("PENICILLIN", "Anaphylaxis"),
+    ])
+    bundle["_aria_med_history"] = []
+    session = _make_mock_session()
+    await ingest_fhir_bundle(bundle, session)
+
+    upsert_call = session.execute.call_args_list[2]
+    compiled = upsert_call.args[0].compile()
+    reactions = compiled.params.get("allergy_reactions")
+    assert reactions is not None
+    assert len(reactions) == 2
+    # Order matches the allergy resources order in the bundle
+    assert "" in reactions          # SULFA has no reaction
+    assert "Anaphylaxis" in reactions
+
+
+# --- Fix 6: last_clinic_pulse, last_clinic_spo2, historic_spo2 ---
+
+
+@pytest.mark.asyncio
+async def test_last_clinic_pulse_stored() -> None:
+    """last_clinic_pulse is populated from LOINC 8867-4 Observation."""
+    pulse_obs = _scalar_obs_resource("8867-4", 68.0, "/min")
+    bundle = _make_bundle([
+        _patient_resource(),
+        _observation_resource(145, 90, "2020-06-15T09:00:00"),
+        pulse_obs,
+    ])
+    bundle["_aria_med_history"] = []
+    session = _make_mock_session()
+    await ingest_fhir_bundle(bundle, session)
+
+    upsert_call = session.execute.call_args_list[2]
+    compiled = upsert_call.args[0].compile()
+    assert compiled.params.get("last_clinic_pulse") == 68
+
+
+@pytest.mark.asyncio
+async def test_last_clinic_spo2_stored_and_historic_populated() -> None:
+    """last_clinic_spo2 and historic_spo2 are populated from LOINC 59408-5 Observations."""
+    spo2_obs_1 = _scalar_obs_resource("59408-5", 93.0, "%", "2020-01-01T09:00:00")
+    spo2_obs_2 = _scalar_obs_resource("59408-5", 91.0, "%", "2020-06-15T09:00:00")
+    bundle = _make_bundle([
+        _patient_resource(),
+        _observation_resource(145, 90, "2020-06-15T09:00:00"),
+        spo2_obs_1,
+        spo2_obs_2,
+    ])
+    bundle["_aria_med_history"] = []
+    session = _make_mock_session()
+    await ingest_fhir_bundle(bundle, session)
+
+    upsert_call = session.execute.call_args_list[2]
+    compiled = upsert_call.args[0].compile()
+    # last_clinic_spo2 is the last (most recent) SpO2 value
+    assert compiled.params.get("last_clinic_spo2") == 91.0
+    historic = compiled.params.get("historic_spo2")
+    assert historic is not None
+    assert len(historic) == 2
+    assert 93.0 in historic
+    assert 91.0 in historic
+
+
+# --- Fix 6: non-BP observations must NOT become readings rows ---
+
+
+@pytest.mark.asyncio
+async def test_non_bp_observations_not_inserted_as_readings() -> None:
+    """Pulse/SpO2/Weight observations must NOT be inserted into the readings table."""
+    pulse_obs = _scalar_obs_resource("8867-4", 68.0, "/min")
+    spo2_obs = _scalar_obs_resource("59408-5", 93.0, "%")
+    # Only 1 BP observation — readings_inserted must be 1, not 3
+    bundle = _make_bundle([
+        _patient_resource(),
+        _observation_resource(145, 90, "2020-06-15T09:00:00"),  # BP panel
+        pulse_obs,
+        spo2_obs,
+    ])
+    bundle["_aria_med_history"] = []
+
+    # Provide extra side effects so the mock doesn't raise StopIteration if
+    # ingestion accidentally tries to insert non-BP obs as readings
+    session = _make_extended_mock_session(reading_rowcount=1, extra_results=2)
+    summary = await ingest_fhir_bundle(bundle, session)
+
+    assert summary["readings_inserted"] == 1
+    # Calls: 0=SELECT Patient, 1=INSERT Patient, 2=UPSERT CC, 3=INSERT 1 BP reading
+    # If pulse/spo2 were mistakenly inserted, call_count would be 6+ (plus audit commit)
+    assert session.execute.call_count == 4  # exactly 4 execute calls
+
+
+# --- Fix 16: recent_labs skeleton ---
+
+
+@pytest.mark.asyncio
+async def test_recent_labs_none_when_no_aria_recent_labs(full_bundle: dict) -> None:
+    """Without _aria_recent_labs key, recent_labs must be None in cc_values."""
+    full_bundle.pop("_aria_recent_labs", None)
+    session = _make_mock_session()
+    await ingest_fhir_bundle(full_bundle, session)
+
+    upsert_call = session.execute.call_args_list[2]
+    compiled = upsert_call.args[0].compile()
+    assert compiled.params.get("recent_labs") is None
+
+
+@pytest.mark.asyncio
+async def test_recent_labs_stored_when_present(full_bundle: dict) -> None:
+    """When _aria_recent_labs is present, recent_labs is built from it."""
+    full_bundle["_aria_recent_labs"] = [
+        {"loinc_code": "2160-0", "value": 1.1, "unit": "mg/dL", "date": "2020-05-01"},
+    ]
+    session = _make_mock_session()
+    await ingest_fhir_bundle(full_bundle, session)
+
+    upsert_call = session.execute.call_args_list[2]
+    compiled = upsert_call.args[0].compile()
+    labs = compiled.params.get("recent_labs")
+    assert labs is not None
+    assert "2160-0" in labs
+    assert labs["2160-0"]["value"] == 1.1
 
 
 # ---------------------------------------------------------------------------

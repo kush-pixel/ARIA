@@ -10,12 +10,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session
+from app.limiter import limiter
 from app.models.alert import Alert
 from app.models.alert_feedback import AlertFeedback
 from app.models.audit_event import AuditEvent
@@ -51,7 +52,9 @@ class AcknowledgeRequest(BaseModel):
 
 
 @router.get("/alerts")
+@limiter.limit("30/minute")
 async def list_alerts(
+    request: Request,
     patient_id: str | None = None,
     session: AsyncSession = Depends(get_session),
 ) -> list[dict]:

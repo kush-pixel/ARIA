@@ -20,8 +20,12 @@ import pytest
 
 from app.services.fhir.adapter import (
     _build_med_history,
+    _build_problem_assessments,
+    _build_social_context,
+    _build_visit_dates,
     _map_gender,
     _parse_iemr_datetime,
+    _pseudonymize_patient_id,
     convert_iemr_to_fhir,
 )
 
@@ -117,6 +121,7 @@ def _allergy(
         "code": "internal_3",
         "ALLERGY_CODE": allergy_code,
         "ALLERGY_DESCRIPTION": description,
+        "ALLERGY_STATUS": "Active",  # Fix 9: active-status filter requires this field
     }
 
 
@@ -735,6 +740,423 @@ def test_bundle_contains_aria_med_history_key() -> None:
     assert "_aria_med_history" in bundle
     assert isinstance(bundle["_aria_med_history"], list)
     assert len(bundle["_aria_med_history"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Helpers for new fixture types (Fix 6, 7, 8, 9, 12)
+# ---------------------------------------------------------------------------
+
+
+def _vitals_with_extras(
+    systolic: str = "145",
+    diastolic: str = "90",
+    vitals_datetime: str = "01/21/2008 10:28",
+    pulse: str | None = None,
+    weight: str | None = None,
+    pulseoxygen: str | None = None,
+    temperature: str | None = None,
+) -> dict:
+    """Vitals entry with optional extra fields beyond BP."""
+    v: dict = {
+        "SYSTOLIC_BP": systolic,
+        "DIASTOLIC_BP": diastolic,
+        "VITALS_DATETIME": vitals_datetime,
+    }
+    if pulse is not None:
+        v["PULSE"] = pulse
+    if weight is not None:
+        v["WEIGHT"] = weight
+    if pulseoxygen is not None:
+        v["PULSEOXYGEN"] = pulseoxygen
+    if temperature is not None:
+        v["TEMPERATURE"] = temperature
+    return v
+
+
+def _allergy_active(
+    allergy_code: str = "A001",
+    description: str = "Penicillin",
+    status: str = "Active",
+    reaction: str = "",
+) -> dict:
+    """Allergy entry with ALLERGY_STATUS and optional ALLERGY_REACTION."""
+    a: dict = {
+        "code": "internal_3",
+        "ALLERGY_CODE": allergy_code,
+        "ALLERGY_DESCRIPTION": description,
+        "ALLERGY_STATUS": status,
+    }
+    if reaction:
+        a["ALLERGY_DETAIL"] = [{"ALLERGY_REACTION": reaction}]
+    return a
+
+
+def _problem_with_assessment(
+    code: str = "P001",
+    description: str = "Hypertension",
+    icd10: str = "I10",
+    status2: str = "Under Evaluation",
+    status2_flag: str = "2",
+    assessment_text: str = "HTN under review.",
+) -> dict:
+    """Problem entry including PROBLEM_STATUS2* and PROBLEM_ASSESSMENT_TEXT."""
+    return {
+        "code": "internal_pa",
+        "PROBLEM_CODE": code,
+        "PROBLEM_DESCRIPTION": description,
+        "value": description,
+        "PROBLEM_ACTIVITY": "Active",
+        "PROBLEM_CLASSIFICATION": "Working Diagnosis",
+        "PROBLEM_STATUS2": status2,
+        "PROBLEM_STATUS2_FLAG": status2_flag,
+        "PROBLEM_ASSESSMENT_TEXT": assessment_text,
+        "code_mappings": {
+            "code_mappings": [{"code": icd10, "code_type": "ICD10"}]
+        },
+    }
+
+
+def _social_hx_entry(description: str = "SMOKING", comment: str = "Never smoked") -> dict:
+    return {
+        "SOCIAL_HX_CODE": description,
+        "SOCIAL_HX_DESCRIPTION": description,
+        "SOCIAL_HX_COMMENT": comment,
+    }
+
+
+# ---------------------------------------------------------------------------
+# _build_observations — extra vitals (Fix 6)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildVitalObservations:
+    """New scalar vital observations emitted alongside BP panel."""
+
+    def _obs_by_loinc(self, bundle: dict, loinc: str) -> list[dict]:
+        return [
+            e["resource"]
+            for e in bundle["entry"]
+            if e["resource"]["resourceType"] == "Observation"
+            and e["resource"].get("code", {}).get("coding", [{}])[0].get("code") == loinc
+        ]
+
+    def test_pulse_observation_created(self) -> None:
+        visit = _make_visit(vitals=[_vitals_with_extras(pulse="63")])
+        bundle = convert_iemr_to_fhir(_make_iemr([visit]))
+        pulse_obs = self._obs_by_loinc(bundle, "8867-4")
+        assert len(pulse_obs) == 1
+        assert pulse_obs[0]["valueQuantity"]["value"] == 63.0
+        assert pulse_obs[0]["valueQuantity"]["unit"] == "/min"
+
+    def test_weight_converted_to_kg(self) -> None:
+        visit = _make_visit(vitals=[_vitals_with_extras(weight="170")])
+        bundle = convert_iemr_to_fhir(_make_iemr([visit]))
+        weight_obs = self._obs_by_loinc(bundle, "29463-7")
+        assert len(weight_obs) == 1
+        kg = weight_obs[0]["valueQuantity"]["value"]
+        # 170 lb × 0.453592 ≈ 77.1 kg
+        assert abs(kg - 77.1) < 0.1
+        assert weight_obs[0]["valueQuantity"]["unit"] == "kg"
+
+    def test_spo2_observation_created(self) -> None:
+        visit = _make_visit(vitals=[_vitals_with_extras(pulseoxygen="84")])
+        bundle = convert_iemr_to_fhir(_make_iemr([visit]))
+        spo2_obs = self._obs_by_loinc(bundle, "59408-5")
+        assert len(spo2_obs) == 1
+        assert spo2_obs[0]["valueQuantity"]["value"] == 84.0
+        assert spo2_obs[0]["valueQuantity"]["unit"] == "%"
+
+    def test_temperature_observation_created(self) -> None:
+        visit = _make_visit(vitals=[_vitals_with_extras(temperature="98.6")])
+        bundle = convert_iemr_to_fhir(_make_iemr([visit]))
+        temp_obs = self._obs_by_loinc(bundle, "8310-5")
+        assert len(temp_obs) == 1
+        assert temp_obs[0]["valueQuantity"]["value"] == 98.6
+
+    def test_missing_vitals_not_created(self) -> None:
+        """A vitals row with only BP should produce no pulse/weight/spo2/temp obs."""
+        visit = _make_visit(vitals=[_vitals()])
+        bundle = convert_iemr_to_fhir(_make_iemr([visit]))
+        for loinc in ("8867-4", "29463-7", "59408-5", "8310-5"):
+            assert self._obs_by_loinc(bundle, loinc) == [], f"Unexpected {loinc} observation"
+
+    def test_bp_obs_still_created_alongside_vitals(self) -> None:
+        """BP panel observation must still be present when extra vitals exist."""
+        visit = _make_visit(vitals=[_vitals_with_extras(pulse="70", weight="150")])
+        bundle = convert_iemr_to_fhir(_make_iemr([visit]))
+        bp_obs = self._obs_by_loinc(bundle, "55284-4")
+        assert len(bp_obs) == 1
+
+
+# ---------------------------------------------------------------------------
+# _build_allergy_intolerances — active filter + reaction (Fix 9)
+# ---------------------------------------------------------------------------
+
+
+class TestAllergyActiveFilerAndReaction:
+    def _allergy_resources(self, bundle: dict) -> list[dict]:
+        return [
+            e["resource"]
+            for e in bundle["entry"]
+            if e["resource"]["resourceType"] == "AllergyIntolerance"
+        ]
+
+    def test_inactive_allergies_excluded(self) -> None:
+        active = _allergy_active(description="Penicillin", status="Active")
+        inactive = _allergy_active(
+            allergy_code="A002", description="Sulfa", status="Inactive"
+        )
+        visit = _make_visit(allergies=[active, inactive])
+        bundle = convert_iemr_to_fhir(_make_iemr([visit]))
+        allergies = self._allergy_resources(bundle)
+        assert len(allergies) == 1
+        assert allergies[0]["code"]["text"] == "Penicillin"
+
+    def test_allergy_reaction_captured_in_resource(self) -> None:
+        allergy = _allergy_active(
+            description="Penicillin",
+            status="Active",
+            reaction="Anaphylaxis",
+        )
+        visit = _make_visit(allergies=[allergy])
+        bundle = convert_iemr_to_fhir(_make_iemr([visit]))
+        allergies = self._allergy_resources(bundle)
+        assert len(allergies) == 1
+        reaction_text = allergies[0]["reaction"][0]["manifestation"][0]["text"]
+        assert reaction_text == "Anaphylaxis"
+
+    def test_allergy_without_reaction_has_no_reaction_key(self) -> None:
+        allergy = _allergy_active(description="Aspirin", status="Active")
+        visit = _make_visit(allergies=[allergy])
+        bundle = convert_iemr_to_fhir(_make_iemr([visit]))
+        allergies = self._allergy_resources(bundle)
+        assert len(allergies) == 1
+        assert "reaction" not in allergies[0]
+
+    def test_allergy_missing_status_field_excluded(self) -> None:
+        """Allergies without ALLERGY_STATUS must be excluded (treat as not Active)."""
+        allergy_no_status = {
+            "ALLERGY_CODE": "A001",
+            "ALLERGY_DESCRIPTION": "Latex",
+        }
+        visit = _make_visit(allergies=[allergy_no_status])
+        bundle = convert_iemr_to_fhir(_make_iemr([visit]))
+        assert self._allergy_resources(bundle) == []
+
+
+# ---------------------------------------------------------------------------
+# _build_problem_assessments (Fix 7)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildProblemAssessments:
+    def test_empty_visits_returns_empty_list(self) -> None:
+        assert _build_problem_assessments([]) == []
+
+    def test_single_assessment_extracted(self) -> None:
+        prob = _problem_with_assessment(
+            description="Hypertension",
+            icd10="I10",
+            status2="Under Evaluation",
+            status2_flag="2",
+            assessment_text="HTN under review.",
+        )
+        visit = _make_visit(problems=[prob], admit_date="01/21/2008 10:28")
+        result = _build_problem_assessments([visit])
+        assert len(result) == 1
+        entry = result[0]
+        assert entry["problem_code"] == "I10"
+        assert entry["visit_date"] == "2008-01-21"
+        assert entry["status_text"] == "Under Evaluation"
+        assert entry["assessment_text"] == "HTN under review."
+        assert entry["status_flag"] == 2
+
+    def test_htn_flag_set_for_hypertension_problem(self) -> None:
+        prob = _problem_with_assessment(description="HYPERTENSION", icd10="I10")
+        visit = _make_visit(problems=[prob])
+        result = _build_problem_assessments([visit])
+        assert result[0]["htn_flag"] is True
+
+    def test_htn_flag_false_for_non_htn_problem(self) -> None:
+        prob = _problem_with_assessment(description="CAD", icd10="I25")
+        visit = _make_visit(problems=[prob])
+        result = _build_problem_assessments([visit])
+        assert result[0]["htn_flag"] is False
+
+    def test_problems_without_assessment_text_skipped(self) -> None:
+        prob_no_text = {
+            "PROBLEM_CODE": "P001",
+            "PROBLEM_DESCRIPTION": "Hypertension",
+            "PROBLEM_ACTIVITY": "Active",
+            "PROBLEM_ASSESSMENT_TEXT": "",
+        }
+        visit = _make_visit(problems=[prob_no_text])
+        result = _build_problem_assessments([visit])
+        assert result == []
+
+    def test_sorted_descending_by_visit_date(self) -> None:
+        """Most recent visit date should appear first."""
+        prob = _problem_with_assessment(description="Hypertension", icd10="I10")
+        visit_old = _make_visit(problems=[prob], admit_date="01/01/2010 09:00")
+        # Different problem to avoid dedup key collision
+        prob2 = _problem_with_assessment(description="CAD", icd10="I25")
+        visit_new = _make_visit(problems=[prob2], admit_date="06/01/2020 09:00")
+        result = _build_problem_assessments([visit_old, visit_new])
+        assert len(result) == 2
+        assert result[0]["visit_date"] == "2020-06-01"
+        assert result[1]["visit_date"] == "2010-01-01"
+
+    def test_deduplication_same_code_same_date(self) -> None:
+        """Same (icd10, visit_date) across two visits must appear only once."""
+        prob = _problem_with_assessment(description="Hypertension", icd10="I10")
+        visit = _make_visit(problems=[prob, prob], admit_date="01/01/2010 09:00")
+        result = _build_problem_assessments([visit])
+        assert len(result) == 1
+
+
+def test_bundle_contains_aria_problem_assessments_key() -> None:
+    """convert_iemr_to_fhir must attach _aria_problem_assessments list to bundle."""
+    prob = _problem_with_assessment()
+    visit = _make_visit(problems=[prob])
+    bundle = convert_iemr_to_fhir(_make_iemr([visit]))
+    assert "_aria_problem_assessments" in bundle
+    assert isinstance(bundle["_aria_problem_assessments"], list)
+
+
+# ---------------------------------------------------------------------------
+# _build_visit_dates (Fix 12)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildVisitDates:
+    def test_empty_visits_returns_empty_list(self) -> None:
+        assert _build_visit_dates([]) == []
+
+    def test_all_admit_dates_collected(self) -> None:
+        visit1 = _make_visit(admit_date="01/01/2010 09:00")
+        visit2 = _make_visit(admit_date="06/15/2011 14:30")
+        result = _build_visit_dates([visit1, visit2])
+        assert "2010-01-01" in result
+        assert "2011-06-15" in result
+
+    def test_deduplication(self) -> None:
+        """Same date on two visits should appear only once."""
+        visit1 = _make_visit(admit_date="01/01/2010 09:00")
+        visit2 = _make_visit(admit_date="01/01/2010 15:00")
+        result = _build_visit_dates([visit1, visit2])
+        assert result.count("2010-01-01") == 1
+
+    def test_sorted_ascending(self) -> None:
+        visit_late = _make_visit(admit_date="06/01/2020 09:00")
+        visit_early = _make_visit(admit_date="01/01/2010 09:00")
+        result = _build_visit_dates([visit_late, visit_early])
+        assert result[0] == "2010-01-01"
+        assert result[-1] == "2020-06-01"
+
+    def test_missing_admit_date_skipped(self) -> None:
+        visit = {"GENDER": "M"}
+        result = _build_visit_dates([visit])
+        assert result == []
+
+
+def test_bundle_contains_aria_visit_dates_key() -> None:
+    """convert_iemr_to_fhir must attach _aria_visit_dates to the bundle dict."""
+    visit = _make_visit(admit_date="01/21/2008 10:28")
+    bundle = convert_iemr_to_fhir(_make_iemr([visit]))
+    assert "_aria_visit_dates" in bundle
+    assert "2008-01-21" in bundle["_aria_visit_dates"]
+
+
+# ---------------------------------------------------------------------------
+# _build_social_context (Fix 8)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildSocialContext:
+    def test_returns_none_when_no_social_hx(self) -> None:
+        visit = _make_visit()
+        assert _build_social_context([visit]) is None
+
+    def test_joins_entries_from_most_recent_visit(self) -> None:
+        visit = {
+            "ADMIT_DATE": "01/01/2020 09:00",
+            "SOCIAL_HX": [
+                _social_hx_entry("SMOKING", "Never smoked"),
+                _social_hx_entry("ALCOHOL", "Occasional"),
+            ],
+        }
+        result = _build_social_context([visit])
+        assert result is not None
+        assert "SMOKING" in result
+        assert "ALCOHOL" in result
+        assert "Never smoked" in result
+
+    def test_uses_most_recent_visit_with_social_hx(self) -> None:
+        """When multiple visits have SOCIAL_HX, the last one should win."""
+        visit_old = {
+            "ADMIT_DATE": "01/01/2010 09:00",
+            "SOCIAL_HX": [_social_hx_entry("SMOKING", "Former smoker")],
+        }
+        visit_new = {
+            "ADMIT_DATE": "06/01/2020 09:00",
+            "SOCIAL_HX": [_social_hx_entry("SMOKING", "Never smoked")],
+        }
+        # visits are chronological ASC — most recent is last
+        result = _build_social_context([visit_old, visit_new])
+        assert "Never smoked" in result
+        assert "Former smoker" not in result
+
+    def test_empty_social_hx_list_skipped(self) -> None:
+        visit_no_hx = {"ADMIT_DATE": "01/01/2015 09:00", "SOCIAL_HX": []}
+        visit_with_hx = {
+            "ADMIT_DATE": "01/01/2010 09:00",
+            "SOCIAL_HX": [_social_hx_entry("EXERCISE", "Daily walks")],
+        }
+        result = _build_social_context([visit_with_hx, visit_no_hx])
+        assert "Daily walks" in result
+
+
+def test_bundle_contains_aria_social_context_key() -> None:
+    visit = {
+        "GENDER": "F",
+        "AGE": 80,
+        "ADMIT_DATE": "01/01/2020 09:00",
+        "PROBLEM": [],
+        "MEDICATIONS": [],
+        "VITALS": [_vitals()],
+        "ALLERGY": [],
+        "PLAN": [],
+        "SOCIAL_HX": [_social_hx_entry("CONSULTANTS", "Cardiologist")],
+    }
+    bundle = convert_iemr_to_fhir({"P001": {"VISIT": [visit]}})
+    assert "_aria_social_context" in bundle
+    assert bundle["_aria_social_context"] is not None
+
+
+# ---------------------------------------------------------------------------
+# _pseudonymize_patient_id (Fix 35)
+# ---------------------------------------------------------------------------
+
+
+class TestPseudonymizePatientId:
+    def test_deterministic_same_input(self) -> None:
+        h1 = _pseudonymize_patient_id("1091", "secret")
+        h2 = _pseudonymize_patient_id("1091", "secret")
+        assert h1 == h2
+
+    def test_different_ids_produce_different_hashes(self) -> None:
+        h1 = _pseudonymize_patient_id("1091", "secret")
+        h2 = _pseudonymize_patient_id("1092", "secret")
+        assert h1 != h2
+
+    def test_returns_16_chars(self) -> None:
+        result = _pseudonymize_patient_id("1091", "any-key")
+        assert len(result) == 16
+
+    def test_different_key_different_hash(self) -> None:
+        h1 = _pseudonymize_patient_id("1091", "key1")
+        h2 = _pseudonymize_patient_id("1091", "key2")
+        assert h1 != h2
 
 
 # ---------------------------------------------------------------------------
