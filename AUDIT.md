@@ -746,9 +746,9 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 |---|---|---|---|
 | 24 | Alert `patient_id` filter | alerts.py | DONE |
 | 42 (L1) | Alert disposition on acknowledge (feedback loop Layer 1) | alerts.py, new `alert_feedback` table | DONE |
-| 41 | Gap explanations table and API | new table, new API route | pending |
+| 41 | Gap explanations table and API | new table, new API route | DONE |
 | 13 | Shadow mode CLI argument | run_shadow_mode.py | DONE |
-| 32 | Remove `run_ingestion.py` default bundle | run_ingestion.py | pending |
+| 32 | Remove `run_ingestion.py` default bundle | run_ingestion.py | DONE |
 | 33 | Shadow mode window overlap + CI + per-detector breakdown | run_shadow_mode.py | DONE |
 | 14 | Multi-patient pipeline test runner | run_pipeline_tests.py | DONE |
 
@@ -768,13 +768,13 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 
 ### Phase 7 — New clinical features
 
-| # | Feature |
-|---|---|
-| 43 | Patient-facing reading submission + symptom flags |
-| 45 | Escalation pathway + off-hours alert tagging |
-| 42 (L2) | Feedback loop Layer 2: calibration recommendations |
-| 42 (L3) | Feedback loop Layer 3: 30-day outcome verification |
-| 44 | BLE webhook connector |
+| # | Feature | Status |
+|---|---|---|
+| 43 | Patient-facing reading submission + symptom flags | pending (separate plan) |
+| 45 | Escalation pathway + off-hours alert tagging | DONE |
+| 42 (L2) | Feedback loop Layer 2: calibration recommendations | DONE |
+| 42 (L3) | Feedback loop Layer 3: 30-day outcome verification | DONE |
+| 44 | BLE webhook connector | DONE |
 
 ---
 
@@ -837,11 +837,11 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 | 38 | Infra | Audit trigger + Row-Level Security on readings table | DB trigger, RLS policy | 8 |
 | 39 | Infra | No MFA | Supabase Auth | 8 |
 | 40 | Infra | No dead-letter queue | processor.py | 4 |
-| 41 | Feature | Gap explanations (device vs non-compliance) | new table + API | 5 |
-| 42 | Feature | Feedback loop (3 layers) | new tables + API | 5–7 (L1 ✓ DONE) |
-| 43 | Feature | Patient-facing submission interface | Next.js | 7 |
-| 44 | Feature | BLE connector | new | 7 |
-| 45 | Feature | Escalation pathway + off-hours tagging | processor.py, alerts | 7 |
+| 41 | Feature | Gap explanations (device vs non-compliance) | new table + API | 5 ✓ DONE |
+| 42 | Feature | Feedback loop (3 layers) | new tables + API | 5–7 ✓ L1/L2/L3 DONE |
+| 43 | Feature | Patient-facing submission interface | Next.js | 7 (separate plan) |
+| 44 | Feature | BLE connector | new | 7 ✓ DONE |
+| 45 | Feature | Escalation pathway + off-hours tagging | processor.py, alerts | 7 ✓ DONE |
 | 46 | Feature | Mini-briefing for between-visit alerts | processor.py | 4 |
 | 47 | Feature | Long-term trend layer in briefing | composer.py | 4 |
 | 48 | Critical | Layer 3: no clinical language guardrails | llm_validator.py (new) | 0 |

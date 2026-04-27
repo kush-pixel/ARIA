@@ -9,7 +9,7 @@ nullable — they advance as the alert moves through the delivery lifecycle.
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Numeric, SmallInteger, String, func, text
+from sqlalchemy import Boolean, DateTime, Numeric, SmallInteger, String, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -40,4 +40,10 @@ class Alert(Base):
     )
     acknowledged_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    off_hours: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    escalated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
     )

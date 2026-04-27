@@ -3,13 +3,14 @@
 import { useEffect, useState } from 'react'
 import { getAlerts, acknowledgeAlert } from '@/lib/api'
 import type { Alert } from '@/lib/types'
-import { CheckCircle, AlertTriangle } from 'lucide-react'
+import { CheckCircle, AlertTriangle, Clock, TrendingUp } from 'lucide-react'
 
 const ALERT_LABELS: Record<Alert['alert_type'], string> = {
   gap_urgent: 'Urgent reading gap',
   gap_briefing: 'Reading gap — review at next briefing',
   inertia: 'Possible therapeutic inertia — no medication change despite sustained elevated readings',
   deterioration: 'Possible sustained worsening trend',
+  adherence: 'Possible adherence concern',
 }
 
 function timeAgo(isoTimestamp: string): string {
@@ -63,20 +64,34 @@ export default function AlertInbox() {
       {alerts.map((alert) => (
         <div
           key={alert.alert_id}
-          className="card px-6 py-5 flex items-start gap-5"
+          className={`card px-6 py-5 flex items-start gap-5 ${
+            alert.escalated ? 'border-l-4 border-red-500' : ''
+          }`}
         >
           <AlertTriangle
             size={22}
             strokeWidth={1.75}
-            className="flex-shrink-0 mt-0.5 text-amber-500"
+            className={`flex-shrink-0 mt-0.5 ${alert.escalated ? 'text-red-500' : 'text-amber-500'}`}
             aria-hidden
           />
           <div className="flex-1 min-w-0">
             <div className="flex items-start justify-between gap-4 flex-wrap">
               <div>
-                <p className="text-[17px] font-semibold text-slate-900 dark:text-slate-100">
-                  Patient {alert.patient_id}
-                </p>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <p className="text-[17px] font-semibold text-slate-900 dark:text-slate-100">
+                    Patient {alert.patient_id}
+                  </p>
+                  {alert.escalated && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[12px] font-medium bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300">
+                      <TrendingUp size={11} /> Escalated
+                    </span>
+                  )}
+                  {alert.off_hours && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[12px] font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">
+                      <Clock size={11} /> Off-hours
+                    </span>
+                  )}
+                </div>
                 <p className="mt-1 text-[16px] text-slate-600 dark:text-slate-300 leading-snug">
                   {ALERT_LABELS[alert.alert_type]}
                 </p>
