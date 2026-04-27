@@ -6,7 +6,7 @@ import { getPatients } from '@/lib/api'
 import type { Patient } from '@/lib/types'
 import RiskTierBadge from './RiskTierBadge'
 import RiskScoreBar from './RiskScoreBar'
-import { FileText, Clock } from 'lucide-react'
+import { FileText, Clock, AlertTriangle } from 'lucide-react'
 
 const TIER_ORDER: Record<string, number> = { high: 0, medium: 1, low: 2 }
 
@@ -20,6 +20,11 @@ function sortPatients(patients: Patient[]): Patient[] {
 
 function formatApptTime(iso: string): string {
   return new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+}
+
+function isScoreStale(computedAt: string | null): boolean {
+  if (!computedAt) return false
+  return Date.now() - new Date(computedAt).getTime() > 26 * 60 * 60 * 1000
 }
 
 function isToday(iso: string): boolean {
@@ -103,6 +108,12 @@ export default function PatientList() {
             {/* Risk score bar */}
             <div>
               <RiskScoreBar score={patient.risk_score} tier={patient.risk_tier} />
+              {isScoreStale(patient.risk_score_computed_at) && (
+                <div className="flex items-center gap-1 mt-1 text-[11px] text-amber-600 dark:text-amber-400">
+                  <AlertTriangle size={11} strokeWidth={2} />
+                  <span>Score stale</span>
+                </div>
+              )}
             </div>
 
             {/* Appointment */}

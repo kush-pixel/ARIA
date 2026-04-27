@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.models.clinical_context import ClinicalContext
+from app.models.patient import Patient
 from app.services.pattern_engine.risk_scorer import compute_risk_score
 
 _DEFAULT_LAST_READING = object()
@@ -24,6 +25,7 @@ def _context(
     last_clinic_systolic: int | None = 140,
     last_med_change: date | None = date.today(),
     problem_codes: list[str] | None = None,
+    last_visit_date: date | None = None,
 ) -> ClinicalContext:
     """Build a minimal ClinicalContext ORM instance for scorer tests."""
     context = ClinicalContext()
@@ -32,7 +34,18 @@ def _context(
     context.last_clinic_systolic = last_clinic_systolic
     context.last_med_change = last_med_change
     context.problem_codes = problem_codes if problem_codes is not None else []
+    context.last_visit_date = last_visit_date
     return context
+
+
+def _patient_mock(patient_exists: bool, next_appointment: datetime | None = None) -> MagicMock | None:
+    """Return a minimal Patient mock or None when patient_exists is False."""
+    if not patient_exists:
+        return None
+    patient = MagicMock(spec=Patient)
+    patient.patient_id = "1091"
+    patient.next_appointment = next_appointment
+    return patient
 
 
 def _scalar_result(value: object) -> MagicMock:
@@ -52,6 +65,7 @@ def _row_result(*values: object) -> MagicMock:
 def _session_for(
     *,
     patient_exists: bool = True,
+    patient_next_appt: datetime | None = None,
     context: ClinicalContext | None = None,
     avg_systolic: float | Decimal | None = 140.0,
     last_reading_at: datetime | None | object = _DEFAULT_LAST_READING,
@@ -65,7 +79,7 @@ def _session_for(
     session = AsyncMock()
     session.execute = AsyncMock(
         side_effect=[
-            _scalar_result("1091" if patient_exists else None),
+            _scalar_result(_patient_mock(patient_exists, patient_next_appt)),
             _scalar_result(context),
             _scalar_result(avg_systolic),
             _scalar_result(last_reading_at),
@@ -204,11 +218,13 @@ async def test_patient_not_found() -> None:
 
 async def test_score_clamped_0_100() -> None:
     """Extreme inputs still produce a final score within the valid range."""
+    # ICD-10 codes that max out severity-weighted comorbidity signal:
+    # I50.9(CHF)=25 + I63.9(Stroke)=25 + G45.9(TIA)=25 + E11.9(DM)=15 + N18.3(CKD)=15 + I25.1(CAD)=15 = 120 → clamped to 100
     session = _session_for(
         context=_context(
             historic_bp_systolic=[100],
             last_med_change=date.today() - timedelta(days=1000),
-            problem_codes=["A", "B", "C", "D", "E", "F", "G"],
+            problem_codes=["I50.9", "I63.9", "G45.9", "E11.9", "N18.3", "I25.1"],
         ),
         avg_systolic=300.0,
         last_reading_at=datetime.now(UTC) - timedelta(days=1000),
@@ -223,7 +239,7 @@ async def test_score_clamped_0_100() -> None:
 
 
 async def test_persists_to_patients_table() -> None:
-    """Score computation updates patients.risk_score and commits."""
+    """Score computation updates patients.risk_score and risk_score_computed_at and commits."""
     session = _session_for(
         context=_context(
             historic_bp_systolic=[130, 130, 130],
@@ -238,22 +254,33 @@ async def test_persists_to_patients_table() -> None:
 
     score = await compute_risk_score("1091", session)
 
-    assert score == 38.67
+    # sig_systolic: (140-130)/30*100=33.33, sig_inertia: 45/180*100=25.0,
+    # sig_adherence: 100-2/3*100=33.33, sig_gap: 7/28*100=25.0 (window_days=28 fallback),
+    # sig_comorbidity: I10 other=5pts → 5.0
+    # score = 33.33*0.30 + 25.0*0.25 + 33.33*0.20 + 25.0*0.15 + 5.0*0.10 = 27.17
+    assert score == 27.17
     assert session.execute.call_count == 6
     update_statement = session.execute.call_args_list[-1].args[0]
-    assert "UPDATE patients SET risk_score=:risk_score" in str(update_statement)
-    assert update_statement.compile().params["risk_score"] == 38.67
+    assert "UPDATE patients" in str(update_statement)
+    compiled = update_statement.compile()
+    assert compiled.params["risk_score"] == 27.17
+    assert "risk_score_computed_at" in str(update_statement)
     session.commit.assert_called_once()
 
 
 @pytest.mark.parametrize(
     ("avg_systolic", "last_med_change", "total_confirmations", "confirmed_count", "last_reading_days", "problem_codes", "expected"),
     [
+        # Systolic signal maxed: (170-140)/30*100=100 → 100*0.30=30.0
         (170.0, date.today(), 1, 1, 0, [], 30.0),
-        (140.0, date.today() - timedelta(days=90), 1, 1, 0, [], 25.0),
+        # Inertia signal maxed: 180/180*100=100 → 100*0.25=25.0
+        (140.0, date.today() - timedelta(days=180), 1, 1, 0, [], 25.0),
+        # Adherence signal maxed: 0/1*100=0 confirmed → 100*0.20=20.0
         (140.0, date.today(), 1, 0, 0, [], 20.0),
-        (140.0, date.today(), 1, 1, 14, [], 15.0),
-        (140.0, date.today(), 1, 1, 0, ["A", "B", "C", "D", "E"], 10.0),
+        # Gap signal maxed: 28/28*100=100 (window_days=28 fallback) → 100*0.15=15.0
+        (140.0, date.today(), 1, 1, 28, [], 15.0),
+        # Comorbidity signal maxed: CHF+Stroke+TIA+DM+CKD=120→100 → 100*0.10=10.0
+        (140.0, date.today(), 1, 1, 0, ["I50.9", "I63.9", "G45.9", "E11.9", "N18.3"], 10.0),
     ],
 )
 async def test_signal_weights(
