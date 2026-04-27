@@ -2,8 +2,8 @@
 Working on models, database setup, or migrations.
 
 Rules:
-- 8 tables: patients (with risk_score + risk_score_computed_at), clinical_context, readings,
-  medication_confirmations, alerts, briefings, processing_jobs, audit_events
+- 9 tables: patients (with risk_score + risk_score_computed_at), clinical_context, readings,
+  medication_confirmations, alerts, alert_feedback, briefings, processing_jobs, audit_events
 - SQLAlchemy 2.0 async ORM only
 - gen_random_uuid() for all UUID primary keys
 - TIMESTAMPTZ for all timestamps (not TIMESTAMP)
@@ -28,6 +28,12 @@ clinical_context columns (full list — all must be present):
   overdue_labs TEXT[], social_context TEXT
 
 alerts.alert_type: gap_urgent | gap_briefing | inertia | deterioration | adherence
+
+alert_feedback (Fix 42 L1 — clinician disposition on acknowledge):
+  feedback_id UUID PK, alert_id UUID FK -> alerts, patient_id TEXT, detector_type TEXT
+  disposition TEXT (agree_acting | agree_monitoring | disagree)
+  reason_text TEXT, clinician_id TEXT, created_at TIMESTAMPTZ
+  Indexes: (patient_id, detector_type, created_at DESC), (alert_id)
 
 Critical unique indexes (idempotency):
   UNIQUE on readings (patient_id, effective_datetime, source)       — Fix 22 prerequisite for Fix 15

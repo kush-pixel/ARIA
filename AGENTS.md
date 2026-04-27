@@ -132,7 +132,7 @@ Every output is decision support for the clinician only.
 
 ```
 Backend:    Python 3.11, FastAPI, SQLAlchemy 2.0 async, Pydantic v2
-Database:   PostgreSQL via Supabase — asyncpg driver, 8 tables, 11 indexes
+Database:   PostgreSQL via Supabase — asyncpg driver, 9 tables, 13 indexes
 Frontend:   Next.js 14, TypeScript strict, Tailwind CSS, recharts
 AI:         Anthropic claude-sonnet-4-20250514 (Layer 3 only)
 Background: processing_jobs table + Python polling worker (30s interval)
@@ -140,7 +140,7 @@ Background: processing_jobs table + Python polling worker (30s interval)
 
 ---
 
-## Database — 8 Tables
+## Database — 9 Tables
 
 ```
 patients              — risk_tier, risk_score (Layer 2), monitoring_active, next_appointment
@@ -152,6 +152,11 @@ readings              — systolic_avg, diastolic_avg, source ('generated'|'clin
 medication_confirmations — confirmed_at (NULL = missed dose), confidence='simulated' for demo
                            UNIQUE INDEX on (patient_id, medication_name, scheduled_time)
 alerts                — alert_type (gap_urgent|gap_briefing|inertia|deterioration|adherence), gap_days, acknowledged_at
+                        GET /api/alerts supports ?patient_id= filter (Fix 24)
+                        POST /api/alerts/{id}/acknowledge accepts optional disposition payload (Fix 42 L1)
+alert_feedback        — clinician disposition on acknowledge (Fix 42 L1)
+                        disposition (agree_acting|agree_monitoring|disagree), reason_text, clinician_id
+                        detector_type (gap|inertia|deterioration|adherence) for Layer 2 calibration
 briefings             — llm_response JSONB (9 briefing fields + problem_assessments), model_version, prompt_hash
 processing_jobs       — status (queued→running→succeeded|failed), idempotency_key UNIQUE
 audit_events          — action, actor_type, outcome ('success'|'failure')
