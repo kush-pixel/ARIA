@@ -16,9 +16,8 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
-from app.main import app
 from app.db.session import get_session
-
+from app.main import app
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -226,6 +225,56 @@ async def test_get_patient_not_found(client: AsyncClient):
     app.dependency_overrides.clear()
 
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# PATCH /api/patients/{id}/appointment
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_patch_appointment_updates_next_appointment(client: AsyncClient):
+    """PATCH /appointment returns 200 and the updated patient record."""
+    patient = _make_patient()
+    patient.risk_score_computed_at = None  # avoid MagicMock serialization issue
+
+    session = _mock_session()
+    session.execute.return_value = _scalar_result(patient)
+
+    app.dependency_overrides[get_session] = lambda: session
+    resp = await client.patch(
+        "/api/patients/1091/appointment",
+        json={"next_appointment": "2026-05-10T09:00:00+00:00"},
+    )
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["patient_id"] == "1091"
+    # next_appointment on the mock object was updated before _serialise was called
+    session.commit.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_patch_appointment_patient_not_found(client: AsyncClient):
+    """PATCH /appointment returns 404 when patient does not exist."""
+    session = _mock_session()
+    session.execute.return_value = _scalar_result(None)
+
+    app.dependency_overrides[get_session] = lambda: session
+    resp = await client.patch(
+        "/api/patients/9999/appointment",
+        json={"next_appointment": "2026-05-10T09:00:00+00:00"},
+    )
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_patch_appointment_missing_body_returns_422(client: AsyncClient):
+    """PATCH /appointment with no body returns 422 Unprocessable Entity."""
+    resp = await client.patch("/api/patients/1091/appointment", json={})
+    assert resp.status_code == 422
 
 
 # ---------------------------------------------------------------------------
@@ -634,6 +683,59 @@ async def test_trigger_scheduler_blocked_when_not_demo(client: AsyncClient):
         resp = await client.post("/api/admin/trigger-scheduler")
 
     assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# GET /api/admin/dead-jobs
+# ---------------------------------------------------------------------------
+
+def _make_dead_job(job_id: str = "job-dead-001") -> MagicMock:
+    j = MagicMock()
+    j.job_id = job_id
+    j.job_type = "pattern_recompute"
+    j.patient_id = "1091"
+    j.status = "dead"
+    j.retry_count = 3
+    j.retry_after = None
+    j.error_message = "persistent failure"
+    j.queued_at = datetime(2026, 4, 20, 0, 0, tzinfo=UTC)
+    j.started_at = datetime(2026, 4, 20, 0, 0, 5, tzinfo=UTC)
+    j.finished_at = datetime(2026, 4, 20, 0, 10, tzinfo=UTC)
+    j.created_by = "scheduler"
+    return j
+
+
+@pytest.mark.asyncio
+async def test_list_dead_jobs_returns_dead_jobs(client: AsyncClient):
+    """GET /admin/dead-jobs returns a list of dead jobs."""
+    job = _make_dead_job()
+    session = _mock_session()
+    session.execute.return_value = _scalars_result(job)
+
+    app.dependency_overrides[get_session] = lambda: session
+    resp = await client.get("/api/admin/dead-jobs")
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["job_id"] == "job-dead-001"
+    assert data[0]["status"] == "dead"
+    assert data[0]["retry_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_list_dead_jobs_empty(client: AsyncClient):
+    """GET /admin/dead-jobs returns an empty list when no dead jobs exist."""
+    session = _mock_session()
+    session.execute.return_value = _scalars_result()
+
+    app.dependency_overrides[get_session] = lambda: session
+    resp = await client.get("/api/admin/dead-jobs")
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert resp.json() == []
 
 
 # ---------------------------------------------------------------------------

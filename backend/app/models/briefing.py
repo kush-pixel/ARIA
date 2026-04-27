@@ -28,7 +28,7 @@ class Briefing(Base):
         server_default=text("gen_random_uuid()"),
     )
     patient_id: Mapped[str] = mapped_column(String, nullable=False)
-    appointment_date: Mapped[date] = mapped_column(Date, nullable=False)
+    appointment_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     llm_response: Mapped[dict] = mapped_column(JSONB, nullable=False)
 
     # Layer 3 audit columns — NULL when only Layer 1 briefing was generated

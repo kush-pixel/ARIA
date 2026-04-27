@@ -44,7 +44,10 @@ logger = get_logger(__name__)
 
 # Worker tuning constants — do not hardcode in call sites
 _POLL_INTERVAL_SECONDS: int = 30
+_FALLBACK_POLL_SECONDS: int = 60   # idle timeout when LISTEN/NOTIFY is active
 _BATCH_SIZE: int = 10
+_MAX_RETRIES: int = 3
+_RETRY_BACKOFF_SECONDS: list[int] = [30, 120, 480]  # backoff for retry 1, 2, 3
 
 # Off-hours window: 6 PM (18) to 8 AM (8) local UTC, or weekends
 _OFF_HOURS_START: int = 18
@@ -231,6 +234,12 @@ async def _handle_pattern_recompute(job: ProcessingJob, session: AsyncSession) -
     await session.flush()
     logger.info("Alert rows written for patient=%s", pid)
 
+    # Trigger mini-briefing for urgent alerts only (gap_urgent or deterioration)
+    if gap["status"] == "urgent" or deterioration["deterioration"]:
+        from app.services.briefing.composer import compose_mini_briefing
+        trigger = "gap_urgent" if gap["status"] == "urgent" else "deterioration"
+        await compose_mini_briefing(session, pid, trigger)
+
     score = await compute_risk_score(pid, session)
     logger.info(
         "pattern_recompute completed: patient=%s risk_score=%.2f",
@@ -374,12 +383,15 @@ class WorkerProcessor:
         self,
         poll_interval: int = _POLL_INTERVAL_SECONDS,
         session_factory: async_sessionmaker[AsyncSession] | None = None,
+        listen_url: str | None = None,
     ) -> None:
         self._poll_interval = poll_interval
         self._session_factory: async_sessionmaker[AsyncSession] = (
             session_factory if session_factory is not None else AsyncSessionLocal
         )
         self._running = False
+        self._listen_url = listen_url
+        self._wake_event: asyncio.Event = asyncio.Event()
 
     async def run(self) -> None:
         """Start the polling loop. Runs until stop() is called or cancelled.
@@ -395,13 +407,28 @@ class WorkerProcessor:
             self._poll_interval,
         )
 
+        # Start LISTEN/NOTIFY listener if a raw DB URL was supplied.
+        # Best-effort: on failure the worker falls back to _FALLBACK_POLL_SECONDS polling.
+        listener_task = None
+        if self._listen_url:
+            listener_task = asyncio.create_task(self._start_listener())
+
         while self._running:
             try:
                 processed = await self._process_batch()
                 await self._run_periodic_sweeps()
                 if processed == 0:
-                    # Queue was empty — sleep before next poll
-                    await asyncio.sleep(self._poll_interval)
+                    # Wait for a NOTIFY wake-up or the 60-second fallback timeout.
+                    # This replaces the fixed 30s sleep — the worker is idle only when
+                    # the queue is genuinely empty and no notification has arrived.
+                    try:
+                        await asyncio.wait_for(
+                            self._wake_event.wait(),
+                            timeout=_FALLBACK_POLL_SECONDS,
+                        )
+                    except TimeoutError:
+                        pass
+                    self._wake_event.clear()
             except asyncio.CancelledError:
                 logger.info("WorkerProcessor cancelled — shutting down cleanly")
                 self._running = False
@@ -413,6 +440,13 @@ class WorkerProcessor:
                     exc,
                 )
                 await asyncio.sleep(self._poll_interval)
+
+        if listener_task is not None:
+            listener_task.cancel()
+            try:
+                await listener_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
         logger.info("WorkerProcessor stopped")
 
@@ -452,7 +486,11 @@ class WorkerProcessor:
         async with self._session_factory() as session:
             result = await session.execute(
                 select(ProcessingJob)
-                .where(ProcessingJob.status == "queued")
+                .where(
+                    ProcessingJob.status == "queued",
+                    (ProcessingJob.retry_after.is_(None))
+                    | (ProcessingJob.retry_after <= func.now()),
+                )
                 .order_by(ProcessingJob.queued_at.asc())
                 .limit(_BATCH_SIZE)
             )
@@ -511,7 +549,7 @@ class WorkerProcessor:
         if handler is None:
             error_msg = f"Unknown job_type {job.job_type!r} — no handler registered"
             logger.error("Job %s: %s", job.job_id, error_msg)
-            await self._mark_failed(job.job_id, error_msg)
+            await self._mark_failed_or_retry(job.job_id, error_msg, job.retry_count)
             return True
 
         try:
@@ -522,7 +560,7 @@ class WorkerProcessor:
         except Exception as exc:
             error_msg = str(exc)
             logger.error("Job %s [%s] failed: %s", job.job_id, job.job_type, error_msg)
-            await self._mark_failed(job.job_id, error_msg)
+            await self._mark_failed_or_retry(job.job_id, error_msg, job.retry_count)
 
         return True
 
@@ -543,22 +581,74 @@ class WorkerProcessor:
             )
             await session.commit()
 
-    async def _mark_failed(self, job_id: str, error_message: str) -> None:
-        """Transition a job to failed and record error_message + finished_at.
+    async def _mark_failed_or_retry(
+        self,
+        job_id: str,
+        error_message: str,
+        current_retry_count: int,
+    ) -> None:
+        """On failure, schedule a retry with exponential backoff or mark dead.
+
+        If ``current_retry_count < _MAX_RETRIES``, increments retry_count,
+        computes the next retry window using ``_RETRY_BACKOFF_SECONDS``, and
+        resets status to ``queued`` with ``retry_after`` set so the batch
+        query skips the job until the backoff expires.
+
+        If ``current_retry_count >= _MAX_RETRIES`` (all 3 retries exhausted),
+        sets status to ``dead`` so the job is no longer picked up and can be
+        inspected via ``GET /api/admin/dead-jobs``.
+
+        Backoff schedule (indexed by current_retry_count):
+          0 → 30 s, 1 → 120 s, 2 → 480 s
 
         Args:
             job_id: UUID string of the ProcessingJob to update.
-            error_message: Human-readable cause of the failure. Do not include
-                PHI — this value is stored in processing_jobs.error_message.
+            error_message: Human-readable cause of failure. No PHI.
+            current_retry_count: Value of retry_count on the job before this
+                failure (i.e. how many retries have already been scheduled).
         """
-        async with self._session_factory() as session:
-            await session.execute(
-                update(ProcessingJob)
-                .where(ProcessingJob.job_id == job_id)
-                .values(
-                    status="failed",
-                    error_message=error_message,
-                    finished_at=datetime.now(UTC),
-                )
+        now = datetime.now(UTC)
+        if current_retry_count < _MAX_RETRIES:
+            new_retry_count = current_retry_count + 1
+            backoff = _RETRY_BACKOFF_SECONDS[current_retry_count]
+            retry_after = now + timedelta(seconds=backoff)
+            logger.warning(
+                "Job %s failed (attempt %d/%d) — retrying in %ds at %s: %s",
+                job_id,
+                new_retry_count,
+                _MAX_RETRIES + 1,
+                backoff,
+                retry_after.isoformat(),
+                error_message,
             )
-            await session.commit()
+            async with self._session_factory() as session:
+                await session.execute(
+                    update(ProcessingJob)
+                    .where(ProcessingJob.job_id == job_id)
+                    .values(
+                        status="queued",
+                        retry_count=new_retry_count,
+                        retry_after=retry_after,
+                        error_message=error_message,
+                        finished_at=now,
+                    )
+                )
+                await session.commit()
+        else:
+            logger.error(
+                "Job %s exhausted all %d retries — marking dead: %s",
+                job_id,
+                _MAX_RETRIES,
+                error_message,
+            )
+            async with self._session_factory() as session:
+                await session.execute(
+                    update(ProcessingJob)
+                    .where(ProcessingJob.job_id == job_id)
+                    .values(
+                        status="dead",
+                        error_message=error_message,
+                        finished_at=now,
+                    )
+                )
+                await session.commit()
