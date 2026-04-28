@@ -191,11 +191,32 @@ async def _handle_pattern_recompute(job: ProcessingJob, session: AsyncSession) -
     from app.services.pattern_engine.gap_detector import run_gap_detector
     from app.services.pattern_engine.inertia_detector import run_inertia_detector
     from app.services.pattern_engine.risk_scorer import compute_risk_score
+    from app.services.pattern_engine.variability_detector import run_variability_detector
 
     if not job.patient_id:
         raise ValueError("pattern_recompute job is missing patient_id")
 
     pid = job.patient_id
+
+    # Fix 17: cold-start suppression — skip non-gap detectors for recently enrolled patients
+    cold_start_days = 21
+    patient_row = await session.execute(
+        select(Patient).where(Patient.patient_id == pid)
+    )
+    patient_obj = patient_row.scalar_one_or_none()
+    enrolled_at = patient_obj.enrolled_at if patient_obj is not None else None
+    days_enrolled = (
+        (datetime.now(UTC) - enrolled_at).days
+        if enrolled_at is not None
+        else cold_start_days + 1
+    )
+    cold_start = days_enrolled < cold_start_days
+    if cold_start:
+        logger.info(
+            "cold_start_suppression: patient=%s enrolled=%d days — "
+            "skipping inertia/adherence/deterioration/variability detectors",
+            pid, days_enrolled,
+        )
 
     gap = await run_gap_detector(session, pid)
     logger.info(
@@ -203,23 +224,35 @@ async def _handle_pattern_recompute(job: ProcessingJob, session: AsyncSession) -
         pid, gap["gap_days"], gap["status"],
     )
 
-    inertia = await run_inertia_detector(session, pid)
-    logger.info(
-        "inertia_detector: patient=%s detected=%s avg_systolic=%s",
-        pid, inertia["inertia_detected"], inertia.get("avg_systolic"),
-    )
+    if cold_start:
+        inertia: dict = {"inertia_detected": False, "avg_systolic": None, "elevated_count": 0, "duration_days": 0.0}
+        adherence: dict = {"adherence_pct": None, "pattern": "none", "interpretation": "cold_start_suppressed"}
+        deterioration: dict = {"deterioration": False, "slope": None, "recent_avg": None, "baseline_avg": None}
+        variability: dict = {"detected": False, "level": "none", "cv_pct": None, "visit_agenda_item": None, "variability_score": 0.0}
+    else:
+        inertia = await run_inertia_detector(session, pid)
+        logger.info(
+            "inertia_detector: patient=%s detected=%s avg_systolic=%s",
+            pid, inertia["inertia_detected"], inertia.get("avg_systolic"),
+        )
 
-    adherence = await run_adherence_analyzer(session, pid)
-    logger.info(
-        "adherence_analyzer: patient=%s pattern=%s adherence_pct=%s",
-        pid, adherence["pattern"], adherence.get("adherence_pct"),
-    )
+        adherence = await run_adherence_analyzer(session, pid)
+        logger.info(
+            "adherence_analyzer: patient=%s pattern=%s adherence_pct=%s",
+            pid, adherence["pattern"], adherence.get("adherence_pct"),
+        )
 
-    deterioration = await run_deterioration_detector(session, pid)
-    logger.info(
-        "deterioration_detector: patient=%s detected=%s slope=%s",
-        pid, deterioration["deterioration"], deterioration.get("slope"),
-    )
+        deterioration = await run_deterioration_detector(session, pid)
+        logger.info(
+            "deterioration_detector: patient=%s detected=%s slope=%s",
+            pid, deterioration["deterioration"], deterioration.get("slope"),
+        )
+
+        variability = await run_variability_detector(session, pid)
+        logger.info(
+            "variability_detector: patient=%s level=%s cv_pct=%s",
+            pid, variability["level"], variability.get("cv_pct"),
+        )
 
     # Write alert rows for triggered conditions (deduplicated by date)
     if gap["status"] in ("flag", "urgent"):

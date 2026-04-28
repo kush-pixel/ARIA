@@ -32,12 +32,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.clinical_context import ClinicalContext
 from app.models.medication_confirmation import MedicationConfirmation
+from app.models.patient import Patient
 from app.models.reading import Reading
 from app.services.pattern_engine.threshold_utils import (
     apply_comorbidity_adjustment,
     classify_comorbidity_concern,
     compute_patient_threshold,
     compute_slope,
+    compute_window_days,
     get_last_med_change_date,
     get_titration_window,
 )
@@ -49,7 +51,6 @@ logger = get_logger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_WINDOW_DAYS = 28
 _LOW_ADHERENCE_THRESHOLD = 80.0       # adherence_pct below this = low adherence
 _SUPPRESSION_SLOPE_THRESHOLD = -0.3   # mmHg/day — must be more negative to suppress
 _SUPPRESSION_RECENT_DAYS = 7
@@ -110,7 +111,6 @@ async def run_adherence_analyzer(session: AsyncSession, patient_id: str) -> Adhe
         AdherenceResult with adherence_pct, pattern label, and interpretation string.
     """
     now = datetime.now(tz=UTC)
-    window_start = now - timedelta(days=_WINDOW_DAYS)
 
     # --- Query 1: clinical context for patient-adaptive threshold + med history ---
     cc_result = await session.execute(
@@ -121,13 +121,25 @@ async def run_adherence_analyzer(session: AsyncSession, patient_id: str) -> Adhe
     problem_codes = cc.problem_codes if cc else None
     med_history = cc.med_history if cc else None
     last_med_change_field = cc.last_med_change if cc else None
+    last_visit_date = cc.last_visit_date if cc else None
 
     patient_threshold, threshold_mode = compute_patient_threshold(historic_bp)
     concern_state = classify_comorbidity_concern(problem_codes)
     patient_threshold, adj_mode = apply_comorbidity_adjustment(patient_threshold, concern_state)
+
+    # --- Query 1b: Patient for adaptive window (Fix 28) ---
+    patient_result = await session.execute(
+        select(Patient.next_appointment).where(Patient.patient_id == patient_id)
+    )
+    patient_row = patient_result.one_or_none()
+    next_appointment = patient_row[0] if patient_row else None
+
+    window_days, window_source = compute_window_days(next_appointment, last_visit_date)
+    window_start = now - timedelta(days=window_days)
+
     logger.debug(
-        "patient=%s adherence threshold=%.1f mode=%s adj=%s",
-        patient_id, patient_threshold, threshold_mode, adj_mode,
+        "patient=%s adherence threshold=%.1f mode=%s adj=%s window_days=%d source=%s",
+        patient_id, patient_threshold, threshold_mode, adj_mode, window_days, window_source,
     )
 
     # --- Query 2: medication confirmation counts ---

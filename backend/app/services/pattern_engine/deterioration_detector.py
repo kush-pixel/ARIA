@@ -1,9 +1,9 @@
 """Layer 1 – Deterioration Detection.
 
-Detects a worsening systolic BP trend over the last 14 days using three
+Detects a worsening systolic BP trend over the adaptive window using three
 independent signals that must all be positive (reduces false positives):
 
-  Signal 1 — Positive least-squares slope across the full 14-day window.
+  Signal 1 — Positive least-squares slope across the full window.
   Signal 2 — Recent 3-day average exceeds the days 4–10 baseline average.
   Signal 3 — recent_avg >= patient_threshold (absolute gate: prevents firing on
               a normotensive patient rising 115→119).
@@ -13,6 +13,9 @@ Step-change sub-detector (OR gate):
   mean of 3 weeks ago by >= 15 mmHg AND recent_7d_avg >= patient_threshold,
   deterioration is flagged regardless of linear slope direction.
 
+Adaptive window (Fix 28): window_days = min(90, max(14, next_appt − last_visit))
+White-coat exclusion (Fix 27): readings within 5 days of next_appointment are
+  excluded from all threshold comparisons (but remain in the DB).
 Fewer than 7 readings → returns False (insufficient data).
 Slope computed in pure Python; no numpy dependency.
 Missing days are handled without interpolation.
@@ -27,12 +30,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.clinical_context import ClinicalContext
+from app.models.patient import Patient
 from app.models.reading import Reading
 from app.services.pattern_engine.threshold_utils import (
     apply_comorbidity_adjustment,
     classify_comorbidity_concern,
     compute_patient_threshold,
     compute_slope,
+    compute_window_days,
 )
 from app.utils.logging_utils import get_logger
 
@@ -45,7 +50,6 @@ _least_squares_slope = compute_slope
 # Constants
 # ---------------------------------------------------------------------------
 
-_WINDOW_DAYS = 14           # full analysis window in days
 _RECENT_DAYS = 3            # "recent" sub-window: last N days
 _BASELINE_DAYS = 10         # baseline sub-window extends back this many days
 _MIN_READINGS = 7           # minimum total readings needed to produce a result
@@ -53,6 +57,7 @@ _STEP_CHANGE_RECENT_DAYS = 7
 _STEP_CHANGE_OLD_DAYS = 14  # "3 weeks ago" window: 14–21 days ago
 _STEP_CHANGE_OLD_END_DAYS = 21
 _STEP_CHANGE_THRESHOLD_MMHG = 15.0
+_WHITE_COAT_EXCLUSION_DAYS = 5  # Fix 27: drop readings within this many days of appointment
 
 
 class DeteriorationResult(TypedDict):
@@ -72,7 +77,7 @@ class DeteriorationResult(TypedDict):
 async def run_deterioration_detector(
     session: AsyncSession, patient_id: str
 ) -> DeteriorationResult:
-    """Detect worsening systolic BP trend over the last 14 days.
+    """Detect worsening systolic BP trend over the adaptive window.
 
     Args:
         session: Active async SQLAlchemy session.
@@ -91,19 +96,28 @@ async def run_deterioration_detector(
 
     historic_bp = cc.historic_bp_systolic if cc else None
     problem_codes = cc.problem_codes if cc else None
+    last_visit_date = cc.last_visit_date if cc else None
 
     patient_threshold, threshold_mode = compute_patient_threshold(historic_bp)
     concern_state = classify_comorbidity_concern(problem_codes)
     patient_threshold, adj_mode = apply_comorbidity_adjustment(patient_threshold, concern_state)
 
+    # --- Query 1b: Patient for adaptive window + white-coat exclusion (Fix 28, 27) ---
+    patient_result = await session.execute(
+        select(Patient.next_appointment).where(Patient.patient_id == patient_id)
+    )
+    patient_row = patient_result.one_or_none()
+    next_appointment = patient_row[0] if patient_row else None
+
+    window_days, window_source = compute_window_days(next_appointment, last_visit_date)
+    window_start = now - timedelta(days=window_days)
+
     logger.debug(
-        "patient=%s deterioration threshold=%.1f mode=%s adj=%s",
-        patient_id, patient_threshold, threshold_mode, adj_mode,
+        "patient=%s deterioration threshold=%.1f mode=%s adj=%s window_days=%d source=%s",
+        patient_id, patient_threshold, threshold_mode, adj_mode, window_days, window_source,
     )
 
-    # --- Query 2: readings in 14-day window ---
-    window_start = now - timedelta(days=_WINDOW_DAYS)
-
+    # --- Query 2: readings in adaptive window ---
     rows = await session.execute(
         select(Reading.effective_datetime, Reading.systolic_avg)
         .where(
@@ -116,6 +130,22 @@ async def run_deterioration_detector(
     readings: list[tuple[datetime, float]] = [
         (row.effective_datetime, float(row.systolic_avg)) for row in rows
     ]
+
+    # Fix 27: exclude white-coat pre-visit dip window (5 days before next_appointment)
+    if next_appointment is not None:
+        appt_aware = (
+            next_appointment.replace(tzinfo=UTC)
+            if next_appointment.tzinfo is None
+            else next_appointment
+        )
+        wc_cutoff = appt_aware - timedelta(days=_WHITE_COAT_EXCLUSION_DAYS)
+        excluded = sum(1 for dt, _ in readings if dt >= wc_cutoff)
+        if excluded:
+            logger.debug(
+                "patient=%s white_coat_exclusion: dropped %d reading(s) within %d days of appointment",
+                patient_id, excluded, _WHITE_COAT_EXCLUSION_DAYS,
+            )
+        readings = [(dt, s) for dt, s in readings if dt < wc_cutoff]
 
     _no_detect: DeteriorationResult = {
         "deterioration": False,

@@ -7,7 +7,7 @@ call compute_patient_threshold() and apply_comorbidity_adjustment() instead.
 from __future__ import annotations
 
 import statistics
-from datetime import date
+from datetime import date, datetime
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -37,6 +37,47 @@ _DIURETIC_NAMES = frozenset({
     "furosemide", "lasix", "hydrochlorothiazide", "hctz", "chlorthalidone",
     "indapamide", "torsemide", "spironolactone", "eplerenone", "metolazone",
 })
+
+
+# ---------------------------------------------------------------------------
+# Adaptive detection window
+# ---------------------------------------------------------------------------
+
+
+def compute_window_days(
+    next_appointment: datetime | None,
+    last_visit_date: date | None,
+    fallback: int = 28,
+) -> tuple[int, str]:
+    """Compute adaptive detection window in days.
+
+    Uses (next_appointment − last_visit_date) clamped to [14, 90].
+    Falls back to ``fallback`` (28) when either date is missing or the
+    computed interval is non-positive.
+
+    Args:
+        next_appointment: Patient's next scheduled appointment datetime.
+        last_visit_date: Date of the most recent clinical visit.
+        fallback: Default window when adaptive computation is unavailable.
+
+    Returns:
+        (window_days, source) where source is "adaptive" or "fallback_default".
+    """
+    if next_appointment is None or last_visit_date is None:
+        return (fallback, "fallback_default")
+
+    next_appt_date = (
+        next_appointment.date() if isinstance(next_appointment, datetime) else next_appointment
+    )
+    lv_date = (
+        last_visit_date.date() if isinstance(last_visit_date, datetime) else last_visit_date
+    )
+
+    interval = (next_appt_date - lv_date).days
+    if interval <= 0:
+        return (fallback, "fallback_default")
+
+    return (min(90, max(14, interval)), "adaptive")
 
 
 # ---------------------------------------------------------------------------
