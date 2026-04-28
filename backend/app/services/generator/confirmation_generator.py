@@ -19,6 +19,7 @@ Two generation modes:
 from __future__ import annotations
 
 import random
+import re
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -63,14 +64,23 @@ TID_HOURS: list[int] = [8, 14, 20]
 QID_HOURS: list[int] = [7, 12, 17, 22]
 
 # Full-timeline generation constants
-# Beta distribution parameters for per-interval adherence (mean ≈ 0.91, SD ≈ 0.10)
+# Beta distribution parameters for per-interval adherence.
+# α/(α+β) = 6.5/7.144 ≈ 0.91 → mean net rate ≈ 91% (no weekend discount applied).
 FULL_TIMELINE_BETA_ALPHA: float = 6.5
-FULL_TIMELINE_BETA_BETA: float = 0.65
-FULL_TIMELINE_ADHERENCE_FLOOR: float = 0.50   # clamp drawn rate above this
-# Weekend discount applied on top of the per-interval Beta rate (mirrors 28-day ratio)
-FULL_TIMELINE_WEEKEND_DISCOUNT: float = ADHERENCE_RATE_WEEKEND / ADHERENCE_RATE_WEEKDAY
+FULL_TIMELINE_BETA_BETA: float = 0.644
+FULL_TIMELINE_ADHERENCE_FLOOR: float = 0.50
 # Batch commit size (rows per DB transaction)
 FULL_TIMELINE_BATCH_SIZE: int = 200
+
+# Entries whose names match these patterns are supplies, tests, or referrals —
+# not oral medications — and must not generate confirmation events.
+_SUPPLY_PREFIXES: tuple[str, ...] = (
+    "rx for ",
+    "b-d ",
+    "sharps container",
+    "pen needle",
+)
+_SUPPLY_EXACT: frozenset[str] = frozenset({"vng", "hearing test"})
 
 
 # ---------------------------------------------------------------------------
@@ -78,11 +88,30 @@ FULL_TIMELINE_BATCH_SIZE: int = 200
 # ---------------------------------------------------------------------------
 
 
+def _is_medication(name: str) -> bool:
+    """Return False for supplies, devices, tests, and referral prescriptions.
+
+    Filters out non-drug items that appear in med_history (e.g. PEN NEEDLES,
+    VNG, HEARING TEST, syringes, sharps containers, Rx-for referrals) so they
+    do not generate spurious confirmation events.
+
+    Args:
+        name: Medication name from med_history entry.
+
+    Returns:
+        True if the entry represents an oral/injectable medication.
+    """
+    lower = name.lower().strip()
+    if lower in _SUPPLY_EXACT:
+        return False
+    return not any(lower.startswith(p) for p in _SUPPLY_PREFIXES)
+
+
 def _determine_hours(med_name: str) -> list[int]:
     """Return the UTC dosing hours for a medication based on its name.
 
-    Frequency keywords are matched case-insensitively against the medication
-    name string.  If none match, once-daily (QD) is assumed.
+    Frequency keywords are matched against whole words to avoid false positives
+    (e.g. "bid" as a substring of "isosorbide").  Defaults to once-daily (QD).
 
     Args:
         med_name: Medication name as stored in ``clinical_context.current_medications``.
@@ -95,7 +124,7 @@ def _determine_hours(med_name: str) -> list[int]:
         return QID_HOURS
     if "tid" in lower or "three" in lower:
         return TID_HOURS
-    if "bid" in lower or "twice" in lower:
+    if re.search(r"\bbid\b", lower) or "twice" in lower:
         return BID_HOURS
     return QD_HOURS
 
@@ -204,7 +233,7 @@ def _active_meds_at(
     active: list[tuple[str, str | None]] = []
     for name, entry in drug_last.items():
         activity = (entry.get("activity") or "").lower()
-        if activity not in ("discontinue", "remove"):
+        if activity not in ("discontinue", "remove") and _is_medication(name):
             rxnorm = (entry.get("rxnorm") or "").strip() or None
             active.append((name, rxnorm))
 
@@ -393,14 +422,10 @@ async def generate_full_timeline_confirmations(
         if window_end < window_start:
             continue   # adjacent visits — no home monitoring window
 
-        # ── Per-interval Beta-drawn adherence rate ────────────────────────────
+        # ── Per-interval Beta-drawn adherence rate (flat — no weekend discount) ─
         interval_rate = max(
             FULL_TIMELINE_ADHERENCE_FLOOR,
             random.betavariate(FULL_TIMELINE_BETA_ALPHA, FULL_TIMELINE_BETA_BETA),
-        )
-        weekend_rate = max(
-            FULL_TIMELINE_ADHERENCE_FLOOR,
-            interval_rate * FULL_TIMELINE_WEEKEND_DISCOUNT,
         )
 
         # ── Active medications during this interval ───────────────────────────
@@ -411,8 +436,7 @@ async def generate_full_timeline_confirmations(
         # ── Generate one row per dose slot per day per medication ─────────────
         current_day = window_start
         while current_day <= window_end:
-            is_weekend = current_day.weekday() >= 5
-            rate = weekend_rate if is_weekend else interval_rate
+            rate = interval_rate
 
             for med_name, rxnorm_code in active_meds:
                 for hour in _determine_hours(med_name):
