@@ -25,8 +25,7 @@ logger = get_logger(__name__)
 _LOOKBACK_DAYS = 28
 _DEFAULT_BASELINE_SYSTOLIC = 140.0
 
-_SYSTOLIC_WEIGHT = 0.25
-_VARIABILITY_WEIGHT = 0.05
+_SYSTOLIC_WEIGHT = 0.30
 _INERTIA_WEIGHT = 0.25
 _ADHERENCE_WEIGHT = 0.20
 _GAP_WEIGHT = 0.15
@@ -157,17 +156,12 @@ async def compute_risk_score(patient_id: str, session: AsyncSession) -> float:
     context = context_result.scalar_one_or_none()
 
     bp_stats_result = await session.execute(
-        select(
-            func.avg(Reading.systolic_avg),
-            func.stddev_pop(Reading.systolic_avg),
-        ).where(
+        select(func.avg(Reading.systolic_avg)).where(
             Reading.patient_id == patient_id,
             Reading.effective_datetime >= window_start,
         )
     )
-    avg_raw, stddev_raw = bp_stats_result.one()
-    avg_systolic = _as_float(avg_raw)
-    sys_stddev = _as_float(stddev_raw)
+    avg_systolic = _as_float(bp_stats_result.scalar_one_or_none())
 
     last_reading_result = await session.execute(
         select(func.max(Reading.effective_datetime)).where(Reading.patient_id == patient_id)
@@ -207,15 +201,8 @@ async def compute_risk_score(patient_id: str, session: AsyncSession) -> float:
 
     sig_comorbidity = _comorbidity_severity_score(context)
 
-    # Variability signal: CV = pstdev / mean * 100, saturates at 20% CV → score 100
-    cv_pct: float | None = None
-    if avg_systolic is not None and sys_stddev is not None and avg_systolic > 0:
-        cv_pct = sys_stddev / avg_systolic * 100.0
-    sig_variability = _clamp(cv_pct / 20.0 * 100.0) if cv_pct is not None else 0.0
-
     score = _clamp(
         sig_systolic * _SYSTOLIC_WEIGHT
-        + sig_variability * _VARIABILITY_WEIGHT
         + sig_inertia * _INERTIA_WEIGHT
         + sig_adherence * _ADHERENCE_WEIGHT
         + sig_gap * _GAP_WEIGHT
@@ -231,8 +218,5 @@ async def compute_risk_score(patient_id: str, session: AsyncSession) -> float:
     )
     await session.commit()
 
-    logger.info(
-        "risk_score computed patient=%s score=%.2f cv_pct=%s",
-        patient_id, rounded_score, f"{cv_pct:.1f}" if cv_pct is not None else "n/a",
-    )
+    logger.info("risk_score computed patient=%s score=%.2f", patient_id, rounded_score)
     return rounded_score

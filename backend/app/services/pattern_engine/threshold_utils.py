@@ -244,6 +244,7 @@ def _infer_drug_class(drug_name: str) -> str:
 def get_titration_window(
     med_history: list[dict] | None,
     last_med_change_fallback: date | None = None,
+    as_of: date | None = None,
 ) -> int:
     """Return drug-class-aware titration window (days) for the most recently changed drug.
 
@@ -255,6 +256,8 @@ def get_titration_window(
         med_history: JSONB medication history from clinical_context.
         last_med_change_fallback: Unused — kept for API symmetry with
             get_last_med_change_date().
+        as_of: When provided, only consider entries with date <= as_of (used by
+            shadow mode to replay historical evaluation points).
 
     Returns:
         Titration window in days.
@@ -262,10 +265,13 @@ def get_titration_window(
     if not med_history:
         return _TITRATION_WINDOWS["default"]
 
+    as_of_str = as_of.isoformat() if as_of is not None else None
     best_date = ""
     best_name = ""
     for entry in med_history:
         d = entry.get("date") or ""
+        if as_of_str is not None and d > as_of_str:
+            continue
         if d > best_date:
             best_date = d
             best_name = entry.get("name") or ""
@@ -285,6 +291,7 @@ def get_titration_window(
 def get_last_med_change_date(
     med_history: list[dict] | None,
     last_med_change_fallback: date | None,
+    as_of: date | None = None,
 ) -> date | None:
     """Return the most recent medication change date from med_history or fallback.
 
@@ -294,16 +301,21 @@ def get_last_med_change_date(
     Args:
         med_history: JSONB medication history from clinical_context.
         last_med_change_fallback: Stale single-date field (used if no med_history).
+        as_of: When provided, only consider entries with date <= as_of (used by
+            shadow mode to replay historical evaluation points without leaking
+            future medication changes into earlier windows).
 
     Returns:
         Most recent change date, or None if no change is recorded.
     """
+    as_of_str = as_of.isoformat() if as_of is not None else None
     if med_history:
         dates: list[str] = []
         for entry in med_history:
             d = entry.get("date") or ""
             if d:
-                dates.append(d)
+                if as_of_str is None or d <= as_of_str:
+                    dates.append(d)
         if dates:
             latest_str = max(dates)
             try:

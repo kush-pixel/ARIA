@@ -100,17 +100,23 @@ def _days_since(change_date: object, now: datetime) -> float:
 # ---------------------------------------------------------------------------
 
 
-async def run_adherence_analyzer(session: AsyncSession, patient_id: str) -> AdherenceResult:
+async def run_adherence_analyzer(
+    session: AsyncSession,
+    patient_id: str,
+    as_of: datetime | None = None,
+) -> AdherenceResult:
     """Compute medication adherence and classify the clinical pattern.
 
     Args:
         session: Active async SQLAlchemy session.
         patient_id: Patient identifier (iEMR MED_REC_NO).
+        as_of: Reference datetime. Defaults to now (production). Pass a historical
+            datetime to replay the detector at a past point (shadow mode only).
 
     Returns:
         AdherenceResult with adherence_pct, pattern label, and interpretation string.
     """
-    now = datetime.now(tz=UTC)
+    now = as_of if as_of is not None else datetime.now(tz=UTC)
 
     # --- Query 1: clinical context for patient-adaptive threshold + med history ---
     cc_result = await session.execute(
@@ -264,9 +270,9 @@ async def _check_pattern_b_suppression(
         sum(recent_vals) / len(recent_vals) if recent_vals else float("inf")
     )
 
-    last_med_date = get_last_med_change_date(med_history, last_med_change_field)  # type: ignore[arg-type]
+    last_med_date = get_last_med_change_date(med_history, last_med_change_field, as_of=now.date())  # type: ignore[arg-type]
     days_since = _days_since(last_med_date, now)
-    titration_window = get_titration_window(med_history)
+    titration_window = get_titration_window(med_history, as_of=now.date())
 
     should_suppress = (
         slope < _SUPPRESSION_SLOPE_THRESHOLD

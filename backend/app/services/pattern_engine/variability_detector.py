@@ -47,18 +47,22 @@ class VariabilityResult(TypedDict):
 
 
 async def run_variability_detector(
-    session: AsyncSession, patient_id: str
+    session: AsyncSession,
+    patient_id: str,
+    as_of: datetime | None = None,
 ) -> VariabilityResult:
     """Compute BP coefficient of variation over the adaptive window.
 
     Args:
         session: Active async SQLAlchemy session.
         patient_id: Patient identifier (iEMR MED_REC_NO).
+        as_of: Reference datetime. Defaults to now (production). Pass a historical
+            datetime to replay the detector at a past point (shadow mode only).
 
     Returns:
         VariabilityResult with level, CV%, agenda item, and scorer signal.
     """
-    now = datetime.now(tz=UTC)
+    now = as_of if as_of is not None else datetime.now(tz=UTC)
 
     _no_detect: VariabilityResult = {
         "detected": False,

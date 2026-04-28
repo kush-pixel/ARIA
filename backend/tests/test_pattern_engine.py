@@ -202,12 +202,19 @@ def _cc_scalar(cc_obj: MagicMock | None) -> MagicMock:
     return _scalar(cc_obj)
 
 
+def _appt(next_appt_dt=None) -> MagicMock:
+    """Mock Patient.next_appointment query result (one_or_none)."""
+    r = MagicMock()
+    r.one_or_none.return_value = (next_appt_dt,) if next_appt_dt is not None else None
+    return r
+
+
 async def test_inertia_all_conditions_met() -> None:
     """All five conditions met → inertia_detected=True."""
     readings = _elevated_readings(count=6, days_back=20.0)
     old_change = date.today() - timedelta(days=60)
     cc_obj = _cc(last_med_change=old_change)
-    session = _session(_cc_scalar(cc_obj), _rows(*readings))
+    session = _session(_cc_scalar(cc_obj), _appt(), _rows(*readings))
     result = await run_inertia_detector(session, "1091")
     assert result["inertia_detected"] is True
     assert result["elevated_count"] == 6
@@ -217,7 +224,7 @@ async def test_inertia_all_conditions_met() -> None:
 async def test_inertia_no_readings() -> None:
     """No readings → inertia_detected=False (CC queried, then readings empty)."""
     cc_obj = _cc()
-    session = _session(_cc_scalar(cc_obj), _rows())
+    session = _session(_cc_scalar(cc_obj), _appt(), _rows())
     result = await run_inertia_detector(session, "1091")
     assert result["inertia_detected"] is False
     assert result["avg_systolic"] is None
@@ -228,7 +235,7 @@ async def test_inertia_avg_below_threshold() -> None:
     """Average systolic below 140 → inertia_detected=False."""
     readings = [_reading_row(_days_ago(i), 130.0) for i in range(6)]
     cc_obj = _cc()
-    session = _session(_cc_scalar(cc_obj), _rows(*readings))
+    session = _session(_cc_scalar(cc_obj), _appt(), _rows(*readings))
     result = await run_inertia_detector(session, "1091")
     assert result["inertia_detected"] is False
     assert result["avg_systolic"] == 130.0
@@ -238,7 +245,7 @@ async def test_inertia_fewer_than_five_elevated() -> None:
     """Only 4 elevated readings → condition 2 fails → inertia_detected=False."""
     readings = [_reading_row(_days_ago(i * 3), 150.0) for i in range(4)]
     cc_obj = _cc()
-    session = _session(_cc_scalar(cc_obj), _rows(*readings))
+    session = _session(_cc_scalar(cc_obj), _appt(), _rows(*readings))
     result = await run_inertia_detector(session, "1091")
     assert result["inertia_detected"] is False
     assert result["elevated_count"] == 4
@@ -248,7 +255,7 @@ async def test_inertia_duration_too_short() -> None:
     """5 elevated readings all within 3 days → duration condition fails."""
     readings = [_reading_row(_days_ago(3 - i * 0.5), 150.0) for i in range(5)]
     cc_obj = _cc()
-    session = _session(_cc_scalar(cc_obj), _rows(*readings))
+    session = _session(_cc_scalar(cc_obj), _appt(), _rows(*readings))
     result = await run_inertia_detector(session, "1091")
     assert result["inertia_detected"] is False
     assert result["elevated_count"] == 5
@@ -259,7 +266,7 @@ async def test_inertia_recent_med_change_blocks() -> None:
     readings = _elevated_readings(count=6, days_back=20.0)
     recent_change = date.today() - timedelta(days=10)
     cc_obj = _cc(last_med_change=recent_change)
-    session = _session(_cc_scalar(cc_obj), _rows(*readings))
+    session = _session(_cc_scalar(cc_obj), _appt(), _rows(*readings))
     result = await run_inertia_detector(session, "1091")
     assert result["inertia_detected"] is False
 
@@ -268,7 +275,7 @@ async def test_inertia_null_med_change_triggers() -> None:
     """NULL last_med_change (never changed) → condition 4 passes → True."""
     readings = _elevated_readings(count=6, days_back=20.0)
     cc_obj = _cc(last_med_change=None, med_history=None)
-    session = _session(_cc_scalar(cc_obj), _rows(*readings))
+    session = _session(_cc_scalar(cc_obj), _appt(), _rows(*readings))
     result = await run_inertia_detector(session, "1091")
     assert result["inertia_detected"] is True
 
@@ -280,7 +287,7 @@ async def test_inertia_mixed_elevated_and_normal() -> None:
         + [_reading_row(_days_ago(10 - i), 125.0) for i in range(5)]  # normal
     )
     cc_obj = _cc()
-    session = _session(_cc_scalar(cc_obj), _rows(*readings))
+    session = _session(_cc_scalar(cc_obj), _appt(), _rows(*readings))
     result = await run_inertia_detector(session, "1091")
     assert result["inertia_detected"] is False
     assert result["elevated_count"] == 3
@@ -293,7 +300,7 @@ async def test_inertia_med_history_blocks_when_recent_change() -> None:
     recent_date_str = (date.today() - timedelta(days=5)).isoformat()
     med_history = [{"name": "Lisinopril", "rxnorm": "29046", "date": recent_date_str, "activity": "increased"}]
     cc_obj = _cc(med_history=med_history, last_med_change=None)
-    session = _session(_cc_scalar(cc_obj), _rows(*readings))
+    session = _session(_cc_scalar(cc_obj), _appt(), _rows(*readings))
     result = await run_inertia_detector(session, "1091")
     assert result["inertia_detected"] is False
 
@@ -306,7 +313,7 @@ async def test_inertia_condition5_declining_bp_blocks() -> None:
         + [_reading_row(_days_ago(6 - i), 130.0) for i in range(5)]     # recent: below 140
     )
     cc_obj = _cc(last_med_change=None)
-    session = _session(_cc_scalar(cc_obj), _rows(*readings))
+    session = _session(_cc_scalar(cc_obj), _appt(), _rows(*readings))
     result = await run_inertia_detector(session, "1091")
     assert result["inertia_detected"] is False
 
@@ -314,7 +321,7 @@ async def test_inertia_condition5_declining_bp_blocks() -> None:
 async def test_inertia_no_cc_row_falls_back_to_default_threshold() -> None:
     """No ClinicalContext row → falls back to 140 threshold, still detects inertia."""
     readings = _elevated_readings(count=6, days_back=20.0)
-    session = _session(_cc_scalar(None), _rows(*readings))
+    session = _session(_cc_scalar(None), _appt(), _rows(*readings))
     result = await run_inertia_detector(session, "1091")
     assert result["inertia_detected"] is True
 
@@ -345,7 +352,7 @@ def _no_recent_med_change_cc() -> MagicMock:
 
 async def test_adherence_pattern_a_high_bp_low_adherence() -> None:
     """High BP + low adherence → Pattern A."""
-    session = _session(_cc_scalar(_cc()), _one(20, 14), _scalar(155.0))
+    session = _session(_cc_scalar(_cc()), _appt(), _one(20, 14), _scalar(155.0))
     result = await run_adherence_analyzer(session, "1091")
     assert result["pattern"] == "A"
     assert result["interpretation"] == "possible adherence concern"
@@ -356,10 +363,10 @@ async def test_adherence_pattern_b_high_bp_high_adherence() -> None:
     """High BP + high adherence → Pattern B (not suppressed: flat slope, no med change)."""
     session = _session(
         _cc_scalar(_cc()),                       # no historic_bp → threshold=140
+        _appt(),                                 # Patient.next_appointment → None → 28d window
         _one(20, 20),                            # 100% adherence
         _scalar(155.0),                          # avg systolic >= 140
         _flat_readings_for_b_suppression_check(),# flat slope → no suppression
-        _no_recent_med_change_cc(),              # unused — med data now from first cc query
     )
     result = await run_adherence_analyzer(session, "1091")
     assert result["pattern"] == "B"
@@ -368,7 +375,7 @@ async def test_adherence_pattern_b_high_bp_high_adherence() -> None:
 
 async def test_adherence_pattern_c_normal_bp_low_adherence() -> None:
     """Normal BP + low adherence → Pattern C."""
-    session = _session(_cc_scalar(_cc()), _one(20, 14), _scalar(128.0))
+    session = _session(_cc_scalar(_cc()), _appt(), _one(20, 14), _scalar(128.0))
     result = await run_adherence_analyzer(session, "1091")
     assert result["pattern"] == "C"
     assert result["interpretation"] == "contextual review"
@@ -376,7 +383,7 @@ async def test_adherence_pattern_c_normal_bp_low_adherence() -> None:
 
 async def test_adherence_pattern_none_normal_bp_high_adherence() -> None:
     """Normal BP + high adherence → no concern."""
-    session = _session(_cc_scalar(_cc()), _one(20, 20), _scalar(128.0))
+    session = _session(_cc_scalar(_cc()), _appt(), _one(20, 20), _scalar(128.0))
     result = await run_adherence_analyzer(session, "1091")
     assert result["pattern"] == "none"
     assert result["interpretation"] == "no adherence concern identified"
@@ -384,16 +391,16 @@ async def test_adherence_pattern_none_normal_bp_high_adherence() -> None:
 
 async def test_adherence_no_doses_returns_none_pct() -> None:
     """Zero scheduled doses → adherence_pct=None, pattern=none (no div-by-zero)."""
-    session = _session(_cc_scalar(_cc()), _one(0, 0))
+    session = _session(_cc_scalar(_cc()), _appt(), _one(0, 0))
     result = await run_adherence_analyzer(session, "1091")
     assert result["adherence_pct"] is None
     assert result["pattern"] == "none"
-    assert session.execute.call_count == 2   # cc + confirmations
+    assert session.execute.call_count == 3   # cc + Patient + confirmations
 
 
 async def test_adherence_no_bp_readings_pattern_c_when_low_adherence() -> None:
     """No readings → avg_systolic=None → treated as normal BP → Pattern C if low adherence."""
-    session = _session(_cc_scalar(_cc()), _one(20, 14), _scalar(None))
+    session = _session(_cc_scalar(_cc()), _appt(), _one(20, 14), _scalar(None))
     result = await run_adherence_analyzer(session, "1091")
     assert result["pattern"] == "C"
 
@@ -402,10 +409,10 @@ async def test_adherence_boundary_exactly_80_pct_is_not_low() -> None:
     """Exactly 80% adherence is NOT classified as low adherence → Pattern B."""
     session = _session(
         _cc_scalar(_cc()),
+        _appt(),                                 # Patient.next_appointment → None → 28d window
         _one(10, 8),                             # 80% adherence
         _scalar(155.0),                          # high BP → Pattern B candidate
         _flat_readings_for_b_suppression_check(),
-        _no_recent_med_change_cc(),
     )
     result = await run_adherence_analyzer(session, "1091")
     assert result["pattern"] == "B"
@@ -433,6 +440,7 @@ async def test_adherence_pattern_b_suppressed_when_treatment_working() -> None:
     cc_obj = _cc(med_history=None, last_med_change=recent_change)
     session = _session(
         _cc_scalar(cc_obj),      # cc first: threshold=140 (no historic_bp), med change 7d ago
+        _appt(),
         _one(20, 20),
         _scalar(148.0),
         _rows(*readings),
@@ -453,6 +461,7 @@ async def test_adherence_pattern_b_not_suppressed_when_no_med_change() -> None:
     cc_obj = _cc(med_history=None, last_med_change=None)
     session = _session(
         _cc_scalar(cc_obj),
+        _appt(),
         _one(20, 20),
         _scalar(148.0),
         _rows(*readings),
@@ -474,6 +483,7 @@ async def test_adherence_pattern_b_not_suppressed_when_med_change_too_old() -> N
     cc_obj = _cc(med_history=None, last_med_change=old_change)
     session = _session(
         _cc_scalar(cc_obj),
+        _appt(),
         _one(20, 20),
         _scalar(148.0),
         _rows(*readings),
@@ -499,6 +509,7 @@ async def test_adherence_pattern_b_med_history_used_for_suppression() -> None:
     cc_obj = _cc(med_history=med_history, last_med_change=None)
     session = _session(
         _cc_scalar(cc_obj),      # cc first: amlodipine → 56d window, med change 5d ago
+        _appt(),
         _one(20, 20),
         _scalar(148.0),
         _rows(*readings),
@@ -547,7 +558,7 @@ def _no_cc() -> MagicMock:
 
 async def test_deterioration_worsening_trend() -> None:
     """Clear upward trend above threshold → deterioration=True, positive slope."""
-    session = _session(_no_cc(), _rows(*_worsening_readings()))
+    session = _session(_no_cc(), _appt(), _rows(*_worsening_readings()))
     result = await run_deterioration_detector(session, "1091")
     assert result["deterioration"] is True
     assert result["slope"] is not None and result["slope"] > 0
@@ -558,7 +569,7 @@ async def test_deterioration_worsening_trend() -> None:
 
 async def test_deterioration_improving_trend() -> None:
     """Downward trend → deterioration=False (negative slope)."""
-    session = _session(_no_cc(), _rows(*_improving_readings()))
+    session = _session(_no_cc(), _appt(), _rows(*_improving_readings()))
     result = await run_deterioration_detector(session, "1091")
     assert result["deterioration"] is False
 
@@ -566,7 +577,7 @@ async def test_deterioration_improving_trend() -> None:
 async def test_deterioration_fewer_than_7_readings() -> None:
     """Fewer than 7 readings → deterioration=False, no slope computed."""
     readings = [_reading_row(_days_ago(i), 155.0) for i in range(5)]
-    session = _session(_no_cc(), _rows(*readings))
+    session = _session(_no_cc(), _appt(), _rows(*readings))
     result = await run_deterioration_detector(session, "1091")
     assert result["deterioration"] is False
     assert result["slope"] is None
@@ -574,7 +585,7 @@ async def test_deterioration_fewer_than_7_readings() -> None:
 
 async def test_deterioration_no_readings() -> None:
     """Zero readings → deterioration=False."""
-    session = _session(_no_cc(), _rows())
+    session = _session(_no_cc(), _appt(), _rows())
     result = await run_deterioration_detector(session, "1091")
     assert result["deterioration"] is False
 
@@ -582,7 +593,7 @@ async def test_deterioration_no_readings() -> None:
 async def test_deterioration_flat_trend() -> None:
     """Flat BP (zero slope) → deterioration=False."""
     readings = [_reading_row(_days_ago(14 - i), 150.0) for i in range(10)]
-    session = _session(_no_cc(), _rows(*readings))
+    session = _session(_no_cc(), _appt(), _rows(*readings))
     result = await run_deterioration_detector(session, "1091")
     assert result["deterioration"] is False
     assert result["slope"] == 0.0
@@ -600,7 +611,7 @@ async def test_deterioration_positive_slope_but_recent_not_higher() -> None:
         _reading_row(_days_ago(2),  143.0),   # recent drops below baseline
         _reading_row(_days_ago(1),  142.0),
     ]
-    session = _session(_no_cc(), _rows(*readings))
+    session = _session(_no_cc(), _appt(), _rows(*readings))
     result = await run_deterioration_detector(session, "1091")
     assert result["deterioration"] is False
 
@@ -608,7 +619,7 @@ async def test_deterioration_positive_slope_but_recent_not_higher() -> None:
 async def test_deterioration_readings_only_in_recent_window() -> None:
     """All readings in last 3 days → no baseline values → deterioration=False."""
     readings = [_reading_row(_days_ago(i * 0.3), 160.0) for i in range(8)]
-    session = _session(_no_cc(), _rows(*readings))
+    session = _session(_no_cc(), _appt(), _rows(*readings))
     result = await run_deterioration_detector(session, "1091")
     assert result["deterioration"] is False
 
@@ -619,7 +630,7 @@ async def test_deterioration_below_threshold_not_flagged() -> None:
     readings = _worsening_readings(
         count=10, start_systolic=115.0, end_systolic=125.0, window_days=14
     )
-    session = _session(_no_cc(), _rows(*readings))
+    session = _session(_no_cc(), _appt(), _rows(*readings))
     result = await run_deterioration_detector(session, "1091")
     assert result["deterioration"] is False
 
@@ -640,7 +651,7 @@ async def test_deterioration_step_change_detected() -> None:
     ]
     # Add enough readings to meet _MIN_READINGS=7
     mid = [_reading_row(_days_ago(12), 138.0)]
-    session = _session(_no_cc(), _rows(*(old_week + mid + recent_week)))
+    session = _session(_no_cc(), _appt(), _rows(*(old_week + mid + recent_week)))
     result = await run_deterioration_detector(session, "1091")
     assert result["deterioration"] is True
 

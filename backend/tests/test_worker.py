@@ -350,17 +350,24 @@ async def test_handle_pattern_recompute_calls_all_detectors_and_scorer() -> None
     """_handle_pattern_recompute calls all 4 Layer 1 detectors then Layer 2 scorer."""
     job = _make_job(job_type="pattern_recompute")
     session = AsyncMock()
+    _patient = MagicMock()
+    _patient.enrolled_at = datetime(2024, 1, 1, tzinfo=UTC)
+    _pat_result = MagicMock()
+    _pat_result.scalar_one_or_none.return_value = _patient
+    session.execute.return_value = _pat_result
 
     gap_result = {"gap_days": 2.0, "status": "flag", "threshold_used": {"flag": 1, "urgent": 3}}
     inertia_result = {"inertia_detected": True, "avg_systolic": 152.0, "elevated_count": 6, "duration_days": 14.0}
     adherence_result = {"pattern": "B", "adherence_pct": 91.0, "interpretation": "possible treatment-review case — elevated BP with high adherence signal"}
     deterioration_result = {"deterioration": False, "slope": -0.5, "recent_avg": 148.0, "baseline_avg": 152.0}
+    variability_result = {"detected": False, "level": "none", "cv_pct": None, "visit_agenda_item": None, "variability_score": 0.0}
 
     with (
         patch("app.services.pattern_engine.gap_detector.run_gap_detector", AsyncMock(return_value=gap_result)) as gap_mock,
         patch("app.services.pattern_engine.inertia_detector.run_inertia_detector", AsyncMock(return_value=inertia_result)) as inertia_mock,
         patch("app.services.pattern_engine.adherence_analyzer.run_adherence_analyzer", AsyncMock(return_value=adherence_result)) as adherence_mock,
         patch("app.services.pattern_engine.deterioration_detector.run_deterioration_detector", AsyncMock(return_value=deterioration_result)) as deterioration_mock,
+        patch("app.services.pattern_engine.variability_detector.run_variability_detector", AsyncMock(return_value=variability_result)),
         patch("app.services.pattern_engine.risk_scorer.compute_risk_score", AsyncMock(return_value=42.5)) as scorer_mock,
     ):
         await _handle_pattern_recompute(job, session)
@@ -396,6 +403,7 @@ async def test_handle_pattern_recompute_writes_adherence_alert_for_pattern_a() -
         patch("app.services.pattern_engine.inertia_detector.run_inertia_detector", AsyncMock(return_value=inertia_result)),
         patch("app.services.pattern_engine.adherence_analyzer.run_adherence_analyzer", AsyncMock(return_value=adherence_result)),
         patch("app.services.pattern_engine.deterioration_detector.run_deterioration_detector", AsyncMock(return_value=deterioration_result)),
+        patch("app.services.pattern_engine.variability_detector.run_variability_detector", AsyncMock(return_value={"detected": False, "level": "none", "cv_pct": None, "visit_agenda_item": None, "variability_score": 0.0})),
         patch("app.services.pattern_engine.risk_scorer.compute_risk_score", AsyncMock(return_value=55.0)),
     ):
         await _handle_pattern_recompute(job, session)
@@ -851,6 +859,11 @@ async def test_pattern_recompute_triggers_mini_briefing_on_gap_urgent() -> None:
     job = _make_job(job_type="pattern_recompute", patient_id="1091")
     session = AsyncMock()
     session.flush = AsyncMock()
+    _patient = MagicMock()
+    _patient.enrolled_at = datetime(2024, 1, 1, tzinfo=UTC)
+    _pat_result = MagicMock()
+    _pat_result.scalar_one_or_none.return_value = _patient
+    session.execute.return_value = _pat_result
 
     gap_result = {"gap_days": 4, "status": "urgent"}
     inertia_result = {"inertia_detected": False, "avg_systolic": None}
@@ -862,6 +875,7 @@ async def test_pattern_recompute_triggers_mini_briefing_on_gap_urgent() -> None:
         patch("app.services.pattern_engine.inertia_detector.run_inertia_detector", AsyncMock(return_value=inertia_result)),
         patch("app.services.pattern_engine.adherence_analyzer.run_adherence_analyzer", AsyncMock(return_value=adherence_result)),
         patch("app.services.pattern_engine.deterioration_detector.run_deterioration_detector", AsyncMock(return_value=deterioration_result)),
+        patch("app.services.pattern_engine.variability_detector.run_variability_detector", AsyncMock(return_value={"detected": False, "level": "none", "cv_pct": None, "visit_agenda_item": None, "variability_score": 0.0})),
         patch("app.services.pattern_engine.risk_scorer.compute_risk_score", AsyncMock(return_value=72.5)),
         patch("app.services.worker.processor._upsert_alert", new_callable=AsyncMock),
         patch("app.services.briefing.composer.compose_mini_briefing", new_callable=AsyncMock) as mock_mini,
@@ -877,6 +891,11 @@ async def test_pattern_recompute_triggers_mini_briefing_on_deterioration() -> No
     job = _make_job(job_type="pattern_recompute", patient_id="1091")
     session = AsyncMock()
     session.flush = AsyncMock()
+    _patient = MagicMock()
+    _patient.enrolled_at = datetime(2024, 1, 1, tzinfo=UTC)
+    _pat_result = MagicMock()
+    _pat_result.scalar_one_or_none.return_value = _patient
+    session.execute.return_value = _pat_result
 
     gap_result = {"gap_days": 0, "status": "none"}
     inertia_result = {"inertia_detected": False, "avg_systolic": None}
@@ -888,6 +907,7 @@ async def test_pattern_recompute_triggers_mini_briefing_on_deterioration() -> No
         patch("app.services.pattern_engine.inertia_detector.run_inertia_detector", AsyncMock(return_value=inertia_result)),
         patch("app.services.pattern_engine.adherence_analyzer.run_adherence_analyzer", AsyncMock(return_value=adherence_result)),
         patch("app.services.pattern_engine.deterioration_detector.run_deterioration_detector", AsyncMock(return_value=deterioration_result)),
+        patch("app.services.pattern_engine.variability_detector.run_variability_detector", AsyncMock(return_value={"detected": False, "level": "none", "cv_pct": None, "visit_agenda_item": None, "variability_score": 0.0})),
         patch("app.services.pattern_engine.risk_scorer.compute_risk_score", AsyncMock(return_value=68.0)),
         patch("app.services.worker.processor._upsert_alert", new_callable=AsyncMock),
         patch("app.services.briefing.composer.compose_mini_briefing", new_callable=AsyncMock) as mock_mini,
@@ -903,6 +923,11 @@ async def test_pattern_recompute_does_not_trigger_mini_briefing_on_inertia() -> 
     job = _make_job(job_type="pattern_recompute", patient_id="1091")
     session = AsyncMock()
     session.flush = AsyncMock()
+    _patient = MagicMock()
+    _patient.enrolled_at = datetime(2024, 1, 1, tzinfo=UTC)
+    _pat_result = MagicMock()
+    _pat_result.scalar_one_or_none.return_value = _patient
+    session.execute.return_value = _pat_result
 
     gap_result = {"gap_days": 0, "status": "none"}
     inertia_result = {"inertia_detected": True, "avg_systolic": 158.0}
@@ -914,6 +939,7 @@ async def test_pattern_recompute_does_not_trigger_mini_briefing_on_inertia() -> 
         patch("app.services.pattern_engine.inertia_detector.run_inertia_detector", AsyncMock(return_value=inertia_result)),
         patch("app.services.pattern_engine.adherence_analyzer.run_adherence_analyzer", AsyncMock(return_value=adherence_result)),
         patch("app.services.pattern_engine.deterioration_detector.run_deterioration_detector", AsyncMock(return_value=deterioration_result)),
+        patch("app.services.pattern_engine.variability_detector.run_variability_detector", AsyncMock(return_value={"detected": False, "level": "none", "cv_pct": None, "visit_agenda_item": None, "variability_score": 0.0})),
         patch("app.services.pattern_engine.risk_scorer.compute_risk_score", AsyncMock(return_value=60.0)),
         patch("app.services.worker.processor._upsert_alert", new_callable=AsyncMock),
         patch("app.services.briefing.composer.compose_mini_briefing", new_callable=AsyncMock) as mock_mini,
