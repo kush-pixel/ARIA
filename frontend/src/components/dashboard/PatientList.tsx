@@ -8,16 +8,6 @@ import RiskTierBadge from './RiskTierBadge'
 import RiskScoreBar from './RiskScoreBar'
 import { FileText, Clock, AlertTriangle } from 'lucide-react'
 
-const TIER_ORDER: Record<string, number> = { high: 0, medium: 1, low: 2 }
-
-function sortPatients(patients: Patient[]): Patient[] {
-  return [...patients].sort((a, b) => {
-    const tierDiff = (TIER_ORDER[a.risk_tier] ?? 9) - (TIER_ORDER[b.risk_tier] ?? 9)
-    if (tierDiff !== 0) return tierDiff
-    return (b.risk_score ?? 0) - (a.risk_score ?? 0)
-  })
-}
-
 function formatApptTime(iso: string): string {
   return new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
 }
@@ -42,7 +32,7 @@ export default function PatientList() {
 
   useEffect(() => {
     getPatients().then((data) => {
-      setPatients(sortPatients(data))
+      setPatients(data)
       setLoading(false)
     })
   }, [])
@@ -72,6 +62,7 @@ export default function PatientList() {
       {/* Patient rows */}
       {patients.map((patient, idx) => {
         const apptToday = patient.next_appointment && isToday(patient.next_appointment)
+        const hasBriefing = patient.has_briefing
 
         return (
           <button
@@ -133,8 +124,8 @@ export default function PatientList() {
               <FileText
                 size={18}
                 strokeWidth={1.75}
-                className={apptToday ? 'text-teal-600 dark:text-teal-400' : 'text-slate-200 dark:text-slate-700'}
-                aria-label={apptToday ? 'Briefing ready' : 'No briefing today'}
+                className={hasBriefing ? 'text-teal-600 dark:text-teal-400' : 'text-slate-200 dark:text-slate-700'}
+                aria-label={hasBriefing ? 'Briefing ready' : 'No briefing available'}
               />
             </div>
           </button>

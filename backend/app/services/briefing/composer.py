@@ -25,6 +25,7 @@ from app.models.clinical_context import ClinicalContext
 from app.models.medication_confirmation import MedicationConfirmation
 from app.models.patient import Patient
 from app.models.reading import Reading
+from app.services.pattern_engine.threshold_utils import get_titration_window
 from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -240,12 +241,17 @@ def _human_duration(days: int) -> str:
 def _build_medication_status(
     current_medications: list[str] | None,
     last_med_change: date | None,
+    med_history: list[dict] | None = None,
 ) -> str:
     """Describe the current medication regimen and last recorded change date.
+
+    Appends a drug-class-aware titration window notice when the last medication
+    change falls within the expected response window (Fix 34).
 
     Args:
         current_medications: List of medication name strings from clinical_context.
         last_med_change: Date of most recent MedicationRequest change from EHR.
+        med_history: JSONB medication timeline for drug-class titration lookup.
 
     Returns:
         Medication status string for the briefing payload.
@@ -256,10 +262,16 @@ def _build_medication_status(
     meds = ", ".join(current_medications)
     if last_med_change:
         days_since = (date.today() - last_med_change).days
+        titration_window = get_titration_window(med_history)
+        titration_notice = (
+            " — within expected titration window, full response may not yet be established."
+            if days_since <= titration_window
+            else ""
+        )
         return (
             f"Current regimen: {meds}. "
             f"Last recorded medication change: {last_med_change.isoformat()} "
-            f"({_human_duration(days_since)})."
+            f"({_human_duration(days_since)}){titration_notice}"
         )
     return f"Current regimen: {meds}. No medication change date recorded in EHR."
 
@@ -390,30 +402,35 @@ def _build_visit_agenda(
     overdue_labs: list[str] | None,
     last_med_change: date | None,
     monitoring_active: bool,
+    alerts: list[Alert] | None = None,
+    variability_agenda_item: str | None = None,
 ) -> list[str]:
     """Build a prioritised visit agenda (up to 6 items).
 
     Priority order per CLAUDE.md:
     1. Urgent alerts
-    2. Inertia flag (elevated BP + no med change > 7 days)
+    2. Inertia flag (from alert rows — Fix 18, avoids double-computation)
     3. Adherence concern
-    4. Overdue labs
-    5. Active problems review
-    6. Next appointment recommendation
+    4. Variability flag (Fix 59)
+    5. Overdue labs
+    6. Active problems review / next appointment recommendation
 
     Args:
         urgent_flags: Pre-built urgent flag strings from _build_urgent_flags.
-        readings: 28-day reading rows.
-        confirmations: 28-day medication confirmation rows.
+        readings: Window reading rows.
+        confirmations: Window medication confirmation rows.
         active_problems: Problem list from clinical context.
         overdue_labs: Overdue lab list from clinical context.
         last_med_change: Date of last medication change from clinical context.
         monitoring_active: Whether home monitoring is active.
+        alerts: Unacknowledged Alert rows for this patient (Fix 18).
+        variability_agenda_item: Variability agenda string from detector, or None.
 
     Returns:
         Ordered list of visit agenda item strings (max 6).
     """
     agenda: list[str] = []
+    _alerts = alerts or []
 
     # 1. Urgent alerts
     for flag in urgent_flags:
@@ -421,20 +438,29 @@ def _build_visit_agenda(
         if len(agenda) >= 6:
             return agenda
 
-    # 2. Therapeutic inertia
-    if monitoring_active and readings:
+    # 2. Therapeutic inertia — derived from alert rows (Fix 18)
+    if any(a.alert_type == "inertia" for a in _alerts):
+        if monitoring_active and readings:
+            avg_sys = statistics.mean(float(r.systolic_avg) for r in readings)
+            agenda.append(
+                f"Review treatment plan: {len(readings)}-session average systolic "
+                f"{avg_sys:.0f} mmHg with no recent medication change (inertia flag)."
+            )
+    elif monitoring_active and readings:
+        # Fallback for mini-briefings / no alert rows yet: use raw computation
         avg_sys = statistics.mean(float(r.systolic_avg) for r in readings)
         if avg_sys >= _ELEVATED_SYSTOLIC and last_med_change is not None:
             days_since = (date.today() - last_med_change).days
             if days_since > _INERTIA_DAYS:
                 agenda.append(
-                    f"Review treatment plan: 28-day average systolic {avg_sys:.0f} mmHg "
-                    f"with no recorded medication change ({_human_duration(days_since)})."
+                    f"Review treatment plan: {len(readings)}-session average systolic "
+                    f"{avg_sys:.0f} mmHg with no recorded medication change "
+                    f"({_human_duration(days_since)})."
                 )
         elif avg_sys >= _ELEVATED_SYSTOLIC and last_med_change is None:
             agenda.append(
-                f"Review treatment plan: 28-day average systolic {avg_sys:.0f} mmHg "
-                f"with no medication change date recorded."
+                f"Review treatment plan: {len(readings)}-session average systolic "
+                f"{avg_sys:.0f} mmHg with no medication change date recorded."
             )
 
     # 3. Adherence concern
@@ -450,6 +476,10 @@ def _build_visit_agenda(
                 f"Discuss possible adherence concern: {overall_rate:.0f}% overall "
                 f"confirmation rate across all medications in the past 28 days."
             )
+
+    # 4. Variability flag (Fix 59)
+    if variability_agenda_item and len(agenda) < 6:
+        agenda.append(variability_agenda_item)
 
     # 4. Overdue labs / pending clinical follow-ups
     # This list includes actual lab orders and other clinical follow-up items
@@ -477,6 +507,7 @@ def _build_data_limitations(
     monitoring_active: bool,
     window_days: int = 28,
     mini_briefing: bool = False,
+    enrolled_at: datetime | None = None,
 ) -> str:
     """Describe any data quality or availability limitations for this briefing.
 
@@ -485,10 +516,26 @@ def _build_data_limitations(
         monitoring_active: Whether home monitoring is active.
         window_days: Size of the trend window in days (default 28).
         mini_briefing: True when this is a between-visit alert briefing.
+        enrolled_at: Patient enrolment timestamp for cold-start notice (Fix 17).
 
     Returns:
         Data limitations string for the briefing payload.
     """
+    cold_start_days = 21
+    if enrolled_at is not None:
+        enrolled_aware = (
+            enrolled_at.replace(tzinfo=UTC)
+            if enrolled_at.tzinfo is None
+            else enrolled_at
+        )
+        days_enrolled = (_now_utc() - enrolled_aware).days
+        if days_enrolled < cold_start_days:
+            return (
+                f"Patient enrolled {days_enrolled} day{'s' if days_enrolled != 1 else ''} ago — "
+                f"minimum {cold_start_days}-day monitoring period required before pattern analysis. "
+                "Gap detection active; inertia, adherence, and deterioration detectors suppressed."
+            )
+
     if not monitoring_active:
         return "Patient is on EHR-only pathway. No home monitoring data available."
     if not readings:
@@ -505,6 +552,43 @@ def _build_data_limitations(
             f"Trend interpretation should be treated with caution.{_synthetic_notice}{suffix}"
         )
     return f"Home monitoring data available: {n} sessions over {window_days} days.{_synthetic_notice}{suffix}"
+
+
+def _build_problem_assessments(
+    problem_assessments: list[dict] | None,
+    active_problems: list[str] | None = None,
+    problem_codes: list[str] | None = None,
+) -> dict[str, str]:
+    """Extract most-recent assessment text per active problem.
+
+    problem_assessments JSONB is sorted date DESC so the first occurrence of
+    each problem_code is the most recent.
+
+    Args:
+        problem_assessments: JSONB list from clinical_context.
+        active_problems: Parallel problem name list for code→name mapping.
+        problem_codes: Parallel ICD-10 code list.
+
+    Returns:
+        Dict of {problem_name_or_code: assessment_text} for non-empty entries.
+    """
+    if not problem_assessments:
+        return {}
+    code_to_name: dict[str, str] = {}
+    if problem_codes and active_problems:
+        for code, name in zip(problem_codes, active_problems, strict=False):
+            code_to_name[code] = name
+    seen: set[str] = set()
+    result: dict[str, str] = {}
+    for entry in problem_assessments:
+        code = entry.get("problem_code") or ""
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        text = entry.get("assessment_text") or ""
+        if text:
+            result[code_to_name.get(code, code)] = text
+    return result
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
@@ -596,7 +680,7 @@ async def compose_briefing(
     )
     confirmations = list(confs_result.scalars().all())
 
-    # ── Build all 9 briefing fields ───────────────────────────────────────────
+    # ── Build all briefing fields ─────────────────────────────────────────────
     trend_summary = _build_trend_summary(
         readings=readings,
         last_clinic_systolic=ctx.last_clinic_systolic,
@@ -612,6 +696,7 @@ async def compose_briefing(
     medication_status = _build_medication_status(
         current_medications=ctx.current_medications,
         last_med_change=ctx.last_med_change,
+        med_history=ctx.med_history,
     )
     adherence_summary = _build_adherence_summary(
         confirmations=confirmations,
@@ -619,6 +704,13 @@ async def compose_briefing(
         monitoring_active=patient.monitoring_active,
     )
     urgent_flags = _build_urgent_flags(alerts)
+
+    # Fix 59: pull variability agenda item from detector result stored on last alert, if available
+    variability_agenda_item: str | None = next(
+        (a.alert_type for a in alerts if a.alert_type == "variability"),
+        None,
+    )
+
     visit_agenda = _build_visit_agenda(
         urgent_flags=urgent_flags,
         readings=readings,
@@ -627,10 +719,13 @@ async def compose_briefing(
         overdue_labs=ctx.overdue_labs,
         last_med_change=ctx.last_med_change,
         monitoring_active=patient.monitoring_active,
+        alerts=alerts,
+        variability_agenda_item=variability_agenda_item,
     )
     data_limitations = _build_data_limitations(
         readings=readings,
         monitoring_active=patient.monitoring_active,
+        enrolled_at=patient.enrolled_at,
     )
 
     payload: dict[str, Any] = {
@@ -638,11 +733,15 @@ async def compose_briefing(
         "medication_status": medication_status,
         "adherence_summary": adherence_summary,
         "active_problems": _sort_problems(ctx.active_problems or [], ctx.problem_codes or []),
+        "problem_assessments": _build_problem_assessments(
+            ctx.problem_assessments, ctx.active_problems, ctx.problem_codes
+        ),
         "overdue_labs": ctx.overdue_labs or [],
         "visit_agenda": visit_agenda,
         "urgent_flags": urgent_flags,
         "risk_score": float(patient.risk_score) if patient.risk_score is not None else None,
         "data_limitations": data_limitations,
+        "patient_context": ctx.social_context,
     }
 
     # ── Persist briefing row ──────────────────────────────────────────────────
@@ -787,6 +886,7 @@ async def compose_mini_briefing(
     medication_status = _build_medication_status(
         current_medications=ctx.current_medications,
         last_med_change=ctx.last_med_change,
+        med_history=ctx.med_history,
     )
     visit_agenda = _build_visit_agenda(
         urgent_flags=urgent_flags,
@@ -796,12 +896,14 @@ async def compose_mini_briefing(
         overdue_labs=ctx.overdue_labs,
         last_med_change=ctx.last_med_change,
         monitoring_active=patient.monitoring_active,
+        alerts=alerts,
     )
     data_limitations = _build_data_limitations(
         readings=readings,
         monitoring_active=patient.monitoring_active,
         window_days=mini_window_days,
         mini_briefing=True,
+        enrolled_at=patient.enrolled_at,
     )
 
     payload: dict[str, Any] = {
@@ -809,11 +911,15 @@ async def compose_mini_briefing(
         "medication_status": medication_status,
         "adherence_summary": "",
         "active_problems": _sort_problems(ctx.active_problems or [], ctx.problem_codes or []),
+        "problem_assessments": _build_problem_assessments(
+            ctx.problem_assessments, ctx.active_problems, ctx.problem_codes
+        ),
         "overdue_labs": ctx.overdue_labs or [],
         "visit_agenda": visit_agenda,
         "urgent_flags": urgent_flags,
         "risk_score": float(patient.risk_score) if patient.risk_score is not None else None,
         "data_limitations": data_limitations,
+        "patient_context": ctx.social_context,
     }
 
     # ── Persist briefing row (appointment_date=None marks as mini-briefing) ───

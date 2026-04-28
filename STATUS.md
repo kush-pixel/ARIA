@@ -1,8 +1,44 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-27 by Kush (Phase 1 + Phase 8 — AUDIT.md Fixes 6,7,8,9,12,16,35,36,37,38; rate limiting, DB audit trigger, HMAC prep)
+Last updated: 2026-04-27 by Kush (Phase 2 — AUDIT.md Fixes 17,18,23,27,28,29,31,34,59; adaptive window, white-coat exclusion, variability detector, cold-start suppression, titration notice, has_briefing, social_context in payload)
+Previous: 2026-04-27 by Kush (Phase 1 + Phase 8 — AUDIT.md Fixes 6,7,8,9,12,16,35,36,37,38; rate limiting, DB audit trigger, HMAC prep)
 Previous: 2026-04-27 by Nesh (Phase 4 complete — Fixes 10, 21, 40, 46, 47, 60 implemented; 428 unit tests passing, ruff clean)
 Previous: 2026-04-27 by Sahil (Phase 5 complete + Phase 7 complete except Fix 43; 426 unit tests passing, ruff clean)
 Previous: 2026-04-26 by Yash (AUDIT.md Fixes 25, 58, 61 — severity-weighted comorbidity, adaptive gap/inertia normalization, risk_score_computed_at staleness indicator)
+
+---
+
+## Phase 2 — Pattern Engine + Briefing Improvements — 2026-04-27
+
+**Author:** Kush Patel
+**Files changed:** `backend/app/services/pattern_engine/threshold_utils.py`, `backend/app/services/pattern_engine/inertia_detector.py`, `backend/app/services/pattern_engine/deterioration_detector.py`, `backend/app/services/pattern_engine/adherence_analyzer.py`, `backend/app/services/pattern_engine/variability_detector.py` (new), `backend/app/services/pattern_engine/risk_scorer.py`, `backend/app/services/worker/processor.py`, `backend/app/services/briefing/composer.py`, `backend/app/api/patients.py`, `frontend/src/lib/types.ts`, `frontend/src/components/dashboard/PatientList.tsx`, `backend/tests/test_variability_detector.py` (new)
+**Tests:** 8 new variability detector tests. `ruff check app/` — all checks passed.
+
+### Fix 28 — Adaptive detection window in all four Layer 1 detectors
+`compute_window_days()` added to `threshold_utils.py`. Takes `(next_appointment, last_visit_date)` and returns `(window_days, source)` clamped to `[14, 90]`, falling back to 28. All four detectors (`inertia_detector.py`, `deterioration_detector.py`, `adherence_analyzer.py`, `variability_detector.py`) now query `Patient.next_appointment` and `ClinicalContext.last_visit_date` to compute an adaptive window instead of using a hardcoded constant. Source logged per computation.
+
+### Fix 27 — White-coat BP exclusion in inertia and deterioration detectors
+`inertia_detector.py` and `deterioration_detector.py` filter out readings within 5 days of `next_appointment` before any threshold comparison. The 5-day window aligns with the synthetic generator's pre-visit BP dip rule (3–5 days, 10–15 mmHg drop). Excluded reading count is logged at DEBUG level. No exclusion applied when `next_appointment` is NULL.
+
+### Fix 59 — BP Variability Detector (new Layer 1 detector)
+`variability_detector.py` (new) computes the coefficient of variation (CV = pstdev / mean × 100) over the adaptive window. Requires ≥ 7 readings. CV ≥ 15% → "high" (consider ABPM referral); CV 12–14% → "moderate" (monitor trend); CV < 12% → "none". `variability_score` (0–100, saturates at CV = 20%) is exported to the Layer 2 scorer. `risk_scorer.py` updated: `_SYSTOLIC_WEIGHT` 0.30 → 0.25, new `_VARIABILITY_WEIGHT = 0.05`; stddev_pop fetched in the same DB query as avg to avoid an extra round-trip. `processor.py` calls `run_variability_detector()` after the other four detectors (skipped during cold-start).
+
+### Fix 17 — Cold-start suppression (< 21 days enrolled)
+`processor.py` queries `Patient.enrolled_at` before the detector loop. When `days_enrolled < 21`: inertia, adherence, deterioration, and variability detectors are skipped; gap detector still runs. Suppressed detectors return safe stub dicts so alert and risk-score logic downstream remains unchanged. `composer.py` `_build_data_limitations()` gains `enrolled_at` parameter and prepends a cold-start notice ("minimum 21-day monitoring period required…") when applicable.
+
+### Fix 18 — Duplicate inertia computation removed from briefing composer
+`_build_visit_agenda()` previously re-derived the inertia flag from raw readings and `last_med_change`, duplicating Layer 1 logic. Now accepts `alerts: list[Alert] | None` and checks `any(a.alert_type == "inertia" for a in alerts)` instead. A raw-computation fallback is retained only for mini-briefings where alert rows may not yet exist.
+
+### Fix 34 — Titration timing notice in medication_status field
+`_build_medication_status()` gains `med_history` parameter. When `days_since_last_med_change <= titration_window` (drug-class-aware via `get_titration_window(med_history)` from `threshold_utils.py`), appends "— within expected titration window, full response may not yet be established." Both `compose_briefing` and `compose_mini_briefing` pass `ctx.med_history`.
+
+### Fix 29 — Social context surfaced in briefing payload
+`compose_briefing` and `compose_mini_briefing` now include `"patient_context": ctx.social_context` in the payload dict. `_build_problem_assessments()` helper added to extract `{problem_name: most_recent_assessment_text}` from `clinical_context.problem_assessments` JSONB. Both briefing types now also include `"problem_assessments"` in the payload.
+
+### Fix 23 — has_briefing boolean replaces today-only icon logic
+`patients.py` `list_patients` queries `SELECT DISTINCT patient_id FROM briefings`, builds a set, and includes `"has_briefing": bool` in every `_serialise()` call. `get_patient` and `update_appointment` also query for briefing existence. `frontend/src/lib/types.ts` Patient interface gains `has_briefing: boolean`. `PatientList.tsx` icon now reflects `patient.has_briefing` instead of today's date comparison.
+
+### Fix 31 — Duplicate sortPatients() removed from PatientList.tsx
+`sortPatients()` function and its call `setPatients(sortPatients(data))` removed from `PatientList.tsx`. Sort is authoritative from the API (`/api/patients` already returns patients sorted by tier then `risk_score DESC`). `isToday()` helper retained (still used for appointment time display column).
 
 ---
 

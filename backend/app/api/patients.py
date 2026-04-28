@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session
+from app.models.briefing import Briefing
 from app.models.patient import Patient
 from app.utils.logging_utils import get_logger
 
@@ -36,13 +37,19 @@ async def list_patients(session: AsyncSession = Depends(get_session)) -> list[di
     result = await session.execute(select(Patient))
     patients = result.scalars().all()
 
+    # Fix 23: determine which patients have at least one briefing row
+    briefing_result = await session.execute(
+        select(Briefing.patient_id).distinct()
+    )
+    patients_with_briefing: set[str] = {row[0] for row in briefing_result}
+
     def sort_key(p: Patient) -> tuple[int, float]:
         tier = _TIER_ORDER.get(p.risk_tier, 9)
         score = float(p.risk_score) if p.risk_score is not None else 0.0
         return (tier, -score)
 
     sorted_patients = sorted(patients, key=sort_key)
-    return [_serialise(p) for p in sorted_patients]
+    return [_serialise(p, has_briefing=p.patient_id in patients_with_briefing) for p in sorted_patients]
 
 
 @router.get("/patients/{patient_id}")
@@ -57,7 +64,11 @@ async def get_patient(
     patient = result.scalar_one_or_none()
     if patient is None:
         raise HTTPException(status_code=404, detail="Patient not found")
-    return _serialise(patient)
+    briefing_check = await session.execute(
+        select(Briefing.patient_id).where(Briefing.patient_id == patient_id).limit(1)
+    )
+    has_briefing = briefing_check.scalar_one_or_none() is not None
+    return _serialise(patient, has_briefing=has_briefing)
 
 
 @router.patch("/patients/{patient_id}/appointment")
@@ -96,10 +107,13 @@ async def update_appointment(
         patient_id,
         body.next_appointment.isoformat(),
     )
-    return _serialise(patient)
+    briefing_check2 = await session.execute(
+        select(Briefing.patient_id).where(Briefing.patient_id == patient_id).limit(1)
+    )
+    return _serialise(patient, has_briefing=briefing_check2.scalar_one_or_none() is not None)
 
 
-def _serialise(p: Patient) -> dict:
+def _serialise(p: Patient, has_briefing: bool = False) -> dict:
     return {
         "patient_id": p.patient_id,
         "gender": p.gender,
@@ -112,4 +126,5 @@ def _serialise(p: Patient) -> dict:
         "next_appointment": p.next_appointment.isoformat() if p.next_appointment else None,
         "enrolled_at": p.enrolled_at.isoformat() if p.enrolled_at else None,
         "enrolled_by": p.enrolled_by,
+        "has_briefing": has_briefing,
     }
