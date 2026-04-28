@@ -1,5 +1,7 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-27 by Kush (Phase 2 — AUDIT.md Fixes 17,18,23,27,28,29,31,34,59; adaptive window, white-coat exclusion, variability detector, cold-start suppression, titration notice, has_briefing, social_context in payload)
+Last updated: 2026-04-27 by Krishna (Phase 6 — BP trend sparkline per patient row: MiniSparkline.tsx pure SVG component, tier-colored line+area fill, readings fetched in parallel on list load; search bar upgraded: wider, white card, stronger border, blue focus ring; ARIA logo light/dark swap in sidebar; whitespace reduced across all pages)
+Previous: 2026-04-27 by Krishna (Phase 6 — full frontend redesign: medical blue system, Topbar with search/theme toggle, Sidebar refresh, PatientList tier filter + pagination, BriefingCard, AlertInbox, Admin page all redesigned to clinical-grade UI)
+Previous: 2026-04-27 by Kush (Phase 2 — AUDIT.md Fixes 17,18,23,27,28,29,31,34,59; adaptive window, white-coat exclusion, variability detector, cold-start suppression, titration notice, has_briefing, social_context in payload)
 Previous: 2026-04-27 by Kush (Phase 1 + Phase 8 — AUDIT.md Fixes 6,7,8,9,12,16,35,36,37,38; rate limiting, DB audit trigger, HMAC prep)
 Previous: 2026-04-27 by Nesh (Phase 4 complete — Fixes 10, 21, 40, 46, 47, 60 implemented; 428 unit tests passing, ruff clean)
 Previous: 2026-04-27 by Sahil (Phase 5 complete + Phase 7 complete except Fix 43; 426 unit tests passing, ruff clean)

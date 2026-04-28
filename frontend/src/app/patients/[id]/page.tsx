@@ -35,29 +35,27 @@ export default function PatientPage() {
 
   if (loading) {
     return (
-      <div className="p-8 flex items-center gap-3 text-slate-500">
-        <div className="h-5 w-5 rounded-full border-2 border-teal-600 border-t-transparent animate-spin" />
-        <span className="text-[16px]">Loading patient briefing&hellip;</span>
+      <div className="p-8 flex items-center gap-3 text-gray-400">
+        <div className="h-5 w-5 rounded-full border-2 border-blue-600 border-t-transparent animate-spin" />
+        <span className="text-[15px]">Loading patient briefing…</span>
       </div>
     )
   }
 
   if (!patient) {
     return (
-      <div className="p-8 text-slate-500 text-[16px]">
-        Patient not found.
-      </div>
+      <div className="p-8 text-gray-500 text-[15px]">Patient not found.</div>
     )
   }
 
   return (
-    <div className="p-8">
+    <div className="p-5">
       <Link
         href="/patients"
-        className="inline-flex items-center gap-2 text-[15px] text-slate-500 hover:text-teal-700
-                   dark:hover:text-teal-400 transition-colors mb-6"
+        className="inline-flex items-center gap-2 text-[14px] text-gray-400 hover:text-blue-600
+                   dark:hover:text-blue-400 transition-colors mb-6"
       >
-        <ArrowLeft size={16} />
+        <ArrowLeft size={15} strokeWidth={2} />
         Back to patient panel
       </Link>
 
