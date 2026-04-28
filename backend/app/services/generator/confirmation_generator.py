@@ -233,7 +233,9 @@ def _active_meds_at(
     active: list[tuple[str, str | None]] = []
     for name, entry in drug_last.items():
         activity = (entry.get("activity") or "").lower()
-        if activity not in ("discontinue", "remove") and _is_medication(name):
+        # "stop" = temporary hold (illness, procedure); "discontinue"/"remove" = permanent.
+        # All three mean the drug is not active at cutoff_date.
+        if activity not in ("discontinue", "remove", "stop") and _is_medication(name):
             rxnorm = (entry.get("rxnorm") or "").strip() or None
             active.append((name, rxnorm))
 

@@ -75,18 +75,22 @@ class DeteriorationResult(TypedDict):
 
 
 async def run_deterioration_detector(
-    session: AsyncSession, patient_id: str
+    session: AsyncSession,
+    patient_id: str,
+    as_of: datetime | None = None,
 ) -> DeteriorationResult:
     """Detect worsening systolic BP trend over the adaptive window.
 
     Args:
         session: Active async SQLAlchemy session.
         patient_id: Patient identifier (iEMR MED_REC_NO).
+        as_of: Reference datetime. Defaults to now (production). Pass a historical
+            datetime to replay the detector at a past point (shadow mode only).
 
     Returns:
         DeteriorationResult with deterioration flag, slope, and window averages.
     """
-    now = datetime.now(tz=UTC)
+    now = as_of if as_of is not None else datetime.now(tz=UTC)
 
     # --- Query 1: clinical context for patient-adaptive threshold ---
     cc_result = await session.execute(

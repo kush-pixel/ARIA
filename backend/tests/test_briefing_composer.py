@@ -79,6 +79,7 @@ def _make_patient(
     p.risk_score = risk_score
     p.risk_tier = risk_tier
     p.next_appointment = datetime(2026, 4, 14, 9, 0, tzinfo=timezone.utc)
+    p.enrolled_at = datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc)
     return p
 
 

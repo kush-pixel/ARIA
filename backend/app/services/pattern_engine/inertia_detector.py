@@ -83,17 +83,23 @@ def _false_result(
 # ---------------------------------------------------------------------------
 
 
-async def run_inertia_detector(session: AsyncSession, patient_id: str) -> InertiaResult:
+async def run_inertia_detector(
+    session: AsyncSession,
+    patient_id: str,
+    as_of: datetime | None = None,
+) -> InertiaResult:
     """Detect therapeutic inertia for a patient over the adaptive window.
 
     Args:
         session: Active async SQLAlchemy session.
         patient_id: Patient identifier (iEMR MED_REC_NO).
+        as_of: Reference datetime. Defaults to now (production). Pass a historical
+            datetime to replay the detector at a past point (shadow mode only).
 
     Returns:
         InertiaResult with inertia_detected flag and supporting evidence values.
     """
-    now = datetime.now(tz=UTC)
+    now = as_of if as_of is not None else datetime.now(tz=UTC)
 
     # --- Query 1: clinical context for threshold and medication history ---
     cc_result = await session.execute(
@@ -194,7 +200,7 @@ async def run_inertia_detector(session: AsyncSession, patient_id: str) -> Inerti
 
     # Condition 4: no medication change on or after first elevated reading
     # Use med_history JSONB traversal; fall back to last_med_change date field.
-    last_med_date = get_last_med_change_date(med_history, last_med_change_field)
+    last_med_date = get_last_med_change_date(med_history, last_med_change_field, as_of=now.date())
 
     if last_med_date is not None:
         last_med_dt = datetime(

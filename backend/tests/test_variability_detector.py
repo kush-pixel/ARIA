@@ -96,8 +96,8 @@ async def test_low_cv_no_flag():
 @pytest.mark.asyncio
 async def test_moderate_variability():
     """CV between 12% and 15% → level='moderate', detected=True."""
-    # Mean ~150, pstdev ~19 → CV ~12.7%
-    systolics = [130.0, 150.0, 170.0, 135.0, 165.0, 145.0, 155.0, 140.0]
+    # Mean=150, pstdev=20, CV=13.3% (alternating 130/170)
+    systolics = [130.0, 170.0, 130.0, 170.0, 130.0, 170.0, 130.0, 170.0]
     session = _make_session(systolics=systolics)
     with patch("app.services.pattern_engine.variability_detector.datetime") as dt_mock:
         dt_mock.now.return_value = _NOW
