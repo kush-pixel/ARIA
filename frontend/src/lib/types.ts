@@ -12,6 +12,7 @@ export interface Patient {
   next_appointment: string | null
   enrolled_at: string
   enrolled_by: string
+  has_briefing: boolean
 }
 
 export interface ClinicalContext {

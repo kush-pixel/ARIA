@@ -155,13 +155,13 @@ async def compute_risk_score(patient_id: str, session: AsyncSession) -> float:
     )
     context = context_result.scalar_one_or_none()
 
-    avg_systolic_result = await session.execute(
+    bp_stats_result = await session.execute(
         select(func.avg(Reading.systolic_avg)).where(
             Reading.patient_id == patient_id,
             Reading.effective_datetime >= window_start,
         )
     )
-    avg_systolic = _as_float(avg_systolic_result.scalar_one_or_none())
+    avg_systolic = _as_float(bp_stats_result.scalar_one_or_none())
 
     last_reading_result = await session.execute(
         select(func.max(Reading.effective_datetime)).where(Reading.patient_id == patient_id)

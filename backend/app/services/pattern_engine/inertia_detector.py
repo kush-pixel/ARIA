@@ -2,7 +2,7 @@
 
 All five conditions must be simultaneously true for inertia to be flagged:
 
-  1. Average systolic >= patient_threshold over the last 28 days
+  1. Average systolic >= patient_threshold over the adaptive window
      (patient_threshold is adaptive: max(130, mean + 1.5×SD) capped at 145;
       falls back to 140 mmHg when fewer than 3 clinic readings are available)
   2. At least 5 readings with systolic_avg >= patient_threshold
@@ -11,6 +11,9 @@ All five conditions must be simultaneously true for inertia to be flagged:
      (uses clinical_context.med_history JSONB; falls back to last_med_change)
   5. 7-day recent average >= patient_threshold  (BP not currently declining)
 
+Adaptive window (Fix 28): window_days = min(90, max(14, next_appt − last_visit))
+White-coat exclusion (Fix 27): readings within 5 days of next_appointment are
+  excluded from all threshold comparisons (but remain in the DB).
 Fail-safe: sparse data, missing context, or any unmet condition → False.
 """
 
@@ -23,11 +26,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.clinical_context import ClinicalContext
+from app.models.patient import Patient
 from app.models.reading import Reading
 from app.services.pattern_engine.threshold_utils import (
     apply_comorbidity_adjustment,
     classify_comorbidity_concern,
     compute_patient_threshold,
+    compute_window_days,
     get_last_med_change_date,
 )
 from app.utils.logging_utils import get_logger
@@ -38,11 +43,11 @@ logger = get_logger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_WINDOW_DAYS = 28
 _ELEVATED_THRESHOLD = 140       # FALLBACK ONLY — primary is patient-adaptive threshold
 _MIN_ELEVATED_COUNT = 5
 _MIN_DURATION_DAYS = 7
 _RECENT_SLOPE_WINDOW = 7        # days for slope direction check (condition 5)
+_WHITE_COAT_EXCLUSION_DAYS = 5  # Fix 27: drop readings within this many days of appointment
 
 
 class InertiaResult(TypedDict):
@@ -78,18 +83,23 @@ def _false_result(
 # ---------------------------------------------------------------------------
 
 
-async def run_inertia_detector(session: AsyncSession, patient_id: str) -> InertiaResult:
-    """Detect therapeutic inertia for a patient over the last 28 days.
+async def run_inertia_detector(
+    session: AsyncSession,
+    patient_id: str,
+    as_of: datetime | None = None,
+) -> InertiaResult:
+    """Detect therapeutic inertia for a patient over the adaptive window.
 
     Args:
         session: Active async SQLAlchemy session.
         patient_id: Patient identifier (iEMR MED_REC_NO).
+        as_of: Reference datetime. Defaults to now (production). Pass a historical
+            datetime to replay the detector at a past point (shadow mode only).
 
     Returns:
         InertiaResult with inertia_detected flag and supporting evidence values.
     """
-    now = datetime.now(tz=UTC)
-    window_start = now - timedelta(days=_WINDOW_DAYS)
+    now = as_of if as_of is not None else datetime.now(tz=UTC)
 
     # --- Query 1: clinical context for threshold and medication history ---
     cc_result = await session.execute(
@@ -101,17 +111,28 @@ async def run_inertia_detector(session: AsyncSession, patient_id: str) -> Inerti
     problem_codes = cc.problem_codes if cc else None
     med_history = cc.med_history if cc else None
     last_med_change_field = cc.last_med_change if cc else None
+    last_visit_date = cc.last_visit_date if cc else None
 
     patient_threshold, threshold_mode = compute_patient_threshold(historic_bp)
     concern_state = classify_comorbidity_concern(problem_codes)
     patient_threshold, adj_mode = apply_comorbidity_adjustment(patient_threshold, concern_state)
 
+    # --- Query 1b: Patient for adaptive window + white-coat exclusion (Fix 28, 27) ---
+    patient_result = await session.execute(
+        select(Patient.next_appointment).where(Patient.patient_id == patient_id)
+    )
+    patient_row = patient_result.one_or_none()
+    next_appointment = patient_row[0] if patient_row else None
+
+    window_days, window_source = compute_window_days(next_appointment, last_visit_date)
+    window_start = now - timedelta(days=window_days)
+
     logger.debug(
-        "patient=%s inertia threshold=%.1f mode=%s adj=%s",
-        patient_id, patient_threshold, threshold_mode, adj_mode,
+        "patient=%s inertia threshold=%.1f mode=%s adj=%s window_days=%d source=%s",
+        patient_id, patient_threshold, threshold_mode, adj_mode, window_days, window_source,
     )
 
-    # --- Query 2: readings in 28-day window ---
+    # --- Query 2: readings in adaptive window ---
     rows = await session.execute(
         select(Reading.effective_datetime, Reading.systolic_avg)
         .where(
@@ -124,6 +145,22 @@ async def run_inertia_detector(session: AsyncSession, patient_id: str) -> Inerti
     readings: list[tuple[datetime, float]] = [
         (row.effective_datetime, float(row.systolic_avg)) for row in rows
     ]
+
+    # Fix 27: exclude white-coat pre-visit dip window (5 days before next_appointment)
+    if next_appointment is not None:
+        appt_aware = (
+            next_appointment.replace(tzinfo=UTC)
+            if next_appointment.tzinfo is None
+            else next_appointment
+        )
+        wc_cutoff = appt_aware - timedelta(days=_WHITE_COAT_EXCLUSION_DAYS)
+        excluded = sum(1 for dt, _ in readings if dt >= wc_cutoff)
+        if excluded:
+            logger.debug(
+                "patient=%s white_coat_exclusion: dropped %d reading(s) within %d days of appointment",
+                patient_id, excluded, _WHITE_COAT_EXCLUSION_DAYS,
+            )
+        readings = [(dt, s) for dt, s in readings if dt < wc_cutoff]
 
     if not readings:
         return _false_result(avg_systolic=None, elevated_count=0)
@@ -163,7 +200,7 @@ async def run_inertia_detector(session: AsyncSession, patient_id: str) -> Inerti
 
     # Condition 4: no medication change on or after first elevated reading
     # Use med_history JSONB traversal; fall back to last_med_change date field.
-    last_med_date = get_last_med_change_date(med_history, last_med_change_field)
+    last_med_date = get_last_med_change_date(med_history, last_med_change_field, as_of=now.date())
 
     if last_med_date is not None:
         last_med_dt = datetime(

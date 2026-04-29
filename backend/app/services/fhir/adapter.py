@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac as _hmac
+import re
 from datetime import datetime
 from typing import Any
 
@@ -96,6 +97,20 @@ _GENDER_MAP: dict[str, str] = {
 }
 
 _IEMR_DATE_FMT = "%m/%d/%Y %H:%M"
+_IEMR_DATE_FMT_SHORT = "%m/%d/%Y"
+
+# MED_ADJUD_TEXT stop/restart patterns — present when a medication was
+# temporarily stopped (e.g. during illness) and later resumed.
+# Example: "SULAR 10 MG TAB ER PO: Restart; stopped on 11/15/2008; restarted on 02/26/2009."
+_ADJUD_RESTART_RE = re.compile(r"\bRestart\b")
+_ADJUD_STOPPED_RE = re.compile(
+    r"\bstopped\s+on\s+(\d{1,2}/\d{1,2}/\d{4}(?:\s+\d{1,2}:\d{2})?)",
+    re.IGNORECASE,
+)
+_ADJUD_RESTARTED_RE = re.compile(
+    r"\brestarted\s+on\s+(\d{1,2}/\d{1,2}/\d{4}(?:\s+\d{1,2}:\d{2})?)",
+    re.IGNORECASE,
+)
 
 
 def _parse_iemr_datetime(date_str: str | None) -> str | None:
@@ -109,12 +124,15 @@ def _parse_iemr_datetime(date_str: str | None) -> str | None:
     """
     if not date_str:
         return None
-    try:
-        dt = datetime.strptime(date_str.strip(), _IEMR_DATE_FMT)
-        return dt.strftime("%Y-%m-%dT%H:%M:00")
-    except ValueError:
-        logger.warning("Cannot parse iEMR datetime %r", date_str)
-        return None
+    s = date_str.strip()
+    for fmt in (_IEMR_DATE_FMT, _IEMR_DATE_FMT_SHORT):
+        try:
+            dt = datetime.strptime(s, fmt)
+            return dt.strftime("%Y-%m-%dT%H:%M:00")
+        except ValueError:
+            continue
+    logger.warning("Cannot parse iEMR datetime %r", date_str)
+    return None
 
 
 def _map_gender(gender_val: str | None) -> str:
@@ -449,11 +467,79 @@ def _build_med_history(visits: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 history.append(
                     {"name": name, "rxnorm": rxnorm, "date": date_str, "activity": activity}
                 )
+
+                # Parse MED_ADJUD_TEXT for explicit stop/restart events.
+                # These arise when a patient temporarily stopped a medication
+                # (e.g. during illness) and the physician later resumed it.
+                # Format: "DRUG: Restart; stopped on MM/DD/YYYY; restarted on MM/DD/YYYY."
+                adjud_text = med.get("MED_ADJUD_TEXT") or ""
+                if adjud_text and _ADJUD_RESTART_RE.search(adjud_text):
+                    _extract_stop_restart_events(
+                        adjud_text, med, name, rxnorm, seen, history
+                    )
+
             except (KeyError, TypeError) as exc:
                 logger.warning("Skipping malformed MEDICATIONS entry in med_history: %s", exc)
 
     history.sort(key=lambda e: (e["date"] is None, e["date"] or ""))
     return history
+
+
+def _extract_stop_restart_events(
+    adjud_text: str,
+    med: dict[str, Any],
+    name: str,
+    rxnorm: str | None,
+    seen: set[tuple[str | None, str | None, str | None]],
+    history: list[dict[str, Any]],
+) -> None:
+    """Parse MED_ADJUD_TEXT and inject stop/restart entries into med_history.
+
+    Mutates ``seen`` and ``history`` in-place.  Logs a debug message when
+    dates are redacted (de-identified data) and cannot be parsed.
+    """
+    stopped_match = _ADJUD_STOPPED_RE.search(adjud_text)
+    restarted_match = _ADJUD_RESTARTED_RE.search(adjud_text)
+
+    # Restart date: prefer explicit "restarted on" text; fall back to
+    # MED_DATE_LAST_MODIFIED, which the iEMR updates at the restart visit.
+    restart_date_str: str | None = None
+    if restarted_match:
+        iso = _parse_iemr_datetime(restarted_match.group(1))
+        restart_date_str = iso[:10] if iso else None
+    if not restart_date_str:
+        last_modified = med.get("MED_DATE_LAST_MODIFIED")
+        if last_modified:
+            iso = _parse_iemr_datetime(last_modified)
+            restart_date_str = iso[:10] if iso else None
+
+    if restart_date_str:
+        key = (name, restart_date_str, "restart")
+        if key not in seen:
+            seen.add(key)
+            history.append({"name": name, "rxnorm": rxnorm,
+                             "date": restart_date_str, "activity": "restart"})
+            logger.debug("med_history: added restart event for %s on %s", name, restart_date_str)
+
+    # Stop date: only available in non-de-identified data.
+    stop_date_str: str | None = None
+    if stopped_match:
+        iso = _parse_iemr_datetime(stopped_match.group(1))
+        stop_date_str = iso[:10] if iso else None
+
+    if stop_date_str:
+        key = (name, stop_date_str, "stop")
+        if key not in seen:
+            seen.add(key)
+            history.append({"name": name, "rxnorm": rxnorm,
+                             "date": stop_date_str, "activity": "stop"})
+            logger.debug("med_history: added stop event for %s on %s", name, stop_date_str)
+    else:
+        logger.debug(
+            "med_history: stop date unavailable for %s restart (de-identified or missing) "
+            "— stop event not added; inactive window cannot be reconstructed",
+            name,
+        )
 
 
 def _build_simple_observation(

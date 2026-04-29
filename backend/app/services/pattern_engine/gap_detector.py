@@ -46,18 +46,24 @@ class GapResult(TypedDict):
 # ---------------------------------------------------------------------------
 
 
-async def run_gap_detector(session: AsyncSession, patient_id: str) -> GapResult:
+async def run_gap_detector(
+    session: AsyncSession,
+    patient_id: str,
+    as_of: datetime | None = None,
+) -> GapResult:
     """Detect reading gap and classify severity relative to the patient's risk tier.
 
     Args:
         session: Active async SQLAlchemy session.
         patient_id: Patient identifier (iEMR MED_REC_NO).
+        as_of: Reference datetime. Defaults to now (production). Pass a historical
+            datetime to replay the detector at a past point (shadow mode only).
 
     Returns:
         GapResult with gap_days, status ("none" | "flag" | "urgent"), and the
         tier-specific thresholds that were applied.
     """
-    now = datetime.now(tz=UTC)
+    now = as_of if as_of is not None else datetime.now(tz=UTC)
 
     tier_row = await session.execute(
         select(Patient.risk_tier).where(Patient.patient_id == patient_id)
