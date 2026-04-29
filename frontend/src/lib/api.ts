@@ -57,6 +57,16 @@ export async function acknowledgeAlert(alertId: string): Promise<void> {
   await apiFetch<unknown>(`/api/alerts/${alertId}/acknowledge`, { method: 'POST' })
 }
 
+// GET /api/alerts/acknowledged
+export async function getAcknowledgedAlerts(): Promise<Alert[]> {
+  return apiFetch<Alert[]>('/api/alerts/acknowledged')
+}
+
+// POST /api/alerts/:id/unacknowledge
+export async function unacknowledgeAlert(alertId: string): Promise<void> {
+  await apiFetch<unknown>(`/api/alerts/${alertId}/unacknowledge`, { method: 'POST' })
+}
+
 // POST /api/admin/trigger-scheduler
 export async function triggerScheduler(): Promise<{ enqueued: number }> {
   return apiFetch<{ enqueued: number }>('/api/admin/trigger-scheduler', { method: 'POST' })
