@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     demo_mode: bool = Field(False, description="Demo mode: enables admin trigger endpoints")
     briefing_trigger: str = Field("07:30", description="Daily briefing generation time HH:MM UTC")
 
+    # Auth
+    patient_jwt_secret: str = Field(
+        "",
+        description="Separate JWT secret for patient tokens (blast-radius isolation from clinician JWT).",
+    )
+
     # Security (Fix 35, 36)
     patient_pseudonym_key: str = Field(
         "",

@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation'
 import { getPatient, getBriefing, getReadings, getAdherence } from '@/lib/api'
 import type { Patient, Briefing, Reading, AdherenceData } from '@/lib/types'
 import BriefingCard from '@/components/briefing/BriefingCard'
+import ChatPanel from '@/components/briefing/ChatPanel'
 import { ArrowLeft } from 'lucide-react'
 import Link from 'next/link'
 
@@ -67,6 +68,7 @@ export default function PatientPage() {
         readings={readings}
         adherence={adherence}
       />
+      <ChatPanel patientId={id} />
     </div>
   )
 }

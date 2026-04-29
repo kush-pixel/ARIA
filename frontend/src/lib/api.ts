@@ -1,10 +1,16 @@
-import type { Patient, Briefing, Reading, Alert, AdherenceData, ShadowModeResults } from './types'
+import type { Patient, Briefing, Reading, Alert, AdherenceData, ShadowModeResults, ChatDoneEvent } from './types'
+import { getToken } from './auth'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 
+function authHeaders(): Record<string, string> {
+  const token = getToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     ...options,
   })
   if (!res.ok) {
@@ -69,4 +75,39 @@ export async function getShadowModeResults(): Promise<ShadowModeResults | null> 
   } catch {
     return null
   }
+}
+
+// GET /api/chat/suggested-questions/:patientId
+export async function getSuggestedQuestions(
+  patientId: string,
+): Promise<{ questions: string[]; proactive: string | null }> {
+  try {
+    return await apiFetch(`/api/chat/suggested-questions/${patientId}`)
+  } catch {
+    return { questions: [], proactive: null }
+  }
+}
+
+// POST /api/chat — returns fetch Response for SSE streaming
+export async function chatStream(
+  patientId: string,
+  question: string,
+): Promise<Response> {
+  const token = getToken()
+  return fetch(`${API_BASE}/api/chat`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ patient_id: patientId, question }),
+  })
+}
+
+// DELETE /api/chat/session
+export async function clearChatSession(patientId: string): Promise<void> {
+  await apiFetch('/api/chat/session', {
+    method: 'DELETE',
+    body: JSON.stringify({ patient_id: patientId }),
+  })
 }

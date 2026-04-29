@@ -209,6 +209,17 @@ INDEXES: list[tuple[str, str]] = [
         "CREATE INDEX IF NOT EXISTS idx_gap_explanations_patient "
         "ON gap_explanations (patient_id, gap_start DESC)",
     ),
+    # Chatbot — clinicians + chat_sessions indexes
+    (
+        "idx_clinicians_username",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_clinicians_username "
+        "ON clinicians (username)",
+    ),
+    (
+        "idx_chat_sessions_clinician_patient",
+        "CREATE INDEX IF NOT EXISTS idx_chat_sessions_clinician_patient "
+        "ON chat_sessions (clinician_id, patient_id, last_active DESC)",
+    ),
 ]
 
 # ---------------------------------------------------------------------------
