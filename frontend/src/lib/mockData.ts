@@ -14,10 +14,12 @@ export const MOCK_PATIENTS: Patient[] = [
     risk_tier: 'high',
     tier_override: 'CHF in problem list',
     risk_score: 74.5,
+    risk_score_computed_at: '2026-04-29T06:00:00Z',
     monitoring_active: true,
     next_appointment: TODAY_APPT,
     enrolled_at: '2026-01-10T08:00:00Z',
     enrolled_by: 'dr.mehta',
+    has_briefing: true,
   },
   {
     patient_id: '1092',
@@ -26,10 +28,12 @@ export const MOCK_PATIENTS: Patient[] = [
     risk_tier: 'medium',
     tier_override: null,
     risk_score: 41.2,
+    risk_score_computed_at: '2026-04-29T06:00:00Z',
     monitoring_active: false,
     next_appointment: '2026-04-25T10:00:00Z',
     enrolled_at: '2026-01-15T09:00:00Z',
     enrolled_by: 'dr.mehta',
+    has_briefing: false,
   },
   {
     patient_id: '1093',
@@ -38,10 +42,12 @@ export const MOCK_PATIENTS: Patient[] = [
     risk_tier: 'low',
     tier_override: null,
     risk_score: 18.7,
+    risk_score_computed_at: '2026-04-29T06:00:00Z',
     monitoring_active: true,
     next_appointment: '2026-05-02T11:00:00Z',
     enrolled_at: '2026-02-01T10:00:00Z',
     enrolled_by: 'dr.mehta',
+    has_briefing: true,
   },
 ]
 
@@ -327,6 +333,8 @@ export const MOCK_ALERTS: Alert[] = [
     triggered_at: '2026-04-17T07:30:00Z',
     delivered_at: '2026-04-17T07:30:05Z',
     acknowledged_at: null,
+    off_hours: false,
+    escalated: false,
   },
   {
     alert_id: 'a002',
@@ -337,6 +345,8 @@ export const MOCK_ALERTS: Alert[] = [
     triggered_at: '2026-04-15T07:30:00Z',
     delivered_at: '2026-04-15T07:30:05Z',
     acknowledged_at: null,
+    off_hours: false,
+    escalated: false,
   },
 ]
 

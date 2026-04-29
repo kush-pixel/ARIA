@@ -1,8 +1,8 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { loginClinician } from '@/lib/auth'
+import { loginClinician, isAuthenticated } from '@/lib/auth'
 
 export default function LoginPage() {
   const router = useRouter()
@@ -10,6 +10,10 @@ export default function LoginPage() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    if (isAuthenticated()) router.replace('/patients')
+  }, [router])
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()

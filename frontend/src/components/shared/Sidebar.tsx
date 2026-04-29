@@ -3,9 +3,10 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useTheme } from 'next-themes'
-import { Users, BellRing, Settings, GitBranch } from 'lucide-react'
+import { Users, BellRing, Settings, GitBranch, LogOut } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import Image from 'next/image'
+import { logout } from '@/lib/auth'
 
 interface NavItem {
   label: string
@@ -83,10 +84,20 @@ export default function Sidebar() {
           <div className="w-7 h-7 rounded-full bg-blue-100 dark:bg-blue-900/40 flex items-center justify-center flex-shrink-0">
             <span className="text-[11px] font-bold text-blue-600 dark:text-blue-400">GP</span>
           </div>
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <p className="text-[12px] font-semibold text-gray-700 dark:text-gray-300 truncate">Clinician</p>
             <p className="text-[11px] text-gray-400 dark:text-gray-500 truncate">IIT Hypertension Clinic</p>
           </div>
+          <button
+            onClick={logout}
+            aria-label="Sign out"
+            title="Sign out"
+            className="flex items-center justify-center w-7 h-7 rounded-lg text-gray-400
+                       hover:bg-gray-100 dark:hover:bg-[#1F2937] hover:text-red-500
+                       transition-colors flex-shrink-0"
+          >
+            <LogOut size={14} strokeWidth={2} />
+          </button>
         </div>
       </div>
     </aside>
