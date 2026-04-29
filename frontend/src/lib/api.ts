@@ -93,13 +93,9 @@ export async function chatStream(
   patientId: string,
   question: string,
 ): Promise<Response> {
-  const token = getToken()
   return fetch(`${API_BASE}/api/chat`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ patient_id: patientId, question }),
   })
 }

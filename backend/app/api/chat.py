@@ -24,11 +24,12 @@ from app.services.chat.agent import (
     generate_suggested_questions,
     run_agent,
 )
-from app.utils.auth_utils import get_current_clinician
 from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["chat"])
+
+_DEFAULT_CLINICIAN_ID = "demo-clinician"
 
 
 class ChatRequest(BaseModel):
@@ -47,75 +48,35 @@ class ClearSessionRequest(BaseModel):
 @router.post("/chat")
 async def chat(
     body: ChatRequest,
-    clinician: dict[str, Any] = Depends(get_current_clinician),
     session: AsyncSession = Depends(get_session),
 ) -> StreamingResponse:
-    """Stream a chatbot response for a clinician question about a patient.
-
-    Authenticates the clinician JWT, verifies the patient exists, then
-    delegates to the agent which runs tool calls and streams SSE events.
-
-    Args:
-        body: patient_id and question.
-        clinician: Decoded JWT payload from get_current_clinician.
-        session: Async DB session.
-
-    Returns:
-        StreamingResponse with text/event-stream media type.
-
-    Raises:
-        HTTPException 404: If patient does not exist.
-    """
-    # Verify patient exists
+    """Stream a chatbot response for a question about a patient."""
     result = await session.execute(
         select(Patient).where(Patient.patient_id == body.patient_id)
     )
     if result.scalar_one_or_none() is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patient not found")
 
-    clinician_id: str = clinician["sub"]
-
-    logger.info(
-        "Chat request: clinician=%s patient=%s question_len=%d",
-        clinician_id,
-        body.patient_id,
-        len(body.question),
-    )
+    logger.info("Chat request: patient=%s question_len=%d", body.patient_id, len(body.question))
 
     return StreamingResponse(
         run_agent(
             question=body.question,
             patient_id=body.patient_id,
-            clinician_id=clinician_id,
+            clinician_id=_DEFAULT_CLINICIAN_ID,
             db_session=session,
         ),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
 @router.get("/chat/suggested-questions/{patient_id}")
 async def suggested_questions(
     patient_id: str,
-    clinician: dict[str, Any] = Depends(get_current_clinician),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """Return dynamic suggested question chips and one proactive suggestion.
-
-    Chips are generated from Layer 1 briefing signals (urgent_flags, adherence_summary, etc.).
-    Proactive suggestion is a lightweight LLM call asking what the clinician should ask next.
-
-    Args:
-        patient_id: Patient identifier.
-        clinician: Decoded JWT payload.
-        session: Async DB session.
-
-    Returns:
-        Dict with ``questions`` list and optional ``proactive`` string.
-    """
+    """Return suggested question chips and one proactive suggestion."""
     result = await session.execute(
         select(Briefing)
         .where(Briefing.patient_id == patient_id)
@@ -134,21 +95,8 @@ async def suggested_questions(
 @router.delete("/chat/session")
 async def clear_session(
     body: ClearSessionRequest,
-    clinician: dict[str, Any] = Depends(get_current_clinician),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, bool]:
-    """Clear the conversation history for a clinician-patient session.
-
-    Called by the frontend when the clinician navigates away from a patient page.
-
-    Args:
-        body: patient_id to clear.
-        clinician: Decoded JWT payload.
-        session: Async DB session.
-
-    Returns:
-        Dict with ``cleared: true``.
-    """
-    clinician_id: str = clinician["sub"]
-    await session_store.clear_session(clinician_id, body.patient_id, session)
+    """Clear the conversation history for a patient session."""
+    await session_store.clear_session(_DEFAULT_CLINICIAN_ID, body.patient_id, session)
     return {"cleared": True}

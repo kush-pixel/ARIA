@@ -22,7 +22,6 @@ from app.api import (
     adherence,
     admin,
     alerts,
-    auth,
     ble_webhook,
     briefings,
     calibration,
@@ -88,7 +87,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(auth.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
 app.include_router(patients.router, prefix="/api")
 app.include_router(readings.router, prefix="/api")
