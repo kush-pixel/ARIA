@@ -61,9 +61,9 @@ function ThinkingChip({ tool }: { tool: string }) {
   const label = TOOL_LABELS[tool] ?? tool.replace('get_', '').replace(/_/g, ' ')
   return (
     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px]
-                     bg-teal-50 dark:bg-teal-900/30 text-teal-600 dark:text-teal-400
-                     border border-teal-200 dark:border-teal-800">
-      <span className="w-1.5 h-1.5 rounded-full bg-teal-500 animate-pulse" />
+                     bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400
+                     border border-blue-200 dark:border-blue-800">
+      <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
       {label}…
     </span>
   )
@@ -88,7 +88,7 @@ function MessageBubble({ msg, index, isLast, onCopy, onFeedback, copied, onFollo
     <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} gap-1 animate-fadeSlideUp`}>
       <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} w-full gap-2`}>
         {!isUser && (
-          <div className="w-6 h-6 rounded-full bg-gradient-to-br from-teal-400 to-teal-600
+          <div className="w-6 h-6 rounded-full bg-gradient-to-br from-blue-400 to-blue-600
                           flex items-center justify-center flex-shrink-0 mt-0.5 shadow-sm">
             <Bot size={11} className="text-white" strokeWidth={2.5} />
           </div>
@@ -97,7 +97,7 @@ function MessageBubble({ msg, index, isLast, onCopy, onFeedback, copied, onFollo
           {/* Bubble */}
           <div className={`px-3.5 py-2.5 rounded-2xl shadow-sm ${
             isUser
-              ? 'bg-gradient-to-br from-teal-500 to-teal-700 text-white rounded-tr-sm'
+              ? 'bg-gradient-to-br from-blue-500 to-blue-700 text-white rounded-tr-sm'
               : 'bg-white dark:bg-[#1a2235] text-gray-800 dark:text-gray-100 rounded-tl-sm border border-gray-100 dark:border-[#2a3548]'
           }`}>
             <p className={`text-[13px] leading-relaxed ${msg.blocked ? 'italic opacity-70' : ''}`}>
@@ -119,7 +119,7 @@ function MessageBubble({ msg, index, isLast, onCopy, onFeedback, copied, onFollo
               {hasEvidence && (
                 <button
                   onClick={() => setShowEvidence(v => !v)}
-                  className="text-[10px] text-teal-600 dark:text-teal-400 hover:underline"
+                  className="text-[10px] text-blue-600 dark:text-blue-400 hover:underline"
                 >
                   {showEvidence ? 'hide sources' : `${msg.evidence!.length} source${msg.evidence!.length > 1 ? 's' : ''}`}
                 </button>
@@ -173,7 +173,7 @@ function MessageBubble({ msg, index, isLast, onCopy, onFeedback, copied, onFollo
             <div className="bg-gray-50 dark:bg-[#111827] rounded-xl px-3 py-2 border border-gray-100 dark:border-[#2a3548] space-y-1">
               {msg.evidence!.map((e, i) => (
                 <p key={i} className="text-[11px] text-gray-500 dark:text-gray-400 leading-snug">
-                  <span className="font-semibold text-teal-600 dark:text-teal-400 mr-1">[{i + 1}]</span>
+                  <span className="font-semibold text-blue-600 dark:text-blue-400 mr-1">[{i + 1}]</span>
                   {e}
                 </p>
               ))}
@@ -195,10 +195,10 @@ function MessageBubble({ msg, index, isLast, onCopy, onFeedback, copied, onFollo
                   key={i}
                   onClick={() => onFollowUp(q)}
                   className="text-[11px] px-2.5 py-1 rounded-full border
-                             border-teal-200 dark:border-teal-800
-                             text-teal-600 dark:text-teal-400
-                             bg-teal-50 dark:bg-teal-900/20
-                             hover:bg-teal-100 dark:hover:bg-teal-900/40
+                             border-blue-200 dark:border-blue-800
+                             text-blue-600 dark:text-blue-400
+                             bg-blue-50 dark:bg-blue-900/20
+                             hover:bg-blue-100 dark:hover:bg-blue-900/40
                              transition-colors"
                 >
                   {q}
@@ -367,7 +367,7 @@ export default function ChatPanel({ patientId, patient, readings }: ChatPanelPro
       <div className="flex items-center gap-3 px-4 py-3 flex-shrink-0
                       bg-white dark:bg-[#111827]
                       border-b border-gray-100 dark:border-[#1F2937]">
-        <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-teal-400 to-teal-600
+        <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-400 to-blue-600
                         flex items-center justify-center shadow-sm flex-shrink-0">
           <Sparkles size={14} className="text-white" strokeWidth={2} />
         </div>
@@ -450,7 +450,7 @@ export default function ChatPanel({ patientId, patient, readings }: ChatPanelPro
           <div className="space-y-3 animate-fadeSlideUp">
             <div className="flex justify-start">
               <div className="flex gap-2">
-                <div className="w-6 h-6 rounded-full bg-gradient-to-br from-teal-400 to-teal-600
+                <div className="w-6 h-6 rounded-full bg-gradient-to-br from-blue-400 to-blue-600
                                 flex items-center justify-center flex-shrink-0 mt-0.5 shadow-sm">
                   <Bot size={11} className="text-white" strokeWidth={2.5} />
                 </div>
@@ -469,10 +469,10 @@ export default function ChatPanel({ patientId, patient, readings }: ChatPanelPro
                   <button
                     onClick={() => sendMessage(suggested.proactive!)}
                     className="w-full text-left text-[12px] px-3 py-2 rounded-xl
-                               bg-teal-50 dark:bg-teal-900/20
-                               border border-teal-200 dark:border-teal-800
-                               text-teal-700 dark:text-teal-300
-                               hover:bg-teal-100 dark:hover:bg-teal-900/40 transition-colors"
+                               bg-blue-50 dark:bg-blue-900/20
+                               border border-blue-200 dark:border-blue-800
+                               text-blue-700 dark:text-blue-300
+                               hover:bg-blue-100 dark:hover:bg-blue-900/40 transition-colors"
                   >
                     💡 {suggested.proactive}
                   </button>
@@ -486,8 +486,8 @@ export default function ChatPanel({ patientId, patient, readings }: ChatPanelPro
                                  bg-white dark:bg-[#1a2235]
                                  border border-gray-200 dark:border-[#2a3548]
                                  text-gray-600 dark:text-gray-300
-                                 hover:border-teal-400 hover:text-teal-600
-                                 dark:hover:border-teal-600 dark:hover:text-teal-400
+                                 hover:border-blue-400 hover:text-blue-600
+                                 dark:hover:border-blue-600 dark:hover:text-blue-400
                                  transition-colors"
                     >
                       {q}
@@ -517,7 +517,7 @@ export default function ChatPanel({ patientId, patient, readings }: ChatPanelPro
         {thinkingTools.length > 0 && (
           <div className="flex justify-start animate-fadeSlideUp">
             <div className="flex gap-2">
-              <div className="w-6 h-6 rounded-full bg-gradient-to-br from-teal-400 to-teal-600
+              <div className="w-6 h-6 rounded-full bg-gradient-to-br from-blue-400 to-blue-600
                               flex items-center justify-center flex-shrink-0 mt-0.5 shadow-sm">
                 <Bot size={11} className="text-white" strokeWidth={2.5} />
               </div>
@@ -536,7 +536,7 @@ export default function ChatPanel({ patientId, patient, readings }: ChatPanelPro
         {streamingText && (
           <div className="flex justify-start animate-fadeSlideUp">
             <div className="flex gap-2">
-              <div className="w-6 h-6 rounded-full bg-gradient-to-br from-teal-400 to-teal-600
+              <div className="w-6 h-6 rounded-full bg-gradient-to-br from-blue-400 to-blue-600
                               flex items-center justify-center flex-shrink-0 mt-0.5 shadow-sm">
                 <Bot size={11} className="text-white" strokeWidth={2.5} />
               </div>
@@ -544,7 +544,7 @@ export default function ChatPanel({ patientId, patient, readings }: ChatPanelPro
                               bg-white dark:bg-[#1a2235] text-gray-800 dark:text-gray-100
                               border border-gray-100 dark:border-[#2a3548]">
                 <p className="text-[13px] leading-relaxed">{streamingText}
-                  <span className="inline-block w-0.5 h-3.5 bg-teal-500 ml-0.5 animate-pulse align-middle" />
+                  <span className="inline-block w-0.5 h-3.5 bg-blue-500 ml-0.5 animate-pulse align-middle" />
                 </p>
               </div>
             </div>
@@ -555,7 +555,7 @@ export default function ChatPanel({ patientId, patient, readings }: ChatPanelPro
         {streaming && !streamingText && thinkingTools.length === 0 && (
           <div className="flex justify-start animate-fadeSlideUp">
             <div className="flex gap-2">
-              <div className="w-6 h-6 rounded-full bg-gradient-to-br from-teal-400 to-teal-600
+              <div className="w-6 h-6 rounded-full bg-gradient-to-br from-blue-400 to-blue-600
                               flex items-center justify-center flex-shrink-0 mt-0.5 shadow-sm">
                 <Bot size={11} className="text-white" strokeWidth={2.5} />
               </div>
@@ -576,7 +576,7 @@ export default function ChatPanel({ patientId, patient, readings }: ChatPanelPro
                       border-t border-gray-100 dark:border-[#1F2937]">
         <div className="flex items-center gap-2 bg-gray-50 dark:bg-[#1a2235]
                         rounded-xl px-3 py-2 border border-gray-200 dark:border-[#2a3548]
-                        focus-within:border-teal-400 dark:focus-within:border-teal-600
+                        focus-within:border-blue-400 dark:focus-within:border-blue-600
                         transition-colors shadow-sm">
           <input
             ref={inputRef}
@@ -594,8 +594,8 @@ export default function ChatPanel({ patientId, patient, readings }: ChatPanelPro
             onClick={() => sendMessage(input)}
             disabled={streaming || !input.trim()}
             className="w-7 h-7 flex items-center justify-center rounded-lg flex-shrink-0
-                       bg-gradient-to-br from-teal-500 to-teal-700 text-white shadow-sm
-                       hover:from-teal-400 hover:to-teal-600
+                       bg-gradient-to-br from-blue-500 to-blue-700 text-white shadow-sm
+                       hover:from-blue-400 hover:to-blue-600
                        disabled:opacity-30 disabled:cursor-not-allowed
                        transition-all duration-150 active:scale-95"
           >
