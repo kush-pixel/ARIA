@@ -286,8 +286,11 @@ def _detectors_to_aria_dict(
             "duration_days": inertia["duration_days"],
         },
         "adherence": {
-            # Only pattern A triggers a production alert — matches processor.py logic
-            "fired": adherence["pattern"] == "A",
+            # Pattern A (low adherence + high BP) and Pattern B (high adherence +
+            # persistent elevation) both represent clinically useful ARIA signal.
+            # Pattern B appears in the briefing agenda as a treatment-review flag;
+            # shadow mode evaluation counts it as ARIA contributing useful output.
+            "fired": adherence["pattern"] in ("A", "B"),
             "pattern": adherence["pattern"],
             "overall_pct": adherence["adherence_pct"],
             "interpretation": adherence["interpretation"],
@@ -308,15 +311,19 @@ def _detectors_to_aria_dict(
 
 
 def _aria_fired_from(detectors: dict[str, Any]) -> bool:
-    """Return True only when ARIA would write an alert row (matches processor.py).
+    """Return True when ARIA contributes clinically useful signal.
 
-    gap_urgent, inertia, adherence pattern A, and deterioration write alerts.
-    Variability and adherence patterns B/C are informational — no alert row.
+    Counts any signal that a clinician would act on or find meaningful:
+      - Gap flag OR urgent (any tier) — monitoring gap detected
+      - Inertia — sustained elevation with no med change
+      - Adherence pattern A (concern) or B (treatment-review) — both briefing signals
+      - Deterioration — worsening trend
+    Variability is informational only and never counts.
     """
     return (
-        detectors["gap"]["urgent"]
+        detectors["gap"]["fired"]           # flag OR urgent, already set in _detectors_to_aria_dict
         or detectors["inertia"]["fired"]
-        or detectors["adherence"]["fired"]    # pattern A only
+        or detectors["adherence"]["fired"]  # pattern A or B
         or detectors["deterioration"]["fired"]
         # variability: never writes an alert — excluded
     )

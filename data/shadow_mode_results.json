@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-04-28T07:42:20.318171+00:00",
+  "generated_at": "2026-04-30T20:59:49.774457+00:00",
   "patient_id": "1091",
   "total_eval_points": 62,
   "skipped": 1,
@@ -9,43 +9,54 @@
   "concerned_flag1_or_2": 12,
   "stable_flag3": 25,
   "no_ground_truth": 24,
-  "agreements": 25,
-  "false_negatives": 11,
-  "false_positives": 1,
-  "agreement_pct": 67.6,
-  "agreement_ci_95_lower_pct": 51.5,
-  "agreement_ci_95_upper_pct": 80.4,
+  "agreements": 29,
+  "false_negatives": 6,
+  "false_positives": 2,
+  "agreement_pct": 78.4,
+  "agreement_ci_95_lower_pct": 62.8,
+  "agreement_ci_95_upper_pct": 88.6,
   "fully_independent_eval_points": 16,
   "overlapping_eval_points": 21,
   "detector_breakdown": {
     "gap": {
       "false_positives": 0,
-      "false_negatives": 11,
-      "disagreements": 11
+      "false_negatives": 6,
+      "disagreements": 6
     },
     "inertia": {
-      "false_positives": 0,
-      "false_negatives": 11,
-      "disagreements": 11
+      "false_positives": 1,
+      "false_negatives": 6,
+      "disagreements": 7
     },
     "deterioration": {
-      "false_positives": 1,
-      "false_negatives": 11,
-      "disagreements": 12
+      "false_positives": 0,
+      "false_negatives": 6,
+      "disagreements": 6
     },
     "adherence": {
-      "false_positives": 0,
-      "false_negatives": 11,
-      "disagreements": 11
+      "false_positives": 2,
+      "false_negatives": 6,
+      "disagreements": 8
     },
     "variability": {
       "false_positives": 0,
-      "false_negatives": 11,
-      "disagreements": 11
+      "false_negatives": 6,
+      "disagreements": 6
     }
   },
   "passed": false,
-  "best_demo_window": null,
+  "best_demo_window": {
+    "visit_indices": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "date_from": "2008-01-21",
+    "date_to": "2008-02-01",
+    "summary": "ARIA would have alerted before 4 of 5 visits where the physician found elevated BP in 5 cases"
+  },
   "visits": [
     {
       "visit_index": 1,
@@ -267,7 +278,7 @@
         ]
       },
       "with_aria": {
-        "fired": false,
+        "fired": true,
         "detectors": {
           "gap": {
             "fired": false,
@@ -277,12 +288,12 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 173.4,
-            "elevated_count": 6,
+            "avg_systolic": 172.1,
+            "elevated_count": 5,
             "duration_days": 3.3
           },
           "adherence": {
-            "fired": false,
+            "fired": true,
             "pattern": "B",
             "overall_pct": 100.0,
             "interpretation": "treatment review warranted"
@@ -331,7 +342,7 @@
           "session": "evening"
         }
       ],
-      "result": "false_negative",
+      "result": "agree",
       "between_visit_alerts": []
     },
     {
@@ -440,7 +451,7 @@
             "duration_days": 8.3
           },
           "adherence": {
-            "fired": false,
+            "fired": true,
             "pattern": "B",
             "overall_pct": 97.4,
             "interpretation": "treatment review warranted"
@@ -644,7 +655,7 @@
         ]
       },
       "with_aria": {
-        "fired": false,
+        "fired": true,
         "detectors": {
           "gap": {
             "fired": false,
@@ -659,7 +670,7 @@
             "duration_days": 10.3
           },
           "adherence": {
-            "fired": false,
+            "fired": true,
             "pattern": "B",
             "overall_pct": 97.0,
             "interpretation": "treatment review warranted"
@@ -780,7 +791,7 @@
           "session": "evening"
         }
       ],
-      "result": "false_negative",
+      "result": "agree",
       "between_visit_alerts": []
     },
     {
@@ -874,7 +885,7 @@
         ]
       },
       "with_aria": {
-        "fired": false,
+        "fired": true,
         "detectors": {
           "gap": {
             "fired": true,
@@ -889,7 +900,7 @@
             "duration_days": 11.3
           },
           "adherence": {
-            "fired": false,
+            "fired": true,
             "pattern": "B",
             "overall_pct": 97.3,
             "interpretation": "treatment review warranted"
@@ -1010,7 +1021,7 @@
           "session": "evening"
         }
       ],
-      "result": "false_negative",
+      "result": "agree",
       "between_visit_alerts": []
     },
     {
@@ -1416,7 +1427,7 @@
         ]
       },
       "with_aria": {
-        "fired": false,
+        "fired": true,
         "detectors": {
           "gap": {
             "fired": true,
@@ -1426,9 +1437,9 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 153.8,
-            "elevated_count": 29,
-            "duration_days": 28.3
+            "avg_systolic": 153.0,
+            "elevated_count": 28,
+            "duration_days": 27.7
           },
           "adherence": {
             "fired": false,
@@ -1438,14 +1449,14 @@
           },
           "deterioration": {
             "fired": false,
-            "slope": -1.847,
+            "slope": -1.821,
             "recent_avg": 136.0,
             "baseline_avg": 134.1
           },
           "variability": {
             "fired": false,
             "level": "moderate",
-            "cv_pct": 12.8
+            "cv_pct": 12.6
           }
         },
         "visit_agenda": [],
@@ -1670,7 +1681,7 @@
           "session": "evening"
         }
       ],
-      "result": "false_negative",
+      "result": "agree",
       "between_visit_alerts": []
     },
     {
@@ -1774,31 +1785,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 149.8,
-            "elevated_count": 34,
-            "duration_days": 38.3
+            "avg_systolic": 137.4,
+            "elevated_count": 16,
+            "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 92.7,
-            "interpretation": "treatment appears effective \u2014 monitoring"
+            "overall_pct": 91.3,
+            "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -1.314,
+            "slope": -0.468,
             "recent_avg": 128.4,
             "baseline_avg": 141.3
           },
           "variability": {
             "fired": false,
-            "level": "moderate",
-            "cv_pct": 13.5
+            "level": "none",
+            "cv_pct": 9.2
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 92.7
+        "adherence_pct": 91.3
       },
       "synthetic_readings": [
         {
@@ -2086,31 +2097,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 144.9,
-            "elevated_count": 41,
-            "duration_days": 52.3
+            "avg_systolic": 134.3,
+            "elevated_count": 16,
+            "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 93.6,
-            "interpretation": "treatment appears effective \u2014 monitoring"
+            "overall_pct": 90.8,
+            "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.98,
+            "slope": -0.834,
             "recent_avg": 117.6,
             "baseline_avg": 122.2
           },
           "variability": {
             "fired": false,
-            "level": "moderate",
-            "cv_pct": 14.5
+            "level": "none",
+            "cv_pct": 11.6
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 93.6
+        "adherence_pct": 90.8
       },
       "synthetic_readings": [
         {
@@ -2422,31 +2433,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 140.5,
-            "elevated_count": 42,
-            "duration_days": 66.3
+            "avg_systolic": 127.6,
+            "elevated_count": 8,
+            "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 93.8,
-            "interpretation": "treatment appears effective \u2014 monitoring"
+            "overall_pct": 95.2,
+            "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.823,
+            "slope": -0.952,
             "recent_avg": 121.1,
             "baseline_avg": 122.6
           },
           "variability": {
             "fired": false,
-            "level": "high",
-            "cv_pct": 15.2
+            "level": "moderate",
+            "cv_pct": 12.0
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 93.8
+        "adherence_pct": 95.2
       },
       "synthetic_readings": [
         {
@@ -2764,31 +2775,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 139.2,
-            "elevated_count": 46,
-            "duration_days": 80.3
+            "avg_systolic": 126.1,
+            "elevated_count": 5,
+            "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 89.0,
-            "interpretation": "treatment appears effective \u2014 monitoring"
+            "overall_pct": 82.0,
+            "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.603,
+            "slope": 0.406,
             "recent_avg": 130.2,
             "baseline_avg": 129.7
           },
           "variability": {
             "fired": false,
-            "level": "moderate",
-            "cv_pct": 14.7
+            "level": "none",
+            "cv_pct": 8.2
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 89.0
+        "adherence_pct": 82.0
       },
       "synthetic_readings": [
         {
@@ -3071,31 +3082,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 133.4,
-            "elevated_count": 43,
+            "avg_systolic": 135.5,
+            "elevated_count": 18,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 90.5,
+            "overall_pct": 91.8,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.063,
+            "slope": -0.385,
             "recent_avg": 118.4,
             "baseline_avg": 133.6
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 10.4
+            "cv_pct": 8.8
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 90.5
+        "adherence_pct": 91.8
       },
       "synthetic_readings": [
         {
@@ -3316,7 +3327,18 @@
         }
       ],
       "result": "agree",
-      "between_visit_alerts": []
+      "between_visit_alerts": [
+        {
+          "alert_date": "2008-04-24",
+          "alert_type": "INE|ADH",
+          "days_before_visit": 7,
+          "reasons": [
+            "Sustained elevated BP (avg 138.4 mmHg) with no medication change \u2014 possible therapeutic inertia.",
+            "treatment review warranted"
+          ],
+          "message": "Sustained elevated BP (avg 138.4 mmHg) with no medication change \u2014 possible therapeutic inertia.; treatment review warranted"
+        }
+      ]
     },
     {
       "visit_index": 13,
@@ -3426,31 +3448,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 133.0,
-            "elevated_count": 41,
+            "avg_systolic": 129.9,
+            "elevated_count": 7,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 90.3,
+            "overall_pct": 92.3,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.099,
+            "slope": -0.155,
             "recent_avg": 128.2,
             "baseline_avg": 128.9
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 7.9
+            "cv_pct": 8.2
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 90.3
+        "adherence_pct": 92.3
       },
       "synthetic_readings": [
         {
@@ -3695,17 +3717,7 @@
         }
       ],
       "result": "agree",
-      "between_visit_alerts": [
-        {
-          "alert_date": "2008-05-15",
-          "alert_type": "DET",
-          "days_before_visit": 41,
-          "reasons": [
-            "Worsening BP trend (slope +0.02 mmHg/day)."
-          ],
-          "message": "Worsening BP trend (slope +0.02 mmHg/day)."
-        }
-      ]
+      "between_visit_alerts": []
     },
     {
       "visit_index": 14,
@@ -3815,31 +3827,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 127.7,
-            "elevated_count": 15,
+            "avg_systolic": 123.1,
+            "elevated_count": 0,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 94.4,
+            "overall_pct": 96.3,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.134,
+            "slope": -0.605,
             "recent_avg": 115.8,
             "baseline_avg": 121.2
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 7.5
+            "cv_pct": 6.5
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 94.4
+        "adherence_pct": 96.3
       },
       "synthetic_readings": [
         {
@@ -4194,31 +4206,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 119.1,
-            "elevated_count": 3,
+            "avg_systolic": 112.4,
+            "elevated_count": 0,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 95.3,
+            "overall_pct": 93.3,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.257,
+            "slope": -0.534,
             "recent_avg": 102.1,
             "baseline_avg": 107.4
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 9.2
+            "cv_pct": 10.1
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 95.3
+        "adherence_pct": 93.3
       },
       "synthetic_readings": [
         {
@@ -4645,31 +4657,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 116.8,
+            "avg_systolic": 112.8,
             "elevated_count": 0,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 94.6,
+            "overall_pct": 92.8,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.15,
+            "slope": 0.353,
             "recent_avg": 115.8,
             "baseline_avg": 118.9
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 8.5
+            "cv_pct": 10.7
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 94.6
+        "adherence_pct": 92.8
       },
       "synthetic_readings": [
         {
@@ -5036,31 +5048,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 117.2,
+            "avg_systolic": 123.7,
             "elevated_count": 1,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 91.2,
+            "overall_pct": 85.4,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": 0.085,
+            "slope": -0.532,
             "recent_avg": 112.3,
             "baseline_avg": 123.5
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 8.8
+            "cv_pct": 6.3
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 91.2
+        "adherence_pct": 85.4
       },
       "synthetic_readings": [
         {
@@ -5417,7 +5429,7 @@
         ]
       },
       "with_aria": {
-        "fired": false,
+        "fired": true,
         "detectors": {
           "gap": {
             "fired": false,
@@ -5427,33 +5439,33 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 141.2,
-            "elevated_count": 77,
-            "duration_days": 86.7
+            "avg_systolic": 152.6,
+            "elevated_count": 40,
+            "duration_days": 27.7
           },
           "adherence": {
-            "fired": false,
+            "fired": true,
             "pattern": "B",
-            "overall_pct": 92.7,
+            "overall_pct": 91.4,
             "interpretation": "treatment review warranted"
           },
           "deterioration": {
             "fired": false,
-            "slope": 0.365,
+            "slope": 0.261,
             "recent_avg": 153.2,
             "baseline_avg": 156.1
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 9.4
+            "cv_pct": 6.0
           }
         },
         "visit_agenda": [
           "Possible treatment-review case: high adherence with persistent elevation."
         ],
         "urgent_flags": [],
-        "adherence_pct": 92.7
+        "adherence_pct": 91.4
       },
       "synthetic_readings": [
         {
@@ -5721,16 +5733,17 @@
           "session": "evening"
         }
       ],
-      "result": "false_negative",
+      "result": "agree",
       "between_visit_alerts": [
         {
-          "alert_date": "2009-01-12",
-          "alert_type": "DET",
-          "days_before_visit": 45,
+          "alert_date": "2009-01-19",
+          "alert_type": "INE|ADH",
+          "days_before_visit": 38,
           "reasons": [
-            "Worsening BP trend (slope +0.20 mmHg/day)."
+            "Sustained elevated BP (avg 138.8 mmHg) with no medication change \u2014 possible therapeutic inertia.",
+            "treatment review warranted"
           ],
-          "message": "Worsening BP trend (slope +0.20 mmHg/day)."
+          "message": "Sustained elevated BP (avg 138.8 mmHg) with no medication change \u2014 possible therapeutic inertia.; treatment review warranted"
         }
       ]
     },
@@ -5842,33 +5855,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 146.8,
-            "elevated_count": 106,
-            "duration_days": 85.7
+            "avg_systolic": 144.7,
+            "elevated_count": 30,
+            "duration_days": 27.7
           },
           "adherence": {
             "fired": false,
-            "pattern": "B",
-            "overall_pct": 94.7,
-            "interpretation": "treatment review warranted"
+            "pattern": "none",
+            "overall_pct": 97.0,
+            "interpretation": "treatment appears effective \u2014 monitoring"
           },
           "deterioration": {
             "fired": false,
-            "slope": 0.043,
+            "slope": -0.997,
             "recent_avg": 130.2,
             "baseline_avg": 138.7
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 7.8
+            "cv_pct": 8.1
           }
         },
-        "visit_agenda": [
-          "Possible treatment-review case: high adherence with persistent elevation."
-        ],
+        "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 94.7
+        "adherence_pct": 97.0
       },
       "synthetic_readings": [
         {
@@ -6140,13 +6151,12 @@
       "between_visit_alerts": [
         {
           "alert_date": "2009-03-12",
-          "alert_type": "DET|ADH",
+          "alert_type": "ADH",
           "days_before_visit": 20,
           "reasons": [
-            "Worsening BP trend (slope +0.32 mmHg/day).",
             "treatment review warranted"
           ],
-          "message": "Worsening BP trend (slope +0.32 mmHg/day).; treatment review warranted"
+          "message": "treatment review warranted"
         }
       ]
     },
@@ -6264,31 +6274,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 143.5,
-            "elevated_count": 86,
-            "duration_days": 89.7
+            "avg_systolic": 127.4,
+            "elevated_count": 6,
+            "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 93.9,
-            "interpretation": "treatment appears effective \u2014 monitoring"
+            "overall_pct": 92.4,
+            "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.405,
+            "slope": -0.41,
             "recent_avg": 115.9,
             "baseline_avg": 128.3
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 10.3
+            "cv_pct": 8.7
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 93.9
+        "adherence_pct": 92.4
       },
       "synthetic_readings": [
         {
@@ -6500,13 +6510,12 @@
       "between_visit_alerts": [
         {
           "alert_date": "2009-04-15",
-          "alert_type": "GAP|ADH",
+          "alert_type": "GAP",
           "days_before_visit": 15,
           "reasons": [
-            "No readings for 6 consecutive days.",
-            "treatment review warranted"
+            "No readings for 6 consecutive days."
           ],
-          "message": "No readings for 6 consecutive days.; treatment review warranted"
+          "message": "No readings for 6 consecutive days."
         }
       ]
     },
@@ -6624,31 +6633,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 131.3,
-            "elevated_count": 45,
+            "avg_systolic": 112.7,
+            "elevated_count": 0,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 93.8,
+            "overall_pct": 91.4,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.558,
+            "slope": -0.0,
             "recent_avg": 107.6,
             "baseline_avg": 112.7
           },
           "variability": {
             "fired": false,
-            "level": "moderate",
-            "cv_pct": 13.4
+            "level": "none",
+            "cv_pct": 7.8
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 93.8
+        "adherence_pct": 91.4
       },
       "synthetic_readings": [
         {
@@ -7001,31 +7010,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 113.7,
-            "elevated_count": 1,
+            "avg_systolic": 111.8,
+            "elevated_count": 0,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 93.2,
+            "overall_pct": 93.5,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.055,
+            "slope": -0.479,
             "recent_avg": 103.5,
             "baseline_avg": 107.7
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 8.2
+            "cv_pct": 9.0
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 93.2
+        "adherence_pct": 93.5
       },
       "synthetic_readings": [
         {
@@ -7430,31 +7439,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 112.7,
-            "elevated_count": 1,
+            "avg_systolic": 107.3,
+            "elevated_count": 0,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 94.4,
+            "overall_pct": 96.5,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.147,
+            "slope": -0.389,
             "recent_avg": 99.3,
             "baseline_avg": 105.0
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 8.7
+            "cv_pct": 8.9
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 94.4
+        "adherence_pct": 96.5
       },
       "synthetic_readings": [
         {
@@ -7842,31 +7851,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 110.8,
-            "elevated_count": 1,
+            "avg_systolic": 103.7,
+            "elevated_count": 0,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 96.4,
+            "overall_pct": 99.4,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.188,
+            "slope": 0.04,
             "recent_avg": 98.8,
             "baseline_avg": 104.1
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 9.6
+            "cv_pct": 10.0
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 96.4
+        "adherence_pct": 99.4
       },
       "synthetic_readings": [
         {
@@ -8230,7 +8239,7 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 104.0,
+            "avg_systolic": 104.3,
             "elevated_count": 0,
             "duration_days": 0.0
           },
@@ -8242,14 +8251,14 @@
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.019,
+            "slope": -0.222,
             "recent_avg": 103.6,
             "baseline_avg": 101.1
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 8.6
+            "cv_pct": 7.0
           }
         },
         "visit_agenda": [],
@@ -8685,31 +8694,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 115.4,
+            "avg_systolic": 130.4,
             "elevated_count": 12,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 98.1,
+            "overall_pct": 97.9,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": 0.431,
+            "slope": 0.396,
             "recent_avg": 131.6,
             "baseline_avg": 136.1
           },
           "variability": {
             "fired": false,
-            "level": "moderate",
-            "cv_pct": 12.3
+            "level": "none",
+            "cv_pct": 7.7
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 98.1
+        "adherence_pct": 97.9
       },
       "synthetic_readings": [
         {
@@ -9120,31 +9129,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 135.8,
-            "elevated_count": 62,
+            "avg_systolic": 134.1,
+            "elevated_count": 17,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 90.1,
+            "overall_pct": 91.4,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.042,
+            "slope": -0.617,
             "recent_avg": 122.4,
             "baseline_avg": 131.0
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 6.8
+            "cv_pct": 7.1
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 90.1
+        "adherence_pct": 91.4
       },
       "synthetic_readings": [
         {
@@ -9439,13 +9448,14 @@
       "result": "agree",
       "between_visit_alerts": [
         {
-          "alert_date": "2010-02-03",
-          "alert_type": "DET",
-          "days_before_visit": 99,
+          "alert_date": "2010-04-28",
+          "alert_type": "INE|ADH",
+          "days_before_visit": 15,
           "reasons": [
-            "Worsening BP trend (slope +0.12 mmHg/day)."
+            "Sustained elevated BP (avg 139.9 mmHg) with no medication change \u2014 possible therapeutic inertia.",
+            "treatment review warranted"
           ],
-          "message": "Worsening BP trend (slope +0.12 mmHg/day)."
+          "message": "Sustained elevated BP (avg 139.9 mmHg) with no medication change \u2014 possible therapeutic inertia.; treatment review warranted"
         }
       ]
     },
@@ -9581,7 +9591,7 @@
         ]
       },
       "with_aria": {
-        "fired": false,
+        "fired": true,
         "detectors": {
           "gap": {
             "fired": false,
@@ -9590,32 +9600,35 @@
             "status": "none"
           },
           "inertia": {
-            "fired": false,
-            "avg_systolic": 137.6,
-            "elevated_count": 63,
-            "duration_days": 0.0
+            "fired": true,
+            "avg_systolic": 150.1,
+            "elevated_count": 36,
+            "duration_days": 26.7
           },
           "adherence": {
-            "fired": false,
-            "pattern": "none",
-            "overall_pct": 96.6,
-            "interpretation": "no adherence concern identified"
+            "fired": true,
+            "pattern": "B",
+            "overall_pct": 99.0,
+            "interpretation": "treatment review warranted"
           },
           "deterioration": {
             "fired": false,
-            "slope": 0.239,
+            "slope": 0.649,
             "recent_avg": 147.5,
             "baseline_avg": 158.1
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 9.1
+            "cv_pct": 7.2
           }
         },
-        "visit_agenda": [],
+        "visit_agenda": [
+          "Review treatment plan: BP elevated (avg 150.1 mmHg) throughout monitoring period with no recent medication change.",
+          "Possible treatment-review case: high adherence with persistent elevation."
+        ],
         "urgent_flags": [],
-        "adherence_pct": 96.6
+        "adherence_pct": 99.0
       },
       "synthetic_readings": [
         {
@@ -9863,12 +9876,14 @@
       "between_visit_alerts": [
         {
           "alert_date": "2010-07-01",
-          "alert_type": "DET",
+          "alert_type": "INE|DET|ADH",
           "days_before_visit": 14,
           "reasons": [
-            "Worsening BP trend (slope +0.04 mmHg/day)."
+            "Sustained elevated BP (avg 139.1 mmHg) with no medication change \u2014 possible therapeutic inertia.",
+            "Worsening BP trend (slope +1.04 mmHg/day).",
+            "treatment review warranted"
           ],
-          "message": "Worsening BP trend (slope +0.04 mmHg/day)."
+          "message": "Sustained elevated BP (avg 139.1 mmHg) with no medication change \u2014 possible therapeutic inertia.; Worsening BP trend (slope +1.04 mmHg/day).; treatment review warranted"
         }
       ]
     },
@@ -10022,7 +10037,7 @@
         ]
       },
       "with_aria": {
-        "fired": false,
+        "fired": true,
         "detectors": {
           "gap": {
             "fired": false,
@@ -10032,31 +10047,33 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 135.6,
-            "elevated_count": 51,
-            "duration_days": 0.0
+            "avg_systolic": 143.7,
+            "elevated_count": 29,
+            "duration_days": 27.7
           },
           "adherence": {
-            "fired": false,
-            "pattern": "none",
-            "overall_pct": 97.3,
-            "interpretation": "no adherence concern identified"
+            "fired": true,
+            "pattern": "B",
+            "overall_pct": 98.1,
+            "interpretation": "treatment review warranted"
           },
           "deterioration": {
             "fired": false,
-            "slope": 0.218,
+            "slope": -1.706,
             "recent_avg": 116.0,
             "baseline_avg": 116.0
           },
           "variability": {
             "fired": false,
-            "level": "none",
-            "cv_pct": 10.3
+            "level": "moderate",
+            "cv_pct": 12.4
           }
         },
-        "visit_agenda": [],
+        "visit_agenda": [
+          "Possible treatment-review case: high adherence with persistent elevation."
+        ],
         "urgent_flags": [],
-        "adherence_pct": 97.3
+        "adherence_pct": 98.1
       },
       "synthetic_readings": [
         {
@@ -10451,31 +10468,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 132.2,
-            "elevated_count": 47,
+            "avg_systolic": 117.7,
+            "elevated_count": 0,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 98.8,
+            "overall_pct": 99.6,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.293,
+            "slope": -0.058,
             "recent_avg": 115.2,
             "baseline_avg": 118.3
           },
           "variability": {
             "fired": false,
-            "level": "moderate",
-            "cv_pct": 12.6
+            "level": "none",
+            "cv_pct": 7.3
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 98.8
+        "adherence_pct": 99.6
       },
       "synthetic_readings": [
         {
@@ -10874,31 +10891,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 132.3,
-            "elevated_count": 47,
+            "avg_systolic": 127.0,
+            "elevated_count": 9,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 97.3,
+            "overall_pct": 94.0,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.305,
+            "slope": 0.743,
             "recent_avg": 130.2,
             "baseline_avg": 137.8
           },
           "variability": {
             "fired": false,
-            "level": "moderate",
-            "cv_pct": 13.3
+            "level": "none",
+            "cv_pct": 10.2
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 97.3
+        "adherence_pct": 94.0
       },
       "synthetic_readings": [
         {
@@ -11309,31 +11326,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 130.0,
-            "elevated_count": 38,
+            "avg_systolic": 133.9,
+            "elevated_count": 16,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 96.6,
+            "overall_pct": 92.8,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.106,
+            "slope": -0.587,
             "recent_avg": 117.9,
             "baseline_avg": 134.8
           },
           "variability": {
             "fired": false,
-            "level": "moderate",
-            "cv_pct": 12.7
+            "level": "none",
+            "cv_pct": 9.3
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 96.6
+        "adherence_pct": 92.8
       },
       "synthetic_readings": [
         {
@@ -11746,31 +11763,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 126.9,
-            "elevated_count": 25,
+            "avg_systolic": 134.3,
+            "elevated_count": 15,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 96.7,
+            "overall_pct": 96.6,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": 0.193,
+            "slope": -0.324,
             "recent_avg": 133.4,
             "baseline_avg": 137.5
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 10.5
+            "cv_pct": 8.2
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 96.7
+        "adherence_pct": 96.6
       },
       "synthetic_readings": [
         {
@@ -12183,31 +12200,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 126.2,
-            "elevated_count": 26,
+            "avg_systolic": 130.0,
+            "elevated_count": 13,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 95.8,
+            "overall_pct": 93.6,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": 0.207,
+            "slope": -0.466,
             "recent_avg": 110.8,
             "baseline_avg": 132.4
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 10.5
+            "cv_pct": 10.0
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 95.8
+        "adherence_pct": 93.6
       },
       "synthetic_readings": [
         {
@@ -12633,33 +12650,33 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 130.8,
-            "elevated_count": 42,
+            "avg_systolic": 131.6,
+            "elevated_count": 16,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 94.4,
+            "overall_pct": 92.9,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": true,
-            "slope": 0.15,
+            "slope": 1.339,
             "recent_avg": 135.7,
             "baseline_avg": 149.6
           },
           "variability": {
             "fired": false,
-            "level": "none",
-            "cv_pct": 10.7
+            "level": "moderate",
+            "cv_pct": 12.5
           }
         },
         "visit_agenda": [
           "Deterioration trend: sustained worsening over monitoring period."
         ],
         "urgent_flags": [],
-        "adherence_pct": 94.4
+        "adherence_pct": 92.9
       },
       "synthetic_readings": [
         {
@@ -12922,9 +12939,9 @@
           "alert_type": "DET",
           "days_before_visit": 3,
           "reasons": [
-            "Worsening BP trend (slope +0.15 mmHg/day)."
+            "Worsening BP trend (slope +1.10 mmHg/day)."
           ],
-          "message": "Worsening BP trend (slope +0.15 mmHg/day)."
+          "message": "Worsening BP trend (slope +1.10 mmHg/day)."
         }
       ]
     },
@@ -13094,35 +13111,35 @@
             "status": "none"
           },
           "inertia": {
-            "fired": false,
-            "avg_systolic": 138.4,
-            "elevated_count": 78,
-            "duration_days": 86.7
+            "fired": true,
+            "avg_systolic": 149.9,
+            "elevated_count": 43,
+            "duration_days": 27.7
           },
           "adherence": {
-            "fired": false,
-            "pattern": "B",
-            "overall_pct": 88.4,
-            "interpretation": "treatment review warranted"
+            "fired": true,
+            "pattern": "A",
+            "overall_pct": 75.2,
+            "interpretation": "possible adherence concern"
           },
           "deterioration": {
-            "fired": true,
-            "slope": 0.264,
+            "fired": false,
+            "slope": -0.537,
             "recent_avg": 148.6,
             "baseline_avg": 140.0
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 10.8
+            "cv_pct": 5.9
           }
         },
         "visit_agenda": [
-          "Possible treatment-review case: high adherence with persistent elevation.",
-          "Deterioration trend: sustained worsening over monitoring period."
+          "Review treatment plan: BP elevated (avg 149.9 mmHg) throughout monitoring period with no recent medication change.",
+          "Possible adherence concern: low adherence with elevated BP."
         ],
         "urgent_flags": [],
-        "adherence_pct": 88.4
+        "adherence_pct": 75.2
       },
       "synthetic_readings": [
         {
@@ -13403,7 +13420,17 @@
         }
       ],
       "result": "false_positive",
-      "between_visit_alerts": []
+      "between_visit_alerts": [
+        {
+          "alert_date": "2010-11-25",
+          "alert_type": "ADH",
+          "days_before_visit": 14,
+          "reasons": [
+            "treatment review warranted"
+          ],
+          "message": "treatment review warranted"
+        }
+      ]
     },
     {
       "visit_index": 37,
@@ -13562,7 +13589,7 @@
         ]
       },
       "with_aria": {
-        "fired": false,
+        "fired": true,
         "detectors": {
           "gap": {
             "fired": false,
@@ -13571,34 +13598,35 @@
             "status": "none"
           },
           "inertia": {
-            "fired": false,
-            "avg_systolic": 143.2,
-            "elevated_count": 101,
-            "duration_days": 87.2
+            "fired": true,
+            "avg_systolic": 149.5,
+            "elevated_count": 37,
+            "duration_days": 27.7
           },
           "adherence": {
-            "fired": false,
+            "fired": true,
             "pattern": "B",
-            "overall_pct": 89.2,
+            "overall_pct": 99.3,
             "interpretation": "treatment review warranted"
           },
           "deterioration": {
             "fired": false,
-            "slope": 0.291,
+            "slope": -0.194,
             "recent_avg": 140.4,
             "baseline_avg": 151.2
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 10.2
+            "cv_pct": 5.9
           }
         },
         "visit_agenda": [
+          "Review treatment plan: BP elevated (avg 149.5 mmHg) throughout monitoring period with no recent medication change.",
           "Possible treatment-review case: high adherence with persistent elevation."
         ],
         "urgent_flags": [],
-        "adherence_pct": 89.2
+        "adherence_pct": 99.3
       },
       "synthetic_readings": [
         {
@@ -13846,13 +13874,13 @@
       "between_visit_alerts": [
         {
           "alert_date": "2010-12-23",
-          "alert_type": "DET|ADH",
+          "alert_type": "INE|ADH",
           "days_before_visit": 14,
           "reasons": [
-            "Worsening BP trend (slope +0.34 mmHg/day).",
+            "Sustained elevated BP (avg 148.0 mmHg) with no medication change \u2014 possible therapeutic inertia.",
             "treatment review warranted"
           ],
-          "message": "Worsening BP trend (slope +0.34 mmHg/day).; treatment review warranted"
+          "message": "Sustained elevated BP (avg 148.0 mmHg) with no medication change \u2014 possible therapeutic inertia.; treatment review warranted"
         }
       ]
     },
@@ -14013,7 +14041,7 @@
         ]
       },
       "with_aria": {
-        "fired": false,
+        "fired": true,
         "detectors": {
           "gap": {
             "fired": false,
@@ -14023,33 +14051,33 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 144.0,
-            "elevated_count": 103,
-            "duration_days": 79.7
+            "avg_systolic": 149.1,
+            "elevated_count": 36,
+            "duration_days": 27.7
           },
           "adherence": {
-            "fired": false,
+            "fired": true,
             "pattern": "B",
-            "overall_pct": 87.8,
+            "overall_pct": 93.0,
             "interpretation": "treatment review warranted"
           },
           "deterioration": {
             "fired": false,
-            "slope": 0.284,
+            "slope": -0.063,
             "recent_avg": 144.4,
             "baseline_avg": 146.9
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 10.0
+            "cv_pct": 6.0
           }
         },
         "visit_agenda": [
           "Possible treatment-review case: high adherence with persistent elevation."
         ],
         "urgent_flags": [],
-        "adherence_pct": 87.8
+        "adherence_pct": 93.0
       },
       "synthetic_readings": [
         {
@@ -14451,33 +14479,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 144.7,
-            "elevated_count": 106,
-            "duration_days": 88.1
+            "avg_systolic": 134.8,
+            "elevated_count": 21,
+            "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
-            "pattern": "B",
-            "overall_pct": 87.4,
-            "interpretation": "treatment review warranted"
+            "pattern": "none",
+            "overall_pct": 91.4,
+            "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.268,
+            "slope": -1.181,
             "recent_avg": 119.0,
             "baseline_avg": 123.7
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 8.5
+            "cv_pct": 9.0
           }
         },
-        "visit_agenda": [
-          "Possible treatment-review case: high adherence with persistent elevation."
-        ],
+        "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 87.4
+        "adherence_pct": 91.4
       },
       "synthetic_readings": [
         {
@@ -14937,31 +14963,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 144.1,
-            "elevated_count": 105,
-            "duration_days": 89.7
+            "avg_systolic": 132.9,
+            "elevated_count": 18,
+            "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 87.6,
-            "interpretation": "treatment appears effective \u2014 monitoring"
+            "overall_pct": 92.8,
+            "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.312,
+            "slope": -1.22,
             "recent_avg": 119.3,
             "baseline_avg": 122.3
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 9.0
+            "cv_pct": 9.5
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 87.6
+        "adherence_pct": 92.8
       },
       "synthetic_readings": [
         {
@@ -15423,31 +15449,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 134.7,
-            "elevated_count": 60,
+            "avg_systolic": 119.8,
+            "elevated_count": 0,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 94.7,
+            "overall_pct": 97.7,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.484,
+            "slope": -0.19,
             "recent_avg": 110.0,
             "baseline_avg": 120.3
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 11.8
+            "cv_pct": 8.5
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 94.7
+        "adherence_pct": 97.7
       },
       "synthetic_readings": [
         {
@@ -15849,31 +15875,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 127.1,
-            "elevated_count": 25,
+            "avg_systolic": 129.2,
+            "elevated_count": 10,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 95.0,
+            "overall_pct": 94.0,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.085,
+            "slope": -0.627,
             "recent_avg": 121.9,
             "baseline_avg": 125.0
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 9.0
+            "cv_pct": 7.8
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 95.0
+        "adherence_pct": 94.0
       },
       "synthetic_readings": [
         {
@@ -16311,31 +16337,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 126.3,
-            "elevated_count": 20,
+            "avg_systolic": 127.4,
+            "elevated_count": 6,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 94.9,
+            "overall_pct": 93.1,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.038,
+            "slope": -0.541,
             "recent_avg": 125.7,
             "baseline_avg": 123.8
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 8.7
+            "cv_pct": 7.3
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 94.9
+        "adherence_pct": 93.1
       },
       "synthetic_readings": [
         {
@@ -16755,31 +16781,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 125.4,
-            "elevated_count": 14,
+            "avg_systolic": 126.4,
+            "elevated_count": 4,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 94.6,
+            "overall_pct": 92.1,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": 0.02,
+            "slope": -0.321,
             "recent_avg": 125.8,
             "baseline_avg": 123.8
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 8.2
+            "cv_pct": 7.1
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 94.6
+        "adherence_pct": 92.1
       },
       "synthetic_readings": [
         {
@@ -17199,31 +17225,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 124.8,
-            "elevated_count": 11,
+            "avg_systolic": 126.4,
+            "elevated_count": 4,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 95.0,
+            "overall_pct": 92.6,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": 0.083,
+            "slope": -0.132,
             "recent_avg": 126.2,
             "baseline_avg": 127.1
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 8.0
+            "cv_pct": 6.9
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 95.0
+        "adherence_pct": 92.6
       },
       "synthetic_readings": [
         {
@@ -17655,31 +17681,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 125.8,
-            "elevated_count": 12,
+            "avg_systolic": 127.7,
+            "elevated_count": 2,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 96.2,
+            "overall_pct": 97.3,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": 0.09,
+            "slope": -0.017,
             "recent_avg": 124.0,
             "baseline_avg": 127.8
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 7.8
+            "cv_pct": 5.6
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 96.2
+        "adherence_pct": 97.3
       },
       "synthetic_readings": [
         {
@@ -18052,31 +18078,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 128.8,
-            "elevated_count": 15,
+            "avg_systolic": 129.8,
+            "elevated_count": 5,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 96.9,
+            "overall_pct": 97.8,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": 0.016,
+            "slope": -0.322,
             "recent_avg": 123.9,
             "baseline_avg": 130.6
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 6.4
+            "cv_pct": 6.0
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 96.9
+        "adherence_pct": 97.8
       },
       "synthetic_readings": [
         {
@@ -18509,8 +18535,8 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 128.2,
-            "elevated_count": 13,
+            "avg_systolic": 127.8,
+            "elevated_count": 3,
             "duration_days": 0.0
           },
           "adherence": {
@@ -18521,14 +18547,14 @@
           },
           "deterioration": {
             "fired": false,
-            "slope": 0.012,
+            "slope": -0.414,
             "recent_avg": 118.7,
             "baseline_avg": 125.3
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 6.5
+            "cv_pct": 6.1
           }
         },
         "visit_agenda": [],
@@ -18954,31 +18980,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 127.1,
-            "elevated_count": 10,
+            "avg_systolic": 124.2,
+            "elevated_count": 2,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 96.7,
+            "overall_pct": 96.0,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.007,
+            "slope": -0.548,
             "recent_avg": 117.8,
             "baseline_avg": 120.6
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 6.6
+            "cv_pct": 6.8
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 96.7
+        "adherence_pct": 96.0
       },
       "synthetic_readings": [
         {
@@ -19387,31 +19413,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 124.6,
-            "elevated_count": 9,
+            "avg_systolic": 119.9,
+            "elevated_count": 2,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 98.0,
+            "overall_pct": 98.7,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.2,
+            "slope": -0.741,
             "recent_avg": 103.3,
             "baseline_avg": 116.1
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 7.9
+            "cv_pct": 8.7
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 98.0
+        "adherence_pct": 98.7
       },
       "synthetic_readings": [
         {
@@ -19868,31 +19894,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 125.1,
-            "elevated_count": 20,
+            "avg_systolic": 133.6,
+            "elevated_count": 16,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 96.3,
+            "overall_pct": 94.2,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": 0.178,
+            "slope": 0.182,
             "recent_avg": 136.4,
             "baseline_avg": 135.5
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 8.8
+            "cv_pct": 6.5
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 96.3
+        "adherence_pct": 94.2
       },
       "synthetic_readings": [
         {
@@ -20351,7 +20377,7 @@
         ]
       },
       "with_aria": {
-        "fired": true,
+        "fired": false,
         "detectors": {
           "gap": {
             "fired": false,
@@ -20361,33 +20387,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 126.4,
-            "elevated_count": 24,
+            "avg_systolic": 134.2,
+            "elevated_count": 17,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 96.8,
+            "overall_pct": 95.4,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
-            "fired": true,
-            "slope": 0.184,
+            "fired": false,
+            "slope": 0.219,
             "recent_avg": 146.9,
             "baseline_avg": 132.7
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 8.9
+            "cv_pct": 6.9
           }
         },
-        "visit_agenda": [
-          "Deterioration trend: sustained worsening over monitoring period."
-        ],
+        "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 96.8
+        "adherence_pct": 95.4
       },
       "synthetic_readings": [
         {
@@ -20844,31 +20868,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 127.8,
-            "elevated_count": 30,
+            "avg_systolic": 134.2,
+            "elevated_count": 15,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 95.1,
+            "overall_pct": 91.6,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": 0.204,
+            "slope": -0.256,
             "recent_avg": 119.7,
             "baseline_avg": 134.0
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 9.3
+            "cv_pct": 7.4
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 95.1
+        "adherence_pct": 91.6
       },
       "synthetic_readings": [
         {
@@ -21289,31 +21313,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 132.3,
-            "elevated_count": 39,
+            "avg_systolic": 133.0,
+            "elevated_count": 11,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 91.8,
+            "overall_pct": 88.4,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": 0.047,
+            "slope": 0.341,
             "recent_avg": 137.6,
             "baseline_avg": 135.8
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 7.2
+            "cv_pct": 6.3
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 91.8
+        "adherence_pct": 88.4
       },
       "synthetic_readings": [
         {
@@ -21720,31 +21744,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 132.5,
-            "elevated_count": 39,
+            "avg_systolic": 132.3,
+            "elevated_count": 11,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 92.4,
+            "overall_pct": 92.8,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.043,
+            "slope": -0.493,
             "recent_avg": 123.4,
             "baseline_avg": 128.0
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 7.0
+            "cv_pct": 6.7
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 92.4
+        "adherence_pct": 92.8
       },
       "synthetic_readings": [
         {
@@ -22130,31 +22154,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 133.1,
-            "elevated_count": 38,
+            "avg_systolic": 132.0,
+            "elevated_count": 9,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 93.5,
+            "overall_pct": 99.8,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.021,
+            "slope": 0.46,
             "recent_avg": 134.9,
             "baseline_avg": 136.3
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 6.9
+            "cv_pct": 6.6
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 93.5
+        "adherence_pct": 99.8
       },
       "synthetic_readings": [
         {
@@ -22540,31 +22564,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 133.6,
-            "elevated_count": 41,
+            "avg_systolic": 136.2,
+            "elevated_count": 17,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 93.9,
+            "overall_pct": 98.8,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": 0.016,
+            "slope": -0.211,
             "recent_avg": 126.8,
             "baseline_avg": 138.4
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 7.1
+            "cv_pct": 6.3
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 93.9
+        "adherence_pct": 98.8
       },
       "synthetic_readings": [
         {
@@ -22998,31 +23022,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 129.6,
-            "elevated_count": 31,
+            "avg_systolic": 126.4,
+            "elevated_count": 11,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 95.1,
+            "overall_pct": 98.3,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.078,
+            "slope": -1.562,
             "recent_avg": 107.9,
             "baseline_avg": 114.7
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 8.7
+            "cv_pct": 11.4
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 95.1
+        "adherence_pct": 98.3
       },
       "synthetic_readings": [
         {
@@ -23480,31 +23504,31 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 126.1,
-            "elevated_count": 24,
+            "avg_systolic": 135.8,
+            "elevated_count": 18,
             "duration_days": 0.0
           },
           "adherence": {
             "fired": false,
             "pattern": "none",
-            "overall_pct": 97.6,
+            "overall_pct": 97.2,
             "interpretation": "no adherence concern identified"
           },
           "deterioration": {
             "fired": false,
-            "slope": 0.294,
+            "slope": 0.2,
             "recent_avg": 136.0,
             "baseline_avg": 138.4
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 8.9
+            "cv_pct": 5.6
           }
         },
         "visit_agenda": [],
         "urgent_flags": [],
-        "adherence_pct": 97.6
+        "adherence_pct": 97.2
       },
       "synthetic_readings": [
         {
@@ -23773,17 +23797,7 @@
         }
       ],
       "result": "agree",
-      "between_visit_alerts": [
-        {
-          "alert_date": "2012-04-12",
-          "alert_type": "DET",
-          "days_before_visit": 13,
-          "reasons": [
-            "Worsening BP trend (slope +0.29 mmHg/day)."
-          ],
-          "message": "Worsening BP trend (slope +0.29 mmHg/day)."
-        }
-      ]
+      "between_visit_alerts": []
     },
     {
       "visit_index": 60,
@@ -23962,7 +23976,7 @@
         ]
       },
       "with_aria": {
-        "fired": false,
+        "fired": true,
         "detectors": {
           "gap": {
             "fired": false,
@@ -23973,32 +23987,32 @@
           "inertia": {
             "fired": false,
             "avg_systolic": 141.2,
-            "elevated_count": 103,
-            "duration_days": 89.7
+            "elevated_count": 31,
+            "duration_days": 27.7
           },
           "adherence": {
-            "fired": false,
+            "fired": true,
             "pattern": "B",
-            "overall_pct": 99.9,
+            "overall_pct": 100.0,
             "interpretation": "treatment review warranted"
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.009,
+            "slope": -0.225,
             "recent_avg": 129.0,
             "baseline_avg": 142.6
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 6.8
+            "cv_pct": 7.4
           }
         },
         "visit_agenda": [
           "Possible treatment-review case: high adherence with persistent elevation."
         ],
         "urgent_flags": [],
-        "adherence_pct": 99.9
+        "adherence_pct": 100.0
       },
       "synthetic_readings": [
         {
@@ -24290,16 +24304,16 @@
           "session": "evening"
         }
       ],
-      "result": "agree",
+      "result": "false_positive",
       "between_visit_alerts": [
         {
-          "alert_date": "2012-05-16",
+          "alert_date": "2012-06-20",
           "alert_type": "DET",
-          "days_before_visit": 176,
+          "days_before_visit": 141,
           "reasons": [
-            "Worsening BP trend (slope +0.23 mmHg/day)."
+            "Worsening BP trend (slope +0.38 mmHg/day)."
           ],
-          "message": "Worsening BP trend (slope +0.23 mmHg/day)."
+          "message": "Worsening BP trend (slope +0.38 mmHg/day)."
         }
       ]
     },
@@ -24490,8 +24504,8 @@
           },
           "inertia": {
             "fired": false,
-            "avg_systolic": 128.2,
-            "elevated_count": 21,
+            "avg_systolic": 125.2,
+            "elevated_count": 6,
             "duration_days": 0.0
           },
           "adherence": {
@@ -24502,14 +24516,14 @@
           },
           "deterioration": {
             "fired": false,
-            "slope": -0.089,
+            "slope": -0.381,
             "recent_avg": 117.7,
             "baseline_avg": 122.9
           },
           "variability": {
             "fired": false,
             "level": "none",
-            "cv_pct": 7.0
+            "cv_pct": 8.7
           }
         },
         "visit_agenda": [],
@@ -24822,13 +24836,12 @@
       "between_visit_alerts": [
         {
           "alert_date": "2012-11-22",
-          "alert_type": "DET|ADH",
+          "alert_type": "ADH",
           "days_before_visit": 308,
           "reasons": [
-            "Worsening BP trend (slope +0.01 mmHg/day).",
             "treatment review warranted"
           ],
-          "message": "Worsening BP trend (slope +0.01 mmHg/day).; treatment review warranted"
+          "message": "treatment review warranted"
         }
       ]
     }

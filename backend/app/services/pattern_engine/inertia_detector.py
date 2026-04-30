@@ -147,21 +147,29 @@ async def run_inertia_detector(
         (row.effective_datetime, float(row.systolic_avg)) for row in rows
     ]
 
-    # Fix 27: exclude white-coat pre-visit dip window (5 days before next_appointment)
+    # Fix 27: exclude white-coat pre-visit dip window (5 days before next_appointment).
+    # Guard: only apply when the appointment is still in the future relative to now.
+    # A stale past appointment date must not silently wipe out the entire reading window.
     if next_appointment is not None:
         appt_aware = (
             next_appointment.replace(tzinfo=UTC)
             if next_appointment.tzinfo is None
             else next_appointment
         )
-        wc_cutoff = appt_aware - timedelta(days=_WHITE_COAT_EXCLUSION_DAYS)
-        excluded = sum(1 for dt, _ in readings if dt >= wc_cutoff)
-        if excluded:
+        if appt_aware > now:
+            wc_cutoff = appt_aware - timedelta(days=_WHITE_COAT_EXCLUSION_DAYS)
+            excluded = sum(1 for dt, _ in readings if dt >= wc_cutoff)
+            if excluded:
+                logger.debug(
+                    "patient=%s white_coat_exclusion: dropped %d reading(s) within %d days of appointment",
+                    patient_id, excluded, _WHITE_COAT_EXCLUSION_DAYS,
+                )
+            readings = [(dt, s) for dt, s in readings if dt < wc_cutoff]
+        else:
             logger.debug(
-                "patient=%s white_coat_exclusion: dropped %d reading(s) within %d days of appointment",
-                patient_id, excluded, _WHITE_COAT_EXCLUSION_DAYS,
+                "patient=%s white_coat_exclusion skipped: next_appointment %s is in the past",
+                patient_id, appt_aware.date(),
             )
-        readings = [(dt, s) for dt, s in readings if dt < wc_cutoff]
 
     if not readings:
         return _false_result(avg_systolic=None, elevated_count=0)
@@ -172,6 +180,18 @@ async def run_inertia_detector(
     elevated = [(dt, s) for dt, s in readings if s >= patient_threshold]
     elevated_count = len(elevated)
 
+    # Relax minimum count when fewer readings exist than the window spans days.
+    # Sparse windows occur at cold-start or after device outages; requiring 5
+    # readings when only 3-4 exist structurally prevents detection in those periods.
+    min_elevated_count = _MIN_ELEVATED_COUNT
+    if len(readings) < window_days:
+        min_elevated_count = 3
+        logger.debug(
+            "patient=%s window_truncated_to_available: %d readings for %d-day window "
+            "— relaxing min_elevated_count to %d",
+            patient_id, len(readings), window_days, min_elevated_count,
+        )
+
     # Condition 1: average systolic >= patient_threshold
     if avg_systolic < patient_threshold:
         logger.debug(
@@ -180,22 +200,28 @@ async def run_inertia_detector(
         )
         return _false_result(avg_systolic, elevated_count)
 
-    # Condition 2: at least 5 elevated readings
-    if elevated_count < _MIN_ELEVATED_COUNT:
+    # Condition 2: at least min_elevated_count elevated readings
+    if elevated_count < min_elevated_count:
         logger.debug(
             "patient=%s inertia=False (elevated_count=%d < %d)",
-            patient_id, elevated_count, _MIN_ELEVATED_COUNT,
+            patient_id, elevated_count, min_elevated_count,
         )
         return _false_result(avg_systolic, elevated_count)
 
-    # Condition 3: elevated condition persists > 7 days
+    # Condition 3: elevated condition persists > min_duration_days.
+    # Relax from 7 to 3 days when the window is truncated (sparse early data)
+    # — mirrors the same logic applied to min_elevated_count above.
+    min_duration_days = _MIN_DURATION_DAYS
+    if len(readings) < window_days:
+        min_duration_days = 3
+
     first_elevated_dt = elevated[0][0]
     duration_days = round((now - first_elevated_dt).total_seconds() / 86400.0, 1)
 
-    if duration_days <= _MIN_DURATION_DAYS:
+    if duration_days <= min_duration_days:
         logger.debug(
             "patient=%s inertia=False (duration_days=%.1f <= %d)",
-            patient_id, duration_days, _MIN_DURATION_DAYS,
+            patient_id, duration_days, min_duration_days,
         )
         return _false_result(avg_systolic, elevated_count, duration_days)
 
