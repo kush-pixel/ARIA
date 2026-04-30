@@ -36,7 +36,7 @@ from app.utils.logging_utils import get_logger
 logger = get_logger(__name__)
 
 _MODEL = "claude-sonnet-4-20250514"
-_MAX_TOOL_ROUNDS = 3
+_MAX_TOOL_ROUNDS = 5
 _PROMPT_PATH = Path(__file__).resolve().parents[4] / "prompts" / "chat_system_prompt.md"
 
 # Keywords that indicate a patient-clinical question — at least one must be present
@@ -223,7 +223,7 @@ async def run_agent(
     for round_num in range(_MAX_TOOL_ROUNDS):
         response = client.messages.create(
             model=_MODEL,
-            max_tokens=1024,
+            max_tokens=2048,
             system=system_blocks,
             tools=TOOL_SCHEMAS,
             messages=messages,
@@ -275,17 +275,33 @@ async def run_agent(
 
     # ── Stream final answer ────────────────────────────────────────────────────
     if not final_text:
-        # Need one more LLM call to synthesise after tools (no more tool calls allowed)
+        # Force synthesis: tell the model to produce its final JSON answer now
+        synthesis_messages = messages + [{
+            "role": "user",
+            "content": (
+                "Based on all the tool results above, produce your final JSON answer now. "
+                "Synthesize everything returned — even if some tools had no data, summarize "
+                "what you do have and list gaps in data_gaps. Always return valid JSON."
+            ),
+        }]
         final_response = client.messages.create(
             model=_MODEL,
-            max_tokens=1024,
+            max_tokens=2048,
             system=system_blocks,
-            messages=messages,
+            messages=synthesis_messages,
         )
         for block in final_response.content:
             if block.type == "text":
                 final_text = block.text
                 break
+
+    if not final_text:
+        final_text = json.dumps({
+            "answer": "I was unable to produce a response for this query. Please try rephrasing your question.",
+            "evidence": [],
+            "confidence": "no_data",
+            "data_gaps": ["Agent produced no text output"],
+        })
 
     # ── Parse + validate BEFORE streaming — blocked answers must not reach the screen ──
     parsed: ChatResponse = parse_response(final_text, tools_used=tools_used)
