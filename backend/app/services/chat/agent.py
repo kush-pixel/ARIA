@@ -39,6 +39,42 @@ _MODEL = "claude-sonnet-4-20250514"
 _MAX_TOOL_ROUNDS = 3
 _PROMPT_PATH = Path(__file__).resolve().parents[4] / "prompts" / "chat_system_prompt.md"
 
+# Keywords that indicate a patient-clinical question — at least one must be present
+_CLINICAL_KEYWORDS: frozenset[str] = frozenset({
+    "patient", "bp", "blood pressure", "systolic", "diastolic",
+    "medication", "med", "drug", "adherence", "dose", "dosage",
+    "reading", "readings", "trend", "alert", "briefing", "lab",
+    "clinical", "appointment", "condition", "problem", "hypertension",
+    "heart rate", "pulse", "monitoring", "monitor", "mmhg",
+    "prescribed", "prescription", "missed", "average", "baseline",
+    "risk", "inertia", "gap", "deterioration", "flag", "urgent",
+    "overdue", "visit", "summary", "compare", "history", "result",
+    "score", "tier", "last week", "last month", "past week", "past month",
+    "recent", "current", "today", "yesterday", "days", "weeks", "months",
+    "how is", "how has", "what is", "what are", "what was", "what were",
+    "when did", "when was", "why did", "why is", "why was", "show me",
+    "tell me", "explain", "describe", "any", "latest", "highest", "lowest",
+    "morning", "evening", "session", "confirmed", "pattern",
+})
+
+_OFF_TOPIC_RESPONSE = json.dumps({
+    "answer": "I can only answer questions about this patient's clinical data in ARIA. Please ask about BP trends, medications, adherence, lab results, or clinical alerts.",
+    "evidence": [],
+    "confidence": "no_data",
+    "data_gaps": [],
+})
+
+
+def _is_off_topic(question: str) -> bool:
+    """Return True if the question has no clinical keywords — block before hitting LLM.
+
+    Uses a conservative allowlist: if any clinical keyword appears, the question
+    is allowed through. Only pure off-topic questions (politics, geography, general
+    knowledge) will have zero matches.
+    """
+    q_lower = question.lower()
+    return not any(kw in q_lower for kw in _CLINICAL_KEYWORDS)
+
 
 def _load_system_prompt() -> str:
     """Load the chatbot system prompt from prompts/chat_system_prompt.md."""
@@ -92,6 +128,31 @@ def _sse(event: str, data: Any) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+def _generate_followup_questions(tools_used: list[str]) -> list[str]:
+    """Generate 2-3 contextual follow-up question chips based on tools called.
+
+    Args:
+        tools_used: List of tool names called during this agent turn.
+
+    Returns:
+        Up to 3 follow-up question strings.
+    """
+    seen = set(tools_used)
+    questions: list[str] = []
+    if "get_patient_readings" in seen:
+        questions.append("Were there any monitoring gaps during this period?")
+        questions.append("How does this compare to 3 months ago?")
+    if "get_medication_history" in seen:
+        questions.append("What is the current adherence rate?")
+    if "get_adherence_summary" in seen:
+        questions.append("Which medication had the most missed doses?")
+    if "get_briefing" in seen:
+        questions.append("Are there any overdue labs flagged?")
+    if "get_clinical_context" in seen:
+        questions.append("When was the last clinic visit?")
+    return questions[:3]
+
+
 async def run_agent(
     question: str,
     patient_id: str,
@@ -118,6 +179,20 @@ async def run_agent(
     Yields:
         SSE-formatted strings: thinking | token | done | error events.
     """
+    # Pre-flight: block off-topic questions before hitting the LLM
+    if _is_off_topic(question):
+        logger.info("Off-topic question blocked pre-flight: patient=%s", patient_id)
+        yield _sse("done", {
+            "answer": "My role is to support pre-visit clinical review for this patient. I'm not able to answer general questions outside that scope.",
+            "evidence": [],
+            "confidence": "no_data",
+            "data_gaps": [],
+            "tools_used": [],
+            "blocked": True,
+            "block_reason": "off_topic",
+        })
+        return
+
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
     system_prompt = _load_system_prompt()
@@ -212,14 +287,7 @@ async def run_agent(
                 final_text = block.text
                 break
 
-    # Stream tokens character by character (simulate streaming for UX)
-    # In production swap for client.messages.stream() when tool loop is done
-    words = final_text.split(" ")
-    for i, word in enumerate(words):
-        chunk = word if i == len(words) - 1 else word + " "
-        yield _sse("token", {"token": chunk})
-
-    # ── Parse + validate ───────────────────────────────────────────────────────
+    # ── Parse + validate BEFORE streaming — blocked answers must not reach the screen ──
     parsed: ChatResponse = parse_response(final_text, tools_used=tools_used)
 
     validation: ValidationResult = await validate_chat_response(
@@ -233,6 +301,7 @@ async def run_agent(
 
     if not validation.passed:
         blocked = make_blocked_response(validation.failed_check or "unknown")
+        # Do NOT persist blocked turns — prevents LLM from "learning" to comply on repeat asks
         yield _sse("done", {
             "answer": blocked.answer,
             "evidence": [],
@@ -243,6 +312,12 @@ async def run_agent(
             "block_reason": blocked.block_reason,
         })
         return
+
+    # ── Stream validated answer tokens ────────────────────────────────────────
+    words = parsed.answer.split(" ")
+    for i, word in enumerate(words):
+        chunk = word if i == len(words) - 1 else word + " "
+        yield _sse("token", {"token": chunk})
 
     # ── Persist conversation turn ──────────────────────────────────────────────
     await session_store.append_messages(
@@ -262,6 +337,7 @@ async def run_agent(
         "data_gaps": parsed.data_gaps,
         "tools_used": tools_used,
         "blocked": False,
+        "follow_up_questions": _generate_followup_questions(tools_used),
     })
 
 

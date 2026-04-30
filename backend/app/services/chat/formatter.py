@@ -14,7 +14,8 @@ from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
 
-_BLOCKED_ANSWER = "I can't reliably answer that from the available patient data."
+_BLOCKED_ANSWER = "My role is to support pre-visit clinical review for this patient. I'm not able to answer general questions outside that scope."
+_BLOCKED_ANSWER_GUARDRAIL = "That response was blocked by ARIA's clinical safety guardrails."
 
 
 @dataclass
@@ -28,6 +29,7 @@ class ChatResponse:
     tools_used: list[str] = field(default_factory=list)
     blocked: bool = False
     block_reason: str | None = None
+    follow_up_questions: list[str] = field(default_factory=list)
 
 
 def make_blocked_response(reason: str) -> ChatResponse:
@@ -37,10 +39,15 @@ def make_blocked_response(reason: str) -> ChatResponse:
         reason: The failed check name from the validator.
 
     Returns:
-        ChatResponse with blocked=True and safe fallback answer.
+        ChatResponse with blocked=True and a reason-appropriate answer.
     """
+    answer = (
+        _BLOCKED_ANSWER
+        if reason in ("clinical_scope", "off_topic")
+        else _BLOCKED_ANSWER_GUARDRAIL
+    )
     return ChatResponse(
-        answer=_BLOCKED_ANSWER,
+        answer=answer,
         confidence="blocked",
         blocked=True,
         block_reason=reason,

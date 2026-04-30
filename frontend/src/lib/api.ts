@@ -107,3 +107,20 @@ export async function clearChatSession(patientId: string): Promise<void> {
     body: JSON.stringify({ patient_id: patientId }),
   })
 }
+
+// POST /api/chat/summary/:patientId
+export async function getChatSummary(patientId: string): Promise<{ summary: string | null }> {
+  return apiFetch<{ summary: string | null }>(`/api/chat/summary/${patientId}`, { method: 'POST' })
+}
+
+// POST /api/chat/feedback
+export async function submitChatFeedback(
+  patientId: string,
+  messageIndex: number,
+  rating: 'up' | 'down',
+): Promise<void> {
+  await apiFetch<unknown>('/api/chat/feedback', {
+    method: 'POST',
+    body: JSON.stringify({ patient_id: patientId, message_index: messageIndex, rating }),
+  })
+}

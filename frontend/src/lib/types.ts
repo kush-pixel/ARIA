@@ -168,6 +168,7 @@ export interface ChatDoneEvent {
   tools_used: string[]
   blocked: boolean
   block_reason?: string
+  follow_up_questions?: string[]
 }
 
 export interface ChatMessage {
@@ -178,6 +179,10 @@ export interface ChatMessage {
   data_gaps?: string[]
   tools_used?: string[]
   blocked?: boolean
+  timestamp?: Date
+  id?: number
+  follow_up_questions?: string[]
+  feedback?: 'up' | 'down' | null
 }
 
 export interface ShadowModeResults {

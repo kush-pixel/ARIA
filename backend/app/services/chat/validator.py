@@ -48,6 +48,17 @@ _SCOPE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\byou are (now|actually)\b", re.IGNORECASE),
 ]
 
+# Clinical terms that must appear in any non-refusal answer when no tools were called.
+# If the LLM answers without tools and the answer has none of these, it answered off-topic.
+_CLINICAL_ANSWER_TERMS: frozenset[str] = frozenset({
+    "patient", "bp", "blood pressure", "systolic", "diastolic",
+    "medication", "adherence", "reading", "readings", "trend", "briefing",
+    "lab", "clinical", "hypertension", "heart rate", "monitoring",
+    "mmhg", "prescribed", "baseline", "risk", "inertia", "gap",
+    "deterioration", "alert", "overdue", "visit", "dose", "drug",
+    "only answer questions", "clinical data",  # scope refusal phrases
+})
+
 
 def check_groundedness(
     text: str,
@@ -160,6 +171,38 @@ def check_scope_boundary(text: str) -> ValidationResult:
     return ValidationResult(passed=True)
 
 
+def check_clinical_scope(
+    text: str,
+    tool_results: dict[str, Any],
+) -> ValidationResult:
+    """Block answers that contain no clinical terms when no tools were called.
+
+    If the LLM answered without calling any tools AND the answer contains none
+    of the expected clinical terms, it almost certainly answered an off-topic
+    question using its general world knowledge.
+
+    Args:
+        text: Raw LLM answer string.
+        tool_results: Tools called this turn (empty when no tools were used).
+
+    Returns:
+        Failed result when answer looks like a general-knowledge response.
+    """
+    if tool_results:
+        # Tools were called — answer is grounded in patient data, skip this check
+        return ValidationResult(passed=True)
+
+    text_lower = text.lower()
+    if any(term in text_lower for term in _CLINICAL_ANSWER_TERMS):
+        return ValidationResult(passed=True)
+
+    return ValidationResult(
+        passed=False,
+        failed_check="clinical_scope",
+        detail="Answer contains no clinical terms and no tools were called — likely an off-topic response",
+    )
+
+
 def check_evidence_consistency(
     evidence: list[str],
     tool_results: dict[str, Any],
@@ -229,6 +272,7 @@ async def validate_chat_response(
         lambda: check_phi_leak(text, patient_id),
         lambda: check_prompt_injection(text),
         lambda: check_guardrails(text),
+        lambda: check_clinical_scope(text, tool_results),  # blocks off-topic answers
         lambda: check_medication_hallucination(text, med_payload),
         lambda: check_bp_plausibility(text, {}),
         lambda: check_groundedness(text, tool_results),

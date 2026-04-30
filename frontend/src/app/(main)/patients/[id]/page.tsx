@@ -77,7 +77,7 @@ export default function PatientPage() {
 
         {/* Right — fixed chat panel */}
         <div className="w-[380px] flex-shrink-0">
-          <ChatPanel patientId={id} />
+          <ChatPanel patientId={id} patient={patient} readings={readings} />
         </div>
       </div>
     </div>

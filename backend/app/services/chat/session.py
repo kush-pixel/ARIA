@@ -82,3 +82,16 @@ async def clear_session(
     """
     _memory.pop(_key(clinician_id, patient_id), None)
     logger.info("Chat session cleared: clinician=%s patient=%s", clinician_id, patient_id)
+
+
+def get_raw_history(clinician_id: str, patient_id: str) -> list[dict[str, Any]]:
+    """Return raw history for summary generation (synchronous, no DB needed).
+
+    Args:
+        clinician_id: Clinician identifier.
+        patient_id: Patient identifier.
+
+    Returns:
+        List of message dicts [{role, content}, ...].
+    """
+    return list(_memory.get(_key(clinician_id, patient_id), []))

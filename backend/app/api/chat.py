@@ -3,19 +3,24 @@
 POST /api/chat                                  — SSE streaming Q&A
 GET  /api/chat/suggested-questions/{patient_id} — dynamic question chips + proactive suggestion
 DELETE /api/chat/session                        — clear conversation history
+POST /api/chat/summary/{patient_id}             — bullet-point conversation summary
+POST /api/chat/feedback                         — clinician thumbs-up/down feedback
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+import anthropic
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.db.session import get_session
+from app.models.audit_event import AuditEvent
 from app.models.briefing import Briefing
 from app.models.patient import Patient
 from app.services.chat import session as session_store
@@ -100,3 +105,64 @@ async def clear_session(
     """Clear the conversation history for a patient session."""
     await session_store.clear_session(_DEFAULT_CLINICIAN_ID, body.patient_id, session)
     return {"cleared": True}
+
+
+class ChatFeedbackRequest(BaseModel):
+    """Request body for chat response feedback."""
+
+    patient_id: str
+    message_index: int
+    rating: str  # "up" | "down"
+
+
+@router.post("/chat/summary/{patient_id}")
+async def chat_summary(
+    patient_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, str | None]:
+    """Generate a bullet-point summary of the current conversation."""
+    history = session_store.get_raw_history(_DEFAULT_CLINICIAN_ID, patient_id)
+    if len(history) < 2:
+        return {"summary": None}
+
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    convo = "\n".join(
+        f"{m['role'].upper()}: {m['content']}" for m in history[-20:]
+    )
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=300,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Summarise this clinical consultation in 3-5 concise bullet points "
+                    "suitable for clinical notes. Be factual, no recommendations.\n\n"
+                    + convo
+                ),
+            }],
+        )
+        return {"summary": response.content[0].text.strip()}
+    except Exception as exc:
+        logger.warning("Summary generation failed: %s", exc)
+        return {"summary": None}
+
+
+@router.post("/chat/feedback")
+async def chat_feedback(
+    body: ChatFeedbackRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, bool]:
+    """Record clinician thumbs-up/down feedback on a chat response."""
+    session.add(AuditEvent(
+        actor_type="clinician",
+        actor_id=_DEFAULT_CLINICIAN_ID,
+        patient_id=body.patient_id,
+        action="chat_feedback",
+        resource_type="Chat",
+        resource_id=body.patient_id,
+        outcome="success",
+        details=f"rating={body.rating} msg_index={body.message_index}",
+    ))
+    await session.commit()
+    return {"recorded": True}
