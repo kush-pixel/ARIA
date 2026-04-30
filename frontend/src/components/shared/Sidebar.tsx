@@ -83,7 +83,7 @@ export default function Sidebar() {
           <div className="w-7 h-7 rounded-full bg-blue-100 dark:bg-blue-900/40 flex items-center justify-center flex-shrink-0">
             <span className="text-[11px] font-bold text-blue-600 dark:text-blue-400">GP</span>
           </div>
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <p className="text-[12px] font-semibold text-gray-700 dark:text-gray-300 truncate">Clinician</p>
             <p className="text-[11px] text-gray-400 dark:text-gray-500 truncate">IIT Hypertension Clinic</p>
           </div>

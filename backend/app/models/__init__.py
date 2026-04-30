@@ -1,6 +1,6 @@
 """ARIA ORM models package.
 
-Imports all 12 models so that:
+Imports all models so that:
 1. ``from app.models import Patient, Reading, ...`` works throughout the codebase.
 2. Every model is registered with ``Base.metadata`` before ``create_all()`` runs.
 """
