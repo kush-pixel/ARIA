@@ -18,8 +18,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-# TEMP: Groq testing override — revert to `import anthropic` when switching back
-from groq import Groq
+# TEMP: OpenAI testing override — revert to `import anthropic` when switching back
+from openai import OpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -29,8 +29,8 @@ from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
 
-# TEMP: Groq llama-3.3-70b — revert to "claude-sonnet-4-20250514" when switching back
-_MODEL_VERSION = "llama-3.3-70b-versatile"
+# TEMP: OpenAI gpt-4o-mini — revert to "claude-sonnet-4-20250514" when switching back
+_MODEL_VERSION = "gpt-4o-mini"
 
 # prompts/ lives at the project root — 4 levels above this file:
 # briefing/ -> services/ -> app/ -> backend/ -> ARIA root
@@ -139,7 +139,7 @@ async def generate_llm_summary(
     prompt_hash = _compute_prompt_hash(system_prompt)
     user_message = _build_user_message(briefing.llm_response)
 
-    client = Groq(api_key=settings.groq_api_key)
+    client = OpenAI(api_key=settings.openai_api_key)
 
     # Attempt up to 2 times — retry once on validation failure before storing None
     summary_text: str | None = None

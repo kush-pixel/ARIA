@@ -22,9 +22,9 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
-# TEMP: Groq testing override — revert to `import anthropic` when switching back
-from groq import BadRequestError as GroqBadRequestError
-from groq import Groq
+# TEMP: OpenAI testing override — revert to `import anthropic` when switching back
+from openai import BadRequestError as OpenAIBadRequestError
+from openai import OpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -37,8 +37,8 @@ from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
 
-# TEMP: llama-3.3-70b on Groq — revert to "claude-sonnet-4-20250514" when switching back
-_MODEL = "llama-3.3-70b-versatile"
+# TEMP: OpenAI gpt-4o-mini — revert to "claude-sonnet-4-20250514" when switching back
+_MODEL = "gpt-4o-mini"
 _MAX_TOOL_ROUNDS = 3
 _PROMPT_PATH = Path(__file__).resolve().parents[4] / "prompts" / "chat_system_prompt.md"
 
@@ -211,7 +211,7 @@ async def run_agent(
         })
         return
 
-    client = Groq(api_key=settings.groq_api_key)
+    client = OpenAI(api_key=settings.openai_api_key)
     groq_tools = _to_groq_tools(TOOL_SCHEMAS)
 
     system_prompt = _load_system_prompt()
@@ -239,7 +239,7 @@ async def run_agent(
                 tools=groq_tools,
                 tool_choice="auto",
             )
-        except GroqBadRequestError as exc:
+        except OpenAIBadRequestError as exc:
             # Model emitted a malformed tool call (e.g. <function=null>) — fall back
             # to a plain completion so the turn still produces an answer.
             logger.warning("Groq tool_use_failed (round %d) — retrying without tools: %s", round_num + 1, exc)
@@ -422,7 +422,7 @@ async def generate_proactive_suggestion(
     if not urgent and not agenda:
         return None
 
-    client = Groq(api_key=settings.groq_api_key)
+    client = OpenAI(api_key=settings.openai_api_key)
 
     prompt = (
         "You are assisting a GP reviewing a patient briefing before a consultation.\n"
