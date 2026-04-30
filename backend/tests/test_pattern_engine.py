@@ -850,3 +850,62 @@ def test_titration_window_uses_most_recent_drug() -> None:
         {"name": "Amlodipine", "date": "2026-04-10", "activity": "add"},   # CCB → 56d
     ]
     assert get_titration_window(history) == 56
+
+
+# ===========================================================================
+# INERTIA — titration window aware Condition 4 (Fix: beyond-window should fire)
+# ===========================================================================
+
+
+async def test_inertia_med_change_beyond_titration_window_still_fires() -> None:
+    """Med change after first elevated but BEYOND titration window → inertia fires.
+
+    First elevated reading 30 days ago; Metoprolol changed 20 days ago.
+    Beta-blocker titration window = 14 days.  20 > 14 → beyond window → fires.
+    """
+    readings = _elevated_readings(count=6, days_back=30.0)
+    change_date_str = (date.today() - timedelta(days=20)).isoformat()
+    med_history = [
+        {"name": "Metoprolol", "rxnorm": "41493", "date": change_date_str, "activity": "increased"},
+    ]
+    cc_obj = _cc(med_history=med_history, last_med_change=None)
+    session = _session(_cc_scalar(cc_obj), _appt(), _rows(*readings))
+    result = await run_inertia_detector(session, "1091")
+    assert result["inertia_detected"] is True
+
+
+async def test_inertia_med_change_within_titration_window_still_blocks() -> None:
+    """Med change after first elevated and WITHIN titration window → blocked.
+
+    First elevated reading 30 days ago; Metoprolol changed 10 days ago.
+    Beta-blocker titration window = 14 days.  10 < 14 → within window → blocked.
+    """
+    readings = _elevated_readings(count=6, days_back=30.0)
+    change_date_str = (date.today() - timedelta(days=10)).isoformat()
+    med_history = [
+        {"name": "Metoprolol", "rxnorm": "41493", "date": change_date_str, "activity": "increased"},
+    ]
+    cc_obj = _cc(med_history=med_history, last_med_change=None)
+    session = _session(_cc_scalar(cc_obj), _appt(), _rows(*readings))
+    result = await run_inertia_detector(session, "1091")
+    assert result["inertia_detected"] is False
+
+
+# ===========================================================================
+# DETERIORATION — minimum slope gate (Fix: slope >= 0.3 mmHg/day required)
+# ===========================================================================
+
+
+async def test_deterioration_barely_positive_slope_does_not_fire() -> None:
+    """A barely positive slope (< 0.3 mmHg/day) is not clinically significant → False.
+
+    Start 145 → end 147 over 14 days: slope ≈ 0.14 mmHg/day.
+    All three main signals pass except the new minimum slope gate.
+    Step-change sub-detector does not fire (delta < 15 mmHg).
+    """
+    readings = _worsening_readings(
+        count=10, start_systolic=145.0, end_systolic=147.0, window_days=14
+    )
+    session = _session(_no_cc(), _appt(), _rows(*readings))
+    result = await run_deterioration_detector(session, "1091")
+    assert result["deterioration"] is False

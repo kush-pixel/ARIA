@@ -34,6 +34,7 @@ from app.services.pattern_engine.threshold_utils import (
     compute_patient_threshold,
     compute_window_days,
     get_last_med_change_date,
+    get_titration_window,
 )
 from app.utils.logging_utils import get_logger
 
@@ -207,11 +208,18 @@ async def run_inertia_detector(
             last_med_date.year, last_med_date.month, last_med_date.day, tzinfo=UTC
         )
         if last_med_dt >= first_elevated_dt:
+            days_since_change = (now - last_med_dt).total_seconds() / 86400.0
+            titration_window = get_titration_window(med_history, as_of=now.date())
+            if days_since_change <= titration_window:
+                logger.debug(
+                    "patient=%s inertia=False (med change %s is %d days ago, within %d-day titration window)",
+                    patient_id, last_med_date, int(days_since_change), titration_window,
+                )
+                return _false_result(avg_systolic, elevated_count, duration_days)
             logger.debug(
-                "patient=%s inertia=False (med change %s on/after first elevated %s)",
-                patient_id, last_med_date, first_elevated_dt,
+                "patient=%s inertia: med change %s is %d days ago, beyond %d-day titration window — continuing",
+                patient_id, last_med_date, int(days_since_change), titration_window,
             )
-            return _false_result(avg_systolic, elevated_count, duration_days)
 
     # Condition 5: slope direction — 7-day recent avg must be >= patient_threshold
     # (If BP is declining, do not flag inertia)

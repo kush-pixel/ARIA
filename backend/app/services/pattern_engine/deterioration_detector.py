@@ -58,6 +58,7 @@ _STEP_CHANGE_OLD_DAYS = 14  # "3 weeks ago" window: 14–21 days ago
 _STEP_CHANGE_OLD_END_DAYS = 21
 _STEP_CHANGE_THRESHOLD_MMHG = 15.0
 _WHITE_COAT_EXCLUSION_DAYS = 5  # Fix 27: drop readings within this many days of appointment
+_MIN_SLOPE_MMHG_PER_DAY = 0.3   # minimum slope for clinical significance (avoids borderline FP)
 
 
 class DeteriorationResult(TypedDict):
@@ -224,7 +225,7 @@ async def run_deterioration_detector(
     # Signal 3: absolute gate — recent_avg must be at or above patient_threshold
     signal_3 = recent_avg >= patient_threshold
     deterioration = (
-        (slope > 0.0 and recent_avg > baseline_avg and signal_3)
+        (slope >= _MIN_SLOPE_MMHG_PER_DAY and recent_avg > baseline_avg and signal_3)
         or step_change_detected
     )
 
