@@ -10,6 +10,7 @@ import {
   AlertTriangle, Info, FlaskConical, Pill, Activity,
   ClipboardList, Flag, Sparkles, Calendar,
 } from 'lucide-react'
+import { isHypertensionMedication, filterMedicationStatusText } from '@/lib/hypertension-meds'
 
 interface BriefingCardProps {
   patient: Patient
@@ -55,6 +56,7 @@ function formatApptTime(iso: string): string {
 
 export default function BriefingCard({ patient, briefing, readings, adherence }: BriefingCardProps) {
   const payload = briefing?.llm_response
+  const hypertensionAdherence = adherence.filter((a) => isHypertensionMedication(a.medication_name))
 
   return (
     <div className="card overflow-hidden">
@@ -148,13 +150,15 @@ export default function BriefingCard({ patient, briefing, readings, adherence }:
 
             {/* Medication */}
             <Section icon={<Pill size={14} strokeWidth={2} />} title="Medication Status">
-              <p>{payload?.medication_status}</p>
+              <p>{filterMedicationStatusText(payload?.medication_status)}</p>
             </Section>
 
             {/* Adherence */}
             <Section icon={<ClipboardList size={14} strokeWidth={2} />} title="Adherence Signal">
-              {adherence.length > 0 ? (
-                <AdherenceSummary adherence={adherence} patternText={payload?.adherence_summary} />
+              {hypertensionAdherence.length > 0 ? (
+                <AdherenceSummary adherence={hypertensionAdherence} />
+              ) : adherence.length > 0 ? (
+                <p className="text-gray-500 italic">No antihypertensive medications found in adherence data.</p>
               ) : (
                 <p className="text-gray-500 italic">{payload?.adherence_summary}</p>
               )}
