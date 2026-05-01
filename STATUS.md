@@ -1,5 +1,6 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-05-01 by Krishna (frontend clinical UI — dashboard column redesign, BP chart single-source average, chatbot guardrail fix, interactive tour, patient panel de-coloring, adherence card layout, SparklineChart data consistency)
+Last updated: 2026-05-01 by Kush (alert feedback loop — Fix 42 L2 calibration suppression wired into processor.py; doc bugs 70 and 71 fixed; 5 new end-to-end feedback loop tests; 82 tests passing, ruff clean)
+Previous: 2026-05-01 by Krishna (frontend clinical UI — dashboard column redesign, BP chart single-source average, chatbot guardrail fix, interactive tour, patient panel de-coloring, adherence card layout, SparklineChart data consistency)
 Previous: 2026-04-30 by Sahil (chatbot — three-layer guardrails, social phrase handling, blue theme, 10 UX features, OpenAI gpt-4o-mini override merged from Kush)
 Previous: 2026-04-30 by Kush (shadow mode fixes — white-coat exclusion past-appointment guard, truncated-window inertia thresholds, gap fired scoring, Pattern B counts as ARIA fired; agreement improved toward 80%+ target)
 Previous: 2026-04-30 by Yash (briefing UI med filter — antihypertensives only in Medication Status + Adherence Signal; inertia detector titration-window fix; deterioration detector slope gate fix; 3 new unit tests)
@@ -11,6 +12,42 @@ Previous: 2026-04-27 by Kush (Phase 1 + Phase 8 — AUDIT.md Fixes 6,7,8,9,12,16
 Previous: 2026-04-27 by Nesh (Phase 4 complete — Fixes 10, 21, 40, 46, 47, 60 implemented; 428 unit tests passing, ruff clean)
 Previous: 2026-04-27 by Sahil (Phase 5 complete + Phase 7 complete except Fix 43; 426 unit tests passing, ruff clean)
 Previous: 2026-04-26 by Yash (AUDIT.md Fixes 25, 58, 61 — severity-weighted comorbidity, adaptive gap/inertia normalization, risk_score_computed_at staleness indicator)
+
+---
+
+## Alert Feedback Loop — Fix 42 Implementation Gap + Tests — 2026-05-01
+
+**Author:** Kush Patel
+**Files changed:** `backend/app/api/alerts.py`, `backend/app/models/outcome_verification.py`, `backend/app/services/worker/processor.py`, `backend/tests/test_api.py`
+
+### Fix 42 L2 — Calibration suppression wired into processor.py
+
+Fix 42 L2 was marked ✓ DONE in AUDIT.md but the "production detectors read rules at query time" requirement was never implemented. Approved `CalibrationRule` rows existed in the DB schema but no detector or worker ever queried them.
+
+- Added `_maybe_upsert_alert(session, pid, alert_type, suppressed_detectors, detector_type)` helper to `processor.py`
+- `_handle_pattern_recompute` now queries `calibration_rules WHERE active=TRUE` for each patient before any alert write
+- When a matching rule exists, the alert write is skipped and an `alert_suppressed_by_calibration` audit event is written instead
+- Detection still runs; findings still appear in the briefing — only the alert inbox write is suppressed
+- **Design:** suppression over threshold override. Threshold override requires clinicians to know internal parameter names (`threshold_mmhg`, `slope_threshold`) — not viable. Suppression maps to a concept clinicians already use: "stop sending this alert type for this patient."
+
+### Doc bug fixes (AUDIT.md items 70 and 71)
+
+- `alerts.py:107`: docstring said "10-minute undo window" — the constant `_UNDO_WINDOW_MINUTES = 24 * 60` and the error message were always correct; only the docstring was wrong. Corrected to "24-hour undo window."
+- `outcome_verification.py:38`: comment listed `urgent_visit` as a valid `outcome_type`. CLAUDE.md defines only `pending|deterioration_cluster|none`; code never sets `urgent_visit`. Removed.
+
+### Test coverage — 5 new tests added to `test_api.py`
+
+All use `_mock_session()` fixture pattern; no real DB connection.
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_calibration_no_recommendation_below_threshold` | 3 dismissals → `GET /admin/calibration-recommendations` returns `[]` |
+| `test_calibration_recommendation_after_4_dismissals` | 4 dismissals → recommendation surfaced with correct `dismissal_count` and `threshold` |
+| `test_approve_calibration_rule_creates_active_rule` | `POST /admin/calibration-rules` returns 201 with `active: true` |
+| `test_outcome_check_scheduled_on_disagree` | `disposition=disagree` → `OutcomeVerification` row with `check_after - dismissed_at == 30 days` |
+| `test_outcome_check_resolves_deterioration_cluster` | `run_outcome_checks()` direct call → `outcome_type = "deterioration_cluster"` when concerning alert exists |
+
+**Test run:** 82 tests passing across `test_api.py` + `test_worker.py`; zero regressions in existing worker tests (new calibration query hits same mock → returns empty set → no behaviour change). `ruff check app/` clean.
 
 ---
 

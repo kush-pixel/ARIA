@@ -9,7 +9,7 @@ Run:
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -514,6 +514,146 @@ async def test_acknowledge_alert_invalid_disposition_rejected(client: AsyncClien
     app.dependency_overrides.clear()
 
     assert resp.status_code == 422  # Pydantic validation failure
+
+
+# ---------------------------------------------------------------------------
+# Fix 42 L2 — Calibration recommendations
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_calibration_no_recommendation_below_threshold(client: AsyncClient):
+    """Fewer than 4 dismissals → calibration-recommendations returns empty list."""
+    session = _mock_session()
+    session.execute.side_effect = [
+        _all_result(),  # dismissal count query — no groups meeting threshold
+        _all_result(),  # active rules query — no active rules
+    ]
+
+    app.dependency_overrides[get_session] = lambda: session
+    resp = await client.get("/api/admin/calibration-recommendations")
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+@pytest.mark.asyncio
+async def test_calibration_recommendation_after_4_dismissals(client: AsyncClient):
+    """4 disagree dispositions for same patient+detector → recommendation surfaced."""
+    row = MagicMock()
+    row.patient_id = "1091"
+    row.detector_type = "inertia"
+    row.dismissal_count = 4
+
+    session = _mock_session()
+    session.execute.side_effect = [
+        _all_result(row),  # one group meeting threshold
+        _all_result(),     # no active rules — row is not filtered out
+    ]
+
+    app.dependency_overrides[get_session] = lambda: session
+    resp = await client.get("/api/admin/calibration-recommendations")
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["patient_id"] == "1091"
+    assert data[0]["detector_type"] == "inertia"
+    assert data[0]["dismissal_count"] == 4
+    assert data[0]["threshold"] == 4
+
+
+@pytest.mark.asyncio
+async def test_approve_calibration_rule_creates_active_rule(client: AsyncClient):
+    """POST /admin/calibration-rules creates an active suppression rule."""
+    session = _mock_session()
+    session.execute.return_value = MagicMock()  # UPDATE deactivate-old call
+
+    app.dependency_overrides[get_session] = lambda: session
+    resp = await client.post(
+        "/api/admin/calibration-rules",
+        json={
+            "patient_id": "1091",
+            "detector_type": "inertia",
+            "dismissal_count": 4,
+            "approved_by": "dr.mehta",
+        },
+    )
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["patient_id"] == "1091"
+    assert data["detector_type"] == "inertia"
+    assert data["active"] is True
+
+
+# ---------------------------------------------------------------------------
+# Fix 42 L3 — Outcome verification
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_outcome_check_scheduled_on_disagree(client: AsyncClient):
+    """Acknowledge with disposition=disagree → OutcomeVerification scheduled 30 days out."""
+    from app.models.outcome_verification import OutcomeVerification
+
+    alert = _make_alert(alert_id="a001", alert_type="inertia")
+    session = _mock_session()
+    session.execute.side_effect = [
+        _scalar_result(alert),  # select Alert by alert_id
+        MagicMock(),            # update Alert.acknowledged_at
+    ]
+    added: list = []
+    session.add = added.append
+
+    app.dependency_overrides[get_session] = lambda: session
+    resp = await client.post(
+        "/api/alerts/a001/acknowledge",
+        json={"disposition": "disagree", "reason_text": "stable for this patient"},
+    )
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert resp.json()["feedback_recorded"] is True
+
+    verifications = [o for o in added if isinstance(o, OutcomeVerification)]
+    assert len(verifications) == 1
+    v = verifications[0]
+    assert v.check_after - v.dismissed_at == timedelta(days=30)
+
+
+@pytest.mark.asyncio
+async def test_outcome_check_resolves_deterioration_cluster():
+    """run_outcome_checks sets outcome_type=deterioration_cluster when a concerning alert follows."""
+    from app.services.feedback.outcome_tracker import run_outcome_checks
+
+    dismissed = datetime(2026, 3, 1, 0, 0, tzinfo=UTC)
+    check_after = dismissed + timedelta(days=30)
+
+    verification = MagicMock()
+    verification.patient_id = "1091"
+    verification.alert_id = "a001"
+    verification.dismissed_at = dismissed
+    verification.check_after = check_after
+    verification.outcome_type = "pending"
+
+    concerning = MagicMock()
+    concerning.alert_type = "deterioration"
+
+    session = _mock_session()
+    session.execute.side_effect = [
+        _scalars_result(verification),  # pending verifications query
+        _scalar_result(concerning),     # concerning alert found after dismissed_at
+    ]
+
+    resolved = await run_outcome_checks(session)
+
+    assert resolved == 1
+    assert verification.outcome_type == "deterioration_cluster"
+    assert verification.prompted_at is not None
 
 
 # ---------------------------------------------------------------------------

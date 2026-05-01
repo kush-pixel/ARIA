@@ -467,7 +467,7 @@ Additionally, apply PostgreSQL Row-Level Security (RLS) on the `readings` table 
 
 **Layer 1:** Extend alert acknowledge endpoint to accept `disposition` (`agree_acting`, `agree_monitoring`, `disagree`) and optional `reason_text`. Store in new `alert_feedback` table: `alert_id`, `disposition`, `clinician_id`, `patient_id`, `detector_type`, `reason_text`, `created_at`.
 
-**Layer 2:** When a detector accumulates 4+ dismissals of the same type for the same patient, surface a calibration recommendation in the admin dashboard. Clinician approves or rejects. Approved rules stored in `calibration_rules` table with provenance: who approved, when, based on how many dismissals. Production detectors read rules at query time. No automatic self-modification — every threshold change requires explicit clinician approval.
+**Layer 2:** When a detector accumulates 4+ dismissals of the same type for the same patient, surface a calibration recommendation in the admin dashboard. Clinician approves or rejects. Approved rules stored in `calibration_rules` table with provenance: who approved, when, based on how many dismissals. **Implementation:** alert suppression, not threshold override — an approved active `CalibrationRule(patient_id, detector_type)` means that detector's alert row is not written to the inbox for that patient. Detection still runs; findings still appear in the briefing. `processor.py` queries `calibration_rules WHERE active=TRUE` before each alert write and emits an `alert_suppressed_by_calibration` audit event instead. No automatic self-modification — every suppression requires explicit clinician approval. (Note: Full Spec v5.0 Section 6.7 listed `parameter TEXT` and `adjusted_value NUMERIC` on `calibration_rules`; these were dropped in favour of suppression, which requires no internal parameter knowledge from the clinician.)
 
 **Layer 3:** When a clinician dismisses an alert, track the patient for 30 days. If a concerning event follows (deterioration cluster, urgent visit), prompt the clinician: "Alert dismissed on [date] — patient had a deterioration event 12 days later. Was the alert relevant in retrospect?" Retrospective labels feed back into Layer 2 calibration evidence.
 
@@ -838,7 +838,7 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 | 39 | Infra | No MFA | Supabase Auth | 8 | pending |
 | 40 | Infra | No dead-letter queue | processor.py | 4 | ✓ DONE |
 | 41 | Feature | Gap explanations (device vs non-compliance) | new table + API | 5 | ✓ DONE |
-| 42 | Feature | Feedback loop (3 layers) | new tables + API | 5–7 | ✓ L1/L2/L3 DONE |
+| 42 | Feature | Feedback loop (3 layers) — L2 suppression wired into processor.py; 5 end-to-end tests added | new tables + API | 5–7 | ✓ L1/L2/L3 DONE (2026-05-01) |
 | 43 | Feature | Patient-facing submission interface | Next.js | 7 | ✓ DONE |
 | 44 | Feature | BLE connector | new | 7 | ✓ DONE |
 | 45 | Feature | Escalation pathway + off-hours tagging | processor.py, alerts | 7 | ✓ DONE |
@@ -867,5 +867,7 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 | 68 | Feature | Chatbot system prompt — partial data reasoning section + clinician-directed language rule (third person always) | chat_system_prompt.md | — | ✓ DONE (2026-04-30) |
 
 | 69 | Feature | Patient PWA — manual BP submission, medication confirmation, .ics reminders, patient JWT auth, symptom alerts (chest pain / SOB+CHF bypass cold-start), 28 unit tests | patient-app/, auth.py, confirmations.py, readings.py, datetime_utils.py, ics_generator.py | — | ✓ DONE (2026-04-30) |
+| 70 | Bug | `alerts.py:107` docstring stated "10-minute undo window" — constant `_UNDO_WINDOW_MINUTES` is 24 h; error message was correct, only the docstring was wrong | alerts.py | — | ✓ DONE (2026-05-01) |
+| 71 | Bug | `outcome_verification.py:38` comment listed `urgent_visit` as a valid `outcome_type` — never implemented in code or defined in CLAUDE.md; only `pending\|deterioration_cluster\|none` are valid | outcome_verification.py | — | ✓ DONE (2026-05-01) |
 
 **Remaining open items:** 16 (lab values), 35–39 (infrastructure/security).

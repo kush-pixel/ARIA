@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.base import AsyncSessionLocal
 from app.models.alert import Alert
+from app.models.audit_event import AuditEvent
 from app.models.patient import Patient
 from app.models.processing_job import ProcessingJob
 from app.utils.datetime_utils import is_off_hours
@@ -101,6 +102,47 @@ async def _upsert_alert(
                 off_hours=is_off_hours(now),
             )
         )
+
+
+async def _maybe_upsert_alert(
+    session: AsyncSession,
+    patient_id: str,
+    alert_type: str,
+    suppressed_detectors: set[str],
+    detector_type: str,
+    *,
+    gap_days: int | None = None,
+) -> None:
+    """Write an alert row unless an active calibration rule suppresses it.
+
+    When a clinician approves a calibration rule for a patient/detector pair,
+    the alert row is skipped and an audit event records the suppression instead.
+    Detection still runs; findings still appear in the briefing.
+
+    Args:
+        session: Active async SQLAlchemy session.
+        patient_id: Patient to alert on.
+        alert_type: The specific alert type string (gap_urgent, inertia, etc.).
+        suppressed_detectors: Detector types with active calibration rules for this patient.
+        detector_type: Logical detector name (gap | inertia | deterioration | adherence).
+        gap_days: Only set for gap alert types.
+    """
+    if detector_type in suppressed_detectors:
+        session.add(AuditEvent(
+            actor_type="system",
+            patient_id=patient_id,
+            action="alert_suppressed_by_calibration",
+            resource_type="Alert",
+            outcome="success",
+            details=f"detector={detector_type} suppressed by active calibration rule",
+        ))
+        logger.info(
+            "alert suppressed by calibration rule: patient=%s detector=%s",
+            patient_id,
+            detector_type,
+        )
+        return
+    await _upsert_alert(session, patient_id, alert_type, gap_days=gap_days)
 
 
 # ---------------------------------------------------------------------------
@@ -238,16 +280,36 @@ async def _handle_pattern_recompute(job: ProcessingJob, session: AsyncSession) -
             pid, variability["level"], variability.get("cv_pct"),
         )
 
+    # Load active calibration rules — approved rules suppress alert writes for this patient
+    from app.models.calibration_rule import CalibrationRule
+
+    cal_result = await session.execute(
+        select(CalibrationRule).where(
+            CalibrationRule.patient_id == pid,
+            CalibrationRule.active.is_(True),
+        )
+    )
+    suppressed_detectors: set[str] = {
+        r.detector_type for r in cal_result.scalars().all()
+    }
+    if suppressed_detectors:
+        logger.info(
+            "calibration_suppression active: patient=%s detectors=%s",
+            pid,
+            sorted(suppressed_detectors),
+        )
+
     # Write alert rows for triggered conditions (deduplicated by date)
+    # Alerts suppressed by calibration rules write an audit event instead
     if gap["status"] in ("flag", "urgent"):
         alert_type = "gap_urgent" if gap["status"] == "urgent" else "gap_briefing"
-        await _upsert_alert(session, pid, alert_type, gap_days=int(gap["gap_days"]))
+        await _maybe_upsert_alert(session, pid, alert_type, suppressed_detectors, "gap", gap_days=int(gap["gap_days"]))
     if inertia["inertia_detected"]:
-        await _upsert_alert(session, pid, "inertia")
+        await _maybe_upsert_alert(session, pid, "inertia", suppressed_detectors, "inertia")
     if adherence["pattern"] == "A":
-        await _upsert_alert(session, pid, "adherence")
+        await _maybe_upsert_alert(session, pid, "adherence", suppressed_detectors, "adherence")
     if deterioration["deterioration"]:
-        await _upsert_alert(session, pid, "deterioration")
+        await _maybe_upsert_alert(session, pid, "deterioration", suppressed_detectors, "deterioration")
     await session.flush()
     logger.info("Alert rows written for patient=%s", pid)
 

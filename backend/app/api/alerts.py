@@ -105,10 +105,10 @@ async def unacknowledge_alert(
     alert_id: str,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """Reverse an acknowledgement if within the 10-minute undo window.
+    """Reverse an acknowledgement if within the 24-hour undo window.
 
     Clears acknowledged_at so the alert re-appears in the active inbox.
-    Blocked after 10 minutes to preserve audit integrity.
+    Blocked after 24 hours to preserve audit integrity.
     """
     result = await session.execute(
         select(Alert).where(Alert.alert_id == alert_id)
