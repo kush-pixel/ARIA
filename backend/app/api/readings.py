@@ -14,13 +14,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session
 from app.limiter import limiter
+from app.models.alert import Alert
 from app.models.audit_event import AuditEvent
+from app.models.clinical_context import ClinicalContext
 from app.models.patient import Patient
 from app.models.reading import Reading
+from app.utils.datetime_utils import is_off_hours
 from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["readings"])
+
+_VALID_SYMPTOMS: frozenset[str] = frozenset(
+    {"headache", "dizziness", "chest_pain", "shortness_of_breath"}
+)
+_CHF_CODES: frozenset[str] = frozenset({"I50", "I50.9"})
 
 
 class ReadingIn(BaseModel):
@@ -40,6 +48,7 @@ class ReadingIn(BaseModel):
     medication_taken: Literal["yes", "no", "partial"] | None = None
     submitted_by: str = "patient"
     consent_version: str = "1.0"
+    symptoms: list[str] | None = None
 
 
 @router.get("/readings")
@@ -66,7 +75,6 @@ async def create_reading(
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     """Ingest a single manually submitted home BP reading."""
-    # Verify patient exists
     patient_result = await session.execute(
         select(Patient).where(Patient.patient_id == payload.patient_id)
     )
@@ -82,6 +90,8 @@ async def create_reading(
     hr_avg = (payload.heart_rate_1 + hr2) / 2 if payload.heart_rate_1 and hr2 else (
         float(payload.heart_rate_1) if payload.heart_rate_1 else None
     )
+
+    symptoms = [s for s in (payload.symptoms or []) if s in _VALID_SYMPTOMS] or None
 
     reading = Reading(
         patient_id=payload.patient_id,
@@ -102,16 +112,57 @@ async def create_reading(
         bp_site=payload.bp_site,
         medication_taken=payload.medication_taken,
         consent_version=payload.consent_version,
+        symptoms=symptoms,
     )
     session.add(reading)
 
+    # Fix actor_type: patient submissions are not clinician-originated
+    actor_type = "system" if payload.submitted_by == "patient" else "clinician"
     session.add(AuditEvent(
-        actor_type="clinician",
+        actor_type=actor_type,
         patient_id=payload.patient_id,
         action="reading_ingested",
         resource_type="Reading",
         outcome="success",
     ))
+
+    # Symptom alerts — bypass cold-start suppression and the 30s worker poll loop.
+    # Chest pain always fires. Shortness of breath fires only when CHF is active.
+    now = datetime.now(UTC)
+    reported = set(symptoms or [])
+
+    if "chest_pain" in reported:
+        session.add(Alert(
+            patient_id=payload.patient_id,
+            alert_type="symptom_urgent",
+            systolic_avg=round(sys_avg, 1),
+            triggered_at=now,
+            delivered_at=now,
+            off_hours=is_off_hours(now),
+        ))
+        logger.info("symptom_urgent alert (chest_pain): patient=%s", payload.patient_id)
+
+    if "shortness_of_breath" in reported and "chest_pain" not in reported:
+        cc_result = await session.execute(
+            select(ClinicalContext).where(
+                ClinicalContext.patient_id == payload.patient_id
+            )
+        )
+        cc = cc_result.scalar_one_or_none()
+        codes = set(cc.problem_codes or []) if cc and cc.problem_codes else set()
+        if codes & _CHF_CODES:
+            session.add(Alert(
+                patient_id=payload.patient_id,
+                alert_type="symptom_urgent",
+                systolic_avg=round(sys_avg, 1),
+                triggered_at=now,
+                delivered_at=now,
+                off_hours=is_off_hours(now),
+            ))
+            logger.info(
+                "symptom_urgent alert (sob+chf): patient=%s", payload.patient_id
+            )
+
     await session.commit()
     await session.refresh(reading)
 
@@ -139,5 +190,6 @@ def _serialise(r: Reading) -> dict:
         "bp_site": r.bp_site,
         "medication_taken": r.medication_taken,
         "consent_version": r.consent_version,
+        "symptoms": r.symptoms,
         "created_at": r.created_at.isoformat() if r.created_at else None,
     }

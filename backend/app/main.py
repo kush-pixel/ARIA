@@ -22,10 +22,12 @@ from app.api import (
     adherence,
     admin,
     alerts,
+    auth,
     ble_webhook,
     briefings,
     calibration,
     chat,
+    confirmations,
     gap_explanations,
     ingest,
     patients,
@@ -79,14 +81,23 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+_cors_origins = [
+    "http://localhost:3000",
+    "http://localhost:3001",  # patient-app dev server
+]
+if settings.patient_app_url:
+    _cors_origins.append(settings.patient_app_url)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+app.include_router(auth.router, prefix="/api")
+app.include_router(confirmations.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
 app.include_router(patients.router, prefix="/api")
 app.include_router(readings.router, prefix="/api")
