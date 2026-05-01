@@ -19,6 +19,8 @@ class Settings(BaseSettings):
 
     # Anthropic / AI
     anthropic_api_key: str = Field("", description="Anthropic API key for Layer 3 LLM")
+    # OpenAI — temporary testing override; remove when reverting to Anthropic
+    openai_api_key: str = Field("", description="OpenAI API key (testing only — swap back to Anthropic)")
 
     # Application
     app_env: str = Field("development", description="development | staging | production")

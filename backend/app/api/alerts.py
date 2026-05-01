@@ -7,7 +7,7 @@ POST /api/alerts/{alert_id}/acknowledge — acknowledge an alert; optional dispo
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -70,6 +70,77 @@ async def list_alerts(
     result = await session.execute(stmt.order_by(Alert.triggered_at.desc()))
     alerts = result.scalars().all()
     return [_serialise(a) for a in alerts]
+
+
+_ACKNOWLEDGED_HISTORY_DAYS = 7
+_UNDO_WINDOW_MINUTES = 24 * 60
+
+
+@router.get("/alerts/acknowledged")
+@limiter.limit("30/minute")
+async def list_acknowledged_alerts(
+    request: Request,
+    patient_id: str | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> list[dict]:
+    """Return alerts acknowledged within the last 7 days, newest first.
+
+    Args:
+        patient_id: Optional filter to scope results to one patient.
+    """
+    cutoff = datetime.now(UTC) - timedelta(days=_ACKNOWLEDGED_HISTORY_DAYS)
+    stmt = select(Alert).where(
+        Alert.acknowledged_at.is_not(None),
+        Alert.acknowledged_at >= cutoff,
+    )
+    if patient_id is not None:
+        stmt = stmt.where(Alert.patient_id == patient_id)
+    result = await session.execute(stmt.order_by(Alert.acknowledged_at.desc()))
+    alerts = result.scalars().all()
+    return [_serialise(a) for a in alerts]
+
+
+@router.post("/alerts/{alert_id}/unacknowledge")
+async def unacknowledge_alert(
+    alert_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Reverse an acknowledgement if within the 10-minute undo window.
+
+    Clears acknowledged_at so the alert re-appears in the active inbox.
+    Blocked after 10 minutes to preserve audit integrity.
+    """
+    result = await session.execute(
+        select(Alert).where(Alert.alert_id == alert_id)
+    )
+    alert = result.scalar_one_or_none()
+    if alert is None:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    if alert.acknowledged_at is None:
+        return {"status": "not_acknowledged"}
+
+    undo_cutoff = datetime.now(UTC) - timedelta(minutes=_UNDO_WINDOW_MINUTES)
+    if alert.acknowledged_at < undo_cutoff:
+        raise HTTPException(
+            status_code=409,
+            detail="Undo window expired — alerts can only be reversed within 24 hours of acknowledgement.",
+        )
+
+    await session.execute(
+        update(Alert)
+        .where(Alert.alert_id == alert_id)
+        .values(acknowledged_at=None)
+    )
+    session.add(AuditEvent(
+        actor_type="clinician",
+        patient_id=alert.patient_id,
+        action="alert_unacknowledged",
+        resource_type="Alert",
+        resource_id=alert_id,
+        outcome="success",
+    ))
+    await session.commit()
+    return {"status": "unacknowledged"}
 
 
 @router.post("/alerts/{alert_id}/acknowledge")

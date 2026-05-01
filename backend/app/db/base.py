@@ -31,6 +31,10 @@ engine = create_async_engine(
     _async_url(settings.database_url),
     echo=settings.app_debug,
     pool_pre_ping=True,
+    connect_args={
+        "prepared_statement_cache_size": 0,
+        "statement_cache_size": 0,
+    },
 )
 
 AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(

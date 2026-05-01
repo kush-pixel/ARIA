@@ -18,7 +18,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import anthropic
+# TEMP: OpenAI testing override — revert to `import anthropic` when switching back
+from openai import OpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -28,7 +29,8 @@ from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
 
-_MODEL_VERSION = "claude-sonnet-4-20250514"
+# TEMP: OpenAI gpt-4o-mini — revert to "claude-sonnet-4-20250514" when switching back
+_MODEL_VERSION = "gpt-4o-mini"
 
 # prompts/ lives at the project root — 4 levels above this file:
 # briefing/ -> services/ -> app/ -> backend/ -> ARIA root
@@ -137,18 +139,20 @@ async def generate_llm_summary(
     prompt_hash = _compute_prompt_hash(system_prompt)
     user_message = _build_user_message(briefing.llm_response)
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    client = OpenAI(api_key=settings.openai_api_key)
 
     # Attempt up to 2 times — retry once on validation failure before storing None
     summary_text: str | None = None
     for attempt in range(2):
-        message = client.messages.create(
+        message = client.chat.completions.create(
             model=_MODEL_VERSION,
             max_tokens=256,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_message}],
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
         )
-        candidate = message.content[0].text.strip()
+        candidate = message.choices[0].message.content.strip()
 
         result = await validate_llm_output(
             candidate,

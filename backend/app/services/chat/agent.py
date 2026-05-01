@@ -22,7 +22,9 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
-import anthropic
+# TEMP: OpenAI testing override — revert to `import anthropic` when switching back
+from openai import BadRequestError as OpenAIBadRequestError
+from openai import OpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -35,8 +37,9 @@ from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
 
-_MODEL = "claude-sonnet-4-20250514"
-_MAX_TOOL_ROUNDS = 5
+# TEMP: OpenAI gpt-4o-mini — revert to "claude-sonnet-4-20250514" when switching back
+_MODEL = "gpt-4o-mini"
+_MAX_TOOL_ROUNDS = 3
 _PROMPT_PATH = Path(__file__).resolve().parents[4] / "prompts" / "chat_system_prompt.md"
 
 # Keywords that indicate a patient-clinical question — at least one must be present
@@ -63,6 +66,21 @@ _OFF_TOPIC_RESPONSE = json.dumps({
     "confidence": "no_data",
     "data_gaps": [],
 })
+
+
+def _to_groq_tools(schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert Anthropic-format tool schemas to OpenAI/Groq function-calling format."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": s["name"],
+                "description": s["description"],
+                "parameters": s["input_schema"],
+            },
+        }
+        for s in schemas
+    ]
 
 
 def _is_off_topic(question: str) -> bool:
@@ -193,27 +211,19 @@ async def run_agent(
         })
         return
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    client = OpenAI(api_key=settings.openai_api_key)
+    groq_tools = _to_groq_tools(TOOL_SCHEMAS)
 
     system_prompt = _load_system_prompt()
     patient_context = await _build_patient_context(patient_id, db_session)
-
-    # System with prompt caching: system prompt + patient context both cached
-    system_blocks = [
-        {
-            "type": "text",
-            "text": system_prompt,
-            "cache_control": {"type": "ephemeral"},
-        },
-        {
-            "type": "text",
-            "text": patient_context,
-            "cache_control": {"type": "ephemeral"},
-        },
-    ]
+    system_content = system_prompt + "\n\n" + patient_context
 
     history = await session_store.get_history(clinician_id, patient_id, db_session)
-    messages: list[dict[str, Any]] = list(history) + [{"role": "user", "content": question}]
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_content},
+        *list(history),
+        {"role": "user", "content": question},
+    ]
 
     tool_results_accumulator: dict[str, Any] = {}
     tools_used: list[str] = []
@@ -221,87 +231,83 @@ async def run_agent(
 
     # ── Tool-use loop ──────────────────────────────────────────────────────────
     for round_num in range(_MAX_TOOL_ROUNDS):
-        response = client.messages.create(
-            model=_MODEL,
-            max_tokens=2048,
-            system=system_blocks,
-            tools=TOOL_SCHEMAS,
-            messages=messages,
-        )
+        try:
+            response = client.chat.completions.create(
+                model=_MODEL,
+                max_tokens=1024,
+                messages=messages,
+                tools=groq_tools,
+                tool_choice="auto",
+            )
+        except OpenAIBadRequestError as exc:
+            # Model emitted a malformed tool call (e.g. <function=null>) — fall back
+            # to a plain completion so the turn still produces an answer.
+            logger.warning("Groq tool_use_failed (round %d) — retrying without tools: %s", round_num + 1, exc)
+            fallback = client.chat.completions.create(
+                model=_MODEL,
+                max_tokens=1024,
+                messages=messages,
+            )
+            final_text = fallback.choices[0].message.content or ""
+            break
 
-        # Check if this round produced tool calls
-        tool_uses = [b for b in response.content if b.type == "tool_use"]
+        message = response.choices[0].message
+        tool_calls = message.tool_calls or []
 
-        if not tool_uses:
-            # No tool calls — extract text and break
-            for block in response.content:
-                if block.type == "text":
-                    final_text = block.text
+        if not tool_calls:
+            final_text = message.content or ""
             break
 
         # Notify frontend which tools are being called
-        for tool_use in tool_uses:
-            yield _sse("thinking", {"tool": tool_use.name, "round": round_num + 1})
-            tools_used.append(tool_use.name)
+        for tc in tool_calls:
+            yield _sse("thinking", {"tool": tc.function.name, "round": round_num + 1})
+            tools_used.append(tc.function.name)
 
-        # Execute tools
-        tool_result_blocks = []
-        for tool_use in tool_uses:
+        # Append assistant's tool_call turn to history
+        messages.append({
+            "role": "assistant",
+            "content": message.content,
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in tool_calls
+            ],
+        })
+
+        # Execute tools and append results
+        for tc in tool_calls:
             try:
                 result = await dispatch_tool(
-                    tool_name=tool_use.name,
-                    tool_input=tool_use.input,
+                    tool_name=tc.function.name,
+                    tool_input=json.loads(tc.function.arguments),
                     patient_id=patient_id,
                     session=db_session,
                 )
-                tool_results_accumulator[tool_use.name] = result
-                tool_result_blocks.append({
-                    "type": "tool_result",
-                    "tool_use_id": tool_use.id,
+                tool_results_accumulator[tc.function.name] = result
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
                     "content": json.dumps(result),
                 })
             except Exception as exc:
-                logger.error("Tool %s failed: %s", tool_use.name, exc)
-                tool_result_blocks.append({
-                    "type": "tool_result",
-                    "tool_use_id": tool_use.id,
+                logger.error("Tool %s failed: %s", tc.function.name, exc)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
                     "content": json.dumps({"error": str(exc), "data_available": False}),
-                    "is_error": True,
                 })
 
-        # Append assistant tool_use turn + tool results to message history
-        messages.append({"role": "assistant", "content": response.content})
-        messages.append({"role": "user", "content": tool_result_blocks})
-
-    # ── Stream final answer ────────────────────────────────────────────────────
+    # ── Synthesise after tool rounds if no text yet ────────────────────────────
     if not final_text:
-        # Force synthesis: tell the model to produce its final JSON answer now
-        synthesis_messages = messages + [{
-            "role": "user",
-            "content": (
-                "Based on all the tool results above, produce your final JSON answer now. "
-                "Synthesize everything returned — even if some tools had no data, summarize "
-                "what you do have and list gaps in data_gaps. Always return valid JSON."
-            ),
-        }]
-        final_response = client.messages.create(
+        final_response = client.chat.completions.create(
             model=_MODEL,
-            max_tokens=2048,
-            system=system_blocks,
-            messages=synthesis_messages,
+            max_tokens=1024,
+            messages=messages,
         )
-        for block in final_response.content:
-            if block.type == "text":
-                final_text = block.text
-                break
-
-    if not final_text:
-        final_text = json.dumps({
-            "answer": "I was unable to produce a response for this query. Please try rephrasing your question.",
-            "evidence": [],
-            "confidence": "no_data",
-            "data_gaps": ["Agent produced no text output"],
-        })
+        final_text = final_response.choices[0].message.content or ""
 
     # ── Parse + validate BEFORE streaming — blocked answers must not reach the screen ──
     parsed: ChatResponse = parse_response(final_text, tools_used=tools_used)
@@ -416,7 +422,7 @@ async def generate_proactive_suggestion(
     if not urgent and not agenda:
         return None
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    client = OpenAI(api_key=settings.openai_api_key)
 
     prompt = (
         "You are assisting a GP reviewing a patient briefing before a consultation.\n"
@@ -429,12 +435,12 @@ async def generate_proactive_suggestion(
     )
 
     try:
-        response = client.messages.create(
+        response = client.chat.completions.create(
             model=_MODEL,
             max_tokens=100,
             messages=[{"role": "user", "content": prompt}],
         )
-        suggestion = response.content[0].text.strip()
+        suggestion = response.choices[0].message.content.strip()
         # Basic safety check — skip if it contains forbidden phrases
         forbidden = ["prescribe", "diagnos", "non-adherent", "emergency", "mg"]
         if any(f in suggestion.lower() for f in forbidden):
