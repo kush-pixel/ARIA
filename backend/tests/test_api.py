@@ -9,7 +9,7 @@ Run:
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -57,6 +57,8 @@ def _make_patient(
     risk_tier: str = "high",
     risk_score: float = 74.5,
     monitoring_active: bool = True,
+    tier_override_source: str | None = "system",
+    tier_override_suppressed_until: datetime | None = None,
 ) -> MagicMock:
     p = MagicMock()
     p.patient_id = patient_id
@@ -64,11 +66,14 @@ def _make_patient(
     p.age = 67
     p.risk_tier = risk_tier
     p.tier_override = "CHF in problem list"
+    p.tier_override_source = tier_override_source
+    p.tier_override_suppressed_until = tier_override_suppressed_until
     p.risk_score = risk_score
     p.monitoring_active = monitoring_active
     p.next_appointment = datetime(2026, 4, 20, 9, 30, tzinfo=UTC)
     p.enrolled_at = datetime(2026, 1, 10, 8, 0, tzinfo=UTC)
     p.enrolled_by = "dr.mehta"
+    p.risk_score_computed_at = None
     return p
 
 
@@ -517,6 +522,146 @@ async def test_acknowledge_alert_invalid_disposition_rejected(client: AsyncClien
 
 
 # ---------------------------------------------------------------------------
+# Fix 42 L2 — Calibration recommendations
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_calibration_no_recommendation_below_threshold(client: AsyncClient):
+    """Fewer than 4 dismissals → calibration-recommendations returns empty list."""
+    session = _mock_session()
+    session.execute.side_effect = [
+        _all_result(),  # dismissal count query — no groups meeting threshold
+        _all_result(),  # active rules query — no active rules
+    ]
+
+    app.dependency_overrides[get_session] = lambda: session
+    resp = await client.get("/api/admin/calibration-recommendations")
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+@pytest.mark.asyncio
+async def test_calibration_recommendation_after_4_dismissals(client: AsyncClient):
+    """4 disagree dispositions for same patient+detector → recommendation surfaced."""
+    row = MagicMock()
+    row.patient_id = "1091"
+    row.detector_type = "inertia"
+    row.dismissal_count = 4
+
+    session = _mock_session()
+    session.execute.side_effect = [
+        _all_result(row),  # one group meeting threshold
+        _all_result(),     # no active rules — row is not filtered out
+    ]
+
+    app.dependency_overrides[get_session] = lambda: session
+    resp = await client.get("/api/admin/calibration-recommendations")
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["patient_id"] == "1091"
+    assert data[0]["detector_type"] == "inertia"
+    assert data[0]["dismissal_count"] == 4
+    assert data[0]["threshold"] == 4
+
+
+@pytest.mark.asyncio
+async def test_approve_calibration_rule_creates_active_rule(client: AsyncClient):
+    """POST /admin/calibration-rules creates an active suppression rule."""
+    session = _mock_session()
+    session.execute.return_value = MagicMock()  # UPDATE deactivate-old call
+
+    app.dependency_overrides[get_session] = lambda: session
+    resp = await client.post(
+        "/api/admin/calibration-rules",
+        json={
+            "patient_id": "1091",
+            "detector_type": "inertia",
+            "dismissal_count": 4,
+            "approved_by": "dr.mehta",
+        },
+    )
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["patient_id"] == "1091"
+    assert data["detector_type"] == "inertia"
+    assert data["active"] is True
+
+
+# ---------------------------------------------------------------------------
+# Fix 42 L3 — Outcome verification
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_outcome_check_scheduled_on_disagree(client: AsyncClient):
+    """Acknowledge with disposition=disagree → OutcomeVerification scheduled 30 days out."""
+    from app.models.outcome_verification import OutcomeVerification
+
+    alert = _make_alert(alert_id="a001", alert_type="inertia")
+    session = _mock_session()
+    session.execute.side_effect = [
+        _scalar_result(alert),  # select Alert by alert_id
+        MagicMock(),            # update Alert.acknowledged_at
+    ]
+    added: list = []
+    session.add = added.append
+
+    app.dependency_overrides[get_session] = lambda: session
+    resp = await client.post(
+        "/api/alerts/a001/acknowledge",
+        json={"disposition": "disagree", "reason_text": "stable for this patient"},
+    )
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert resp.json()["feedback_recorded"] is True
+
+    verifications = [o for o in added if isinstance(o, OutcomeVerification)]
+    assert len(verifications) == 1
+    v = verifications[0]
+    assert v.check_after - v.dismissed_at == timedelta(days=30)
+
+
+@pytest.mark.asyncio
+async def test_outcome_check_resolves_deterioration_cluster():
+    """run_outcome_checks sets outcome_type=deterioration_cluster when a concerning alert follows."""
+    from app.services.feedback.outcome_tracker import run_outcome_checks
+
+    dismissed = datetime(2026, 3, 1, 0, 0, tzinfo=UTC)
+    check_after = dismissed + timedelta(days=30)
+
+    verification = MagicMock()
+    verification.patient_id = "1091"
+    verification.alert_id = "a001"
+    verification.dismissed_at = dismissed
+    verification.check_after = check_after
+    verification.outcome_type = "pending"
+
+    concerning = MagicMock()
+    concerning.alert_type = "deterioration"
+
+    session = _mock_session()
+    session.execute.side_effect = [
+        _scalars_result(verification),  # pending verifications query
+        _scalar_result(concerning),     # concerning alert found after dismissed_at
+    ]
+
+    resolved = await run_outcome_checks(session)
+
+    assert resolved == 1
+    assert verification.outcome_type == "deterioration_cluster"
+    assert verification.prompted_at is not None
+
+
+# ---------------------------------------------------------------------------
 # GET /api/readings
 # ---------------------------------------------------------------------------
 
@@ -766,4 +911,131 @@ async def test_ingest_valid_bundle(client: AsyncClient):
         resp = await client.post("/api/ingest", json=bundle)
         app.dependency_overrides.clear()
 
-    assert resp.status_code == 201
+
+# ---------------------------------------------------------------------------
+# PATCH /api/patients/{id}/tier — clinician tier override
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tier_override_clinician_promotion(client: AsyncClient):
+    """Clinician promotes medium → high; tier_override_suppressed_until is None."""
+    patient = _make_patient(
+        risk_tier="medium",
+        tier_override_source=None,
+        tier_override_suppressed_until=None,
+    )
+    patient.tier_override = None
+    session = _mock_session()
+    session.execute.side_effect = [
+        _scalar_result(patient),   # fetch patient
+        _scalar_result(None),      # briefing check
+    ]
+
+    app.dependency_overrides[get_session] = lambda: session
+    resp = await client.patch(
+        "/api/patients/1091/tier",
+        json={"risk_tier": "high", "reason": "Acute readings at last clinic visit"},
+    )
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["risk_tier"] == "high"
+    assert data["tier_override_source"] == "clinician"
+    # Promotion — no suppression window
+    assert data["tier_override_suppressed_until"] is None
+    assert session.add.called
+
+
+@pytest.mark.asyncio
+async def test_tier_override_clinician_demotion_sets_suppression(client: AsyncClient):
+    """Clinician demotes high → medium; suppressed_until is set ~14 days from now."""
+    patient = _make_patient(
+        risk_tier="high",
+        tier_override_source="system_score",
+        tier_override_suppressed_until=None,
+    )
+    patient.tier_override = "Sustained high risk score"
+    session = _mock_session()
+    session.execute.side_effect = [
+        _scalar_result(patient),   # fetch patient
+        _scalar_result(None),      # briefing check
+    ]
+
+    app.dependency_overrides[get_session] = lambda: session
+    resp = await client.patch(
+        "/api/patients/1091/tier",
+        json={"risk_tier": "medium", "reason": "BP well controlled over 6 months"},
+    )
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["risk_tier"] == "medium"
+    assert data["tier_override_source"] == "clinician"
+    # Demotion — suppression window must be set
+    assert data["tier_override_suppressed_until"] is not None
+    suppressed_dt = datetime.fromisoformat(data["tier_override_suppressed_until"])
+    days_ahead = (suppressed_dt - datetime.now(UTC)).days
+    assert 13 <= days_ahead <= 14
+
+
+@pytest.mark.asyncio
+async def test_tier_override_blocked_for_system_source(client: AsyncClient):
+    """Returns 409 when tier_override_source is 'system' (auto-override active)."""
+    patient = _make_patient(risk_tier="high", tier_override_source="system")
+    session = _mock_session()
+    session.execute.return_value = _scalar_result(patient)
+
+    app.dependency_overrides[get_session] = lambda: session
+    resp = await client.patch(
+        "/api/patients/1091/tier",
+        json={"risk_tier": "medium", "reason": "Feels stable"},
+    )
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 409
+    assert "Auto-override active" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_tier_override_patient_not_found(client: AsyncClient):
+    """Returns 404 when patient does not exist."""
+    session = _mock_session()
+    session.execute.return_value = _scalar_result(None)
+
+    app.dependency_overrides[get_session] = lambda: session
+    resp = await client.patch(
+        "/api/patients/MISSING/tier",
+        json={"risk_tier": "high", "reason": "Escalation"},
+    )
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_tier_override_rejects_invalid_tier(client: AsyncClient):
+    """Returns 422 for an unrecognised tier value."""
+    app.dependency_overrides[get_session] = lambda: _mock_session()
+    resp = await client.patch(
+        "/api/patients/1091/tier",
+        json={"risk_tier": "critical", "reason": "Test"},
+    )
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_tier_override_rejects_empty_reason(client: AsyncClient):
+    """Returns 422 when reason is an empty string."""
+    app.dependency_overrides[get_session] = lambda: _mock_session()
+    resp = await client.patch(
+        "/api/patients/1091/tier",
+        json={"risk_tier": "high", "reason": ""},
+    )
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 422

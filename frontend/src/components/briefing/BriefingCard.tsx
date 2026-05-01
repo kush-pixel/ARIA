@@ -10,6 +10,7 @@ import {
   AlertTriangle, Info, FlaskConical, Pill, Activity,
   ClipboardList, Flag, Sparkles, Calendar,
 } from 'lucide-react'
+import { isHypertensionMedication, filterMedicationStatusText } from '@/lib/hypertension-meds'
 
 interface BriefingCardProps {
   patient: Patient
@@ -22,15 +23,20 @@ function Section({
   icon,
   title,
   accent = false,
+  tourId,
   children,
 }: {
   icon: React.ReactNode
   title: string
   accent?: boolean
+  tourId?: string
   children: React.ReactNode
 }) {
   return (
-    <section className="py-4 border-b border-gray-100 dark:border-[#1F2937] last:border-0">
+    <section
+      className="py-4 border-b border-gray-100 dark:border-[#1F2937] last:border-0"
+      {...(tourId ? { 'data-tour': tourId } : {})}
+    >
       <h2 className={`flex items-center gap-2 text-[13px] font-semibold uppercase tracking-widest mb-4
                       ${accent ? 'text-blue-600 dark:text-blue-400' : 'text-gray-400 dark:text-gray-500'}`}>
         <span>{icon}</span>
@@ -55,11 +61,12 @@ function formatApptTime(iso: string): string {
 
 export default function BriefingCard({ patient, briefing, readings, adherence }: BriefingCardProps) {
   const payload = briefing?.llm_response
+  const hypertensionAdherence = adherence.filter((a) => isHypertensionMedication(a.medication_name))
 
   return (
     <div className="card overflow-hidden">
       {/* Patient header */}
-      <div className="px-6 py-5 border-b border-gray-100 dark:border-[#1F2937]
+      <div data-tour="briefing-header" className="px-6 py-5 border-b border-gray-100 dark:border-[#1F2937]
                       bg-gray-50 dark:bg-[#0B1220]">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
@@ -102,7 +109,7 @@ export default function BriefingCard({ patient, briefing, readings, adherence }:
 
       {/* AI Summary (Layer 3) */}
       {payload?.readable_summary && (
-        <div className="px-6 py-4 bg-blue-50 dark:bg-blue-900/10 border-b border-blue-100 dark:border-blue-900/30">
+        <div data-tour="briefing-ai-summary" className="px-6 py-4 bg-blue-50 dark:bg-blue-900/10 border-b border-blue-100 dark:border-blue-900/30">
           <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-widest text-blue-600 dark:text-blue-400 mb-2">
             <Sparkles size={12} strokeWidth={2} />
             AI Summary
@@ -137,7 +144,7 @@ export default function BriefingCard({ patient, briefing, readings, adherence }:
         ) : (
           <>
             {/* BP Trend + chart */}
-            <Section icon={<Activity size={14} strokeWidth={2} />} title="BP Trend" accent>
+            <Section icon={<Activity size={14} strokeWidth={2} />} title="BP Trend" accent tourId="briefing-bp-trend">
               <p className="mb-5">{payload?.trend_summary}</p>
               {readings.length > 0 && (
                 <div className="-mx-2">
@@ -147,14 +154,16 @@ export default function BriefingCard({ patient, briefing, readings, adherence }:
             </Section>
 
             {/* Medication */}
-            <Section icon={<Pill size={14} strokeWidth={2} />} title="Medication Status">
-              <p>{payload?.medication_status}</p>
+            <Section icon={<Pill size={14} strokeWidth={2} />} title="Medication Status" tourId="briefing-medication">
+              <p>{filterMedicationStatusText(payload?.medication_status)}</p>
             </Section>
 
             {/* Adherence */}
-            <Section icon={<ClipboardList size={14} strokeWidth={2} />} title="Adherence Signal">
-              {adherence.length > 0 ? (
-                <AdherenceSummary adherence={adherence} patternText={payload?.adherence_summary} />
+            <Section icon={<ClipboardList size={14} strokeWidth={2} />} title="Adherence Signal" tourId="briefing-adherence">
+              {hypertensionAdherence.length > 0 ? (
+                <AdherenceSummary adherence={hypertensionAdherence} />
+              ) : adherence.length > 0 ? (
+                <p className="text-gray-500 italic">No antihypertensive medications found in adherence data.</p>
               ) : (
                 <p className="text-gray-500 italic">{payload?.adherence_summary}</p>
               )}
@@ -162,13 +171,15 @@ export default function BriefingCard({ patient, briefing, readings, adherence }:
 
             {/* Active problems */}
             {payload?.active_problems && payload.active_problems.length > 0 && (
-              <Section icon={<Flag size={14} strokeWidth={2} />} title="Active Problems">
-                <div className="flex flex-wrap gap-2">
+              <Section icon={<Flag size={14} strokeWidth={2} />} title="Active Problems" tourId="briefing-problems">
+                <div className="flex flex-wrap gap-1.5">
                   {payload.active_problems.map((problem) => (
                     <span
                       key={problem}
-                      className="inline-block bg-gray-100 dark:bg-[#1F2937] text-gray-700 dark:text-gray-300
-                                 text-[13px] font-medium px-3 py-1.5 rounded-lg border border-gray-200 dark:border-[#374151]"
+                      className="inline-block text-[12px] font-medium px-2.5 py-1 rounded-md
+                                 bg-gray-100 dark:bg-[#1F2937]
+                                 text-gray-600 dark:text-gray-400
+                                 border border-gray-200 dark:border-[#374151]"
                     >
                       {problem}
                     </span>
@@ -179,7 +190,7 @@ export default function BriefingCard({ patient, briefing, readings, adherence }:
 
             {/* Overdue labs */}
             {payload?.overdue_labs && payload.overdue_labs.length > 0 && (
-              <section className="py-6 border-b border-gray-100 dark:border-[#1F2937]">
+              <section data-tour="briefing-overdue-labs" className="py-6 border-b border-gray-100 dark:border-[#1F2937]">
                 <h2 className="flex items-center gap-2 text-[13px] font-semibold uppercase tracking-widest text-red-600 dark:text-red-400 mb-4">
                   <FlaskConical size={14} strokeWidth={2} />
                   Overdue Investigations
@@ -196,7 +207,7 @@ export default function BriefingCard({ patient, briefing, readings, adherence }:
             )}
 
             {/* Visit agenda */}
-            <Section icon={<ClipboardList size={14} strokeWidth={2} />} title="Visit Agenda" accent>
+            <Section icon={<ClipboardList size={14} strokeWidth={2} />} title="Visit Agenda" accent tourId="briefing-agenda">
               <VisitAgenda items={payload?.visit_agenda ?? []} />
             </Section>
 

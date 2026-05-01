@@ -2,12 +2,11 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { getPatients, getReadings } from '@/lib/api'
-import type { Patient, RiskTier } from '@/lib/types'
+import { getPatients, getReadings, getPatientBaseline } from '@/lib/api'
+import type { Patient, Reading, RiskTier } from '@/lib/types'
 import RiskTierBadge from './RiskTierBadge'
 import RiskScoreBar from './RiskScoreBar'
-import MiniSparkline from './MiniSparkline'
-import { FileText, Clock, AlertTriangle, ChevronLeft, ChevronRight, Users } from 'lucide-react'
+import { Clock, AlertTriangle, ChevronLeft, ChevronRight, Users } from 'lucide-react'
 
 const PAGE_SIZE = 10
 
@@ -17,6 +16,82 @@ const TIER_FILTERS: Array<{ value: RiskTier | 'all'; label: string }> = [
   { value: 'medium', label: 'Medium Risk' },
   { value: 'low',    label: 'Low Risk' },
 ]
+
+// ── BP Trend ──────────────────────────────────────────────────────────────────
+
+type BpTrendLabel = 'Low' | 'Stable' | 'High'
+
+interface BpTrend {
+  label: BpTrendLabel
+  threshold: string
+  className: string
+  dot: string
+}
+
+function computeBpTrend(readings: Reading[], baseline: number): BpTrend | null {
+  const home = readings
+    .filter((r) => r.source !== 'clinic')
+    .sort((a, b) => new Date(a.effective_datetime).getTime() - new Date(b.effective_datetime).getTime())
+  if (home.length < 3) return null
+
+  const recent = home.slice(-7)
+  const avg = Math.round(recent.reduce((s, r) => s + r.systolic_avg, 0) / recent.length)
+  const b = Math.round(baseline)
+
+  // Low  = more than 15 mmHg below personal baseline
+  // Stable = within ±15 of baseline
+  // High = more than 15 mmHg above baseline
+  if (avg < b - 15) {
+    return {
+      label: 'Low',
+      threshold: `${avg} mmHg · baseline ${b}`,
+      className: 'bg-blue-50 text-blue-600 dark:bg-blue-900/20 dark:text-blue-400 border border-blue-200 dark:border-blue-800',
+      dot: 'bg-blue-500',
+    }
+  }
+  if (avg <= b + 15) {
+    return {
+      label: 'Stable',
+      threshold: `${avg} mmHg · baseline ${b}`,
+      className: 'bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400 border border-green-200 dark:border-green-800',
+      dot: 'bg-green-500',
+    }
+  }
+  return {
+    label: 'High',
+    threshold: `${avg} mmHg · baseline ${b}`,
+    className: 'bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400 border border-red-200 dark:border-red-800',
+    dot: 'bg-red-500',
+  }
+}
+
+// ── Chief Concern ─────────────────────────────────────────────────────────────
+
+const CONDITION_MAP: Array<{ match: RegExp; label: string }> = [
+  { match: /chf|heart failure|i50/i,      label: 'CHF' },
+  { match: /stroke|i63|i64/i,             label: 'Stroke' },
+  { match: /tia|g45/i,                    label: 'TIA' },
+  { match: /diabet|e11/i,                 label: 'Diabetes' },
+  { match: /ckd|renal|n18/i,              label: 'CKD' },
+  { match: /cad|coronary|i25/i,           label: 'CAD' },
+  { match: /hypertension|htn|i10/i,       label: 'Hypertension' },
+  { match: /afib|atrial.?fib|i48/i,       label: 'AF' },
+  { match: /asthma|j45/i,                 label: 'Asthma' },
+  { match: /copd|j44/i,                   label: 'COPD' },
+]
+
+function deriveChiefConcern(patient: Patient): string | null {
+  const source = patient.tier_override ?? ''
+  if (!source) return null
+  const found: string[] = []
+  for (const { match, label } of CONDITION_MAP) {
+    if (match.test(source) && !found.includes(label)) found.push(label)
+  }
+  if (!found.includes('Hypertension')) found.push('Hypertension')
+  return found.slice(0, 3).join(' + ')
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function formatApptTime(iso: string): string {
   return new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
@@ -35,35 +110,34 @@ function isToday(iso: string): boolean {
     d.getDate() === now.getDate()
 }
 
+// ── Component ─────────────────────────────────────────────────────────────────
+
+// Column layout: Patient | Chronic Risk | Chief Concern | Priority Score | Appointment | BP Trend
+const COLS = 'grid-cols-[1fr_110px_160px_150px_96px_140px]'
+
 export default function PatientList() {
   const router = useRouter()
   const [patients, setPatients] = useState<Patient[]>([])
   const [loading, setLoading] = useState(true)
   const [tierFilter, setTierFilter] = useState<RiskTier | 'all'>('all')
   const [page, setPage] = useState(1)
-  // Map of patient_id → sorted systolic values (last 14)
-  const [sparklines, setSparklines] = useState<Record<string, number[]>>({})
+  const [bpTrends, setBpTrends] = useState<Record<string, BpTrend | null>>({})
 
   useEffect(() => {
     getPatients().then((data) => {
       setPatients(data)
       setLoading(false)
-      // Fetch readings for all patients in parallel after list loads
       Promise.all(
         data.map((p) =>
-          getReadings(p.patient_id)
-            .then((readings) => {
-              const values = readings
-                .filter((r) => r.source !== 'clinic')
-                .sort((a, b) => new Date(a.effective_datetime).getTime() - new Date(b.effective_datetime).getTime())
-                .map((r) => r.systolic_avg)
-              return [p.patient_id, values] as [string, number[]]
-            })
-            .catch(() => [p.patient_id, []] as [string, number[]])
+          Promise.all([
+            getReadings(p.patient_id).catch(() => [] as Reading[]),
+            getPatientBaseline(p.patient_id),
+          ]).then(([readings, { baseline_systolic }]) => [
+            p.patient_id,
+            computeBpTrend(readings, baseline_systolic),
+          ] as [string, BpTrend | null])
         )
-      ).then((entries) => {
-        setSparklines(Object.fromEntries(entries))
-      })
+      ).then((entries) => setBpTrends(Object.fromEntries(entries)))
     })
   }, [])
 
@@ -121,18 +195,17 @@ export default function PatientList() {
 
       {/* Table */}
       <div className="card overflow-hidden">
-        {/* Header — added BP Trend column */}
-        <div className="grid grid-cols-[1fr_130px_160px_100px_96px_56px] gap-4
-                        px-6 py-3
+        {/* Header */}
+        <div className={`grid ${COLS} gap-4 px-6 py-3
                         bg-gray-50 dark:bg-[#0B1220]
                         border-b border-gray-100 dark:border-[#1F2937]
-                        text-[11px] font-semibold uppercase tracking-widest text-gray-400 dark:text-gray-500">
+                        text-[11px] font-semibold uppercase tracking-widest text-gray-400 dark:text-gray-500`}>
           <span>Patient</span>
-          <span>Risk Tier</span>
-          <span>Priority Score</span>
-          <span>Appointment</span>
-          <span>BP Trend</span>
-          <span className="text-center">Briefing</span>
+          <span className="text-center" data-tour="patient-chronic-risk">Chronic Risk</span>
+          <span className="text-center" data-tour="patient-chief-concern">Chief Concern</span>
+          <span className="text-center" data-tour="patient-priority-score">Priority Score</span>
+          <span className="text-center" data-tour="patient-bp-trend">BP Trend</span>
+          <span className="text-center" data-tour="patient-appointment">Appointment</span>
         </div>
 
         {/* Rows */}
@@ -144,55 +217,80 @@ export default function PatientList() {
         ) : (
           pageSlice.map((patient, idx) => {
             const apptToday = patient.next_appointment && isToday(patient.next_appointment)
-            const hasBriefing = patient.has_briefing
-            const sparkValues = sparklines[patient.patient_id] ?? []
+            const trend = bpTrends[patient.patient_id]
+            const chiefConcern = deriveChiefConcern(patient)
+            const isLast = idx === pageSlice.length - 1
 
             return (
-              <button
+              <div
                 key={patient.patient_id}
-                onClick={() => router.push(`/patients/${patient.patient_id}`)}
-                aria-label={`View briefing for patient ${patient.patient_id}`}
-                className={`w-full text-left grid grid-cols-[1fr_130px_160px_100px_96px_56px] gap-4
-                            px-6 py-4 items-center
-                            hover:bg-blue-50/60 dark:hover:bg-blue-900/10
-                            transition-colors duration-100 cursor-pointer
-                            ${idx !== pageSlice.length - 1
-                              ? 'border-b border-gray-50 dark:border-[#1F2937]'
-                              : ''}`}
+                className={`grid ${COLS} gap-4 px-6 py-4 items-center
+                            ${!isLast ? 'border-b border-gray-50 dark:border-[#1F2937]' : ''}
+                            hover:bg-blue-50/60 dark:hover:bg-blue-900/10 transition-colors duration-100`}
               >
-                {/* Patient */}
-                <div>
+                {/* Patient — clickable */}
+                <button
+                  onClick={() => router.push(`/patients/${patient.patient_id}`)}
+                  className="text-left"
+                >
                   <p className="text-[15px] font-semibold text-gray-900 dark:text-gray-100">
                     Patient {patient.patient_id}
                   </p>
                   <p className="text-[13px] text-gray-400 dark:text-gray-500 mt-0.5">
                     {patient.gender === 'M' ? 'Male' : patient.gender === 'F' ? 'Female' : 'Unknown'}, {patient.age} yrs
-                    {patient.tier_override && (
-                      <span className="ml-2 text-amber-600 dark:text-amber-400">
-                        · {patient.tier_override}
-                      </span>
-                    )}
                   </p>
-                </div>
+                </button>
 
-                {/* Tier */}
-                <div>
+                {/* Chronic Risk */}
+                <button onClick={() => router.push(`/patients/${patient.patient_id}`)} className="flex justify-center">
                   <RiskTierBadge tier={patient.risk_tier} size="sm" />
-                </div>
+                </button>
 
-                {/* Score */}
-                <div>
+                {/* Chief Concern */}
+                <button onClick={() => router.push(`/patients/${patient.patient_id}`)} className="flex justify-center">
+                  {chiefConcern ? (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg
+                                     bg-indigo-50 dark:bg-indigo-900/20
+                                     border border-indigo-200 dark:border-indigo-800
+                                     text-[12px] font-semibold
+                                     text-indigo-700 dark:text-indigo-300 whitespace-nowrap">
+                      {chiefConcern}
+                    </span>
+                  ) : (
+                    <span className="text-[13px] text-gray-300 dark:text-gray-700">—</span>
+                  )}
+                </button>
+
+                {/* Priority Score */}
+                <button onClick={() => router.push(`/patients/${patient.patient_id}`)} className="flex flex-col items-center">
                   <RiskScoreBar score={patient.risk_score} tier={patient.risk_tier} />
                   {isScoreStale(patient.risk_score_computed_at) && (
                     <div className="flex items-center gap-1 mt-1 text-[11px] text-amber-500">
                       <AlertTriangle size={10} strokeWidth={2} />
-                      <span>Score stale</span>
+                      <span>Score outdated (&gt;26h)</span>
                     </div>
                   )}
-                </div>
+                </button>
+
+                {/* BP Trend + threshold */}
+                <button onClick={() => router.push(`/patients/${patient.patient_id}`)} className="flex flex-col items-center">
+                  {trend ? (
+                    <div className="flex flex-col items-center">
+                      <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[12px] font-semibold ${trend.className}`}>
+                        <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${trend.dot}`} />
+                        {trend.label}
+                      </span>
+                      <p className="text-[10px] text-gray-400 dark:text-gray-600 mt-1">
+                        {trend.threshold}
+                      </p>
+                    </div>
+                  ) : (
+                    <span className="text-[12px] text-gray-300 dark:text-gray-700">No data</span>
+                  )}
+                </button>
 
                 {/* Appointment */}
-                <div>
+                <button onClick={() => router.push(`/patients/${patient.patient_id}`)} className="flex justify-center">
                   {patient.next_appointment && apptToday ? (
                     <span className="inline-flex items-center gap-1.5 text-[13px] font-semibold text-blue-600 dark:text-blue-400">
                       <Clock size={13} strokeWidth={2} />
@@ -201,34 +299,9 @@ export default function PatientList() {
                   ) : (
                     <span className="text-[13px] text-gray-300 dark:text-gray-700">—</span>
                   )}
-                </div>
+                </button>
 
-                {/* BP Sparkline */}
-                <div className="flex items-center">
-                  {sparkValues.length >= 2 ? (
-                    <div>
-                      <MiniSparkline values={sparkValues} tier={patient.risk_tier} />
-                      <p className="text-[10px] text-gray-400 dark:text-gray-600 mt-0.5 tabular-nums">
-                        {sparkValues[sparkValues.length - 1].toFixed(0)} mmHg
-                      </p>
-                    </div>
-                  ) : (
-                    <span className="text-[11px] text-gray-300 dark:text-gray-700">No data</span>
-                  )}
-                </div>
-
-                {/* Briefing icon */}
-                <div className="flex justify-center">
-                  <FileText
-                    size={17}
-                    strokeWidth={1.75}
-                    className={hasBriefing
-                      ? 'text-blue-600 dark:text-blue-400'
-                      : 'text-gray-200 dark:text-gray-800'}
-                    aria-label={hasBriefing ? 'Briefing ready' : 'No briefing'}
-                  />
-                </div>
-              </button>
+              </div>
             )
           })
         )}

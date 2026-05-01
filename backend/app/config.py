@@ -19,6 +19,8 @@ class Settings(BaseSettings):
 
     # Anthropic / AI
     anthropic_api_key: str = Field("", description="Anthropic API key for Layer 3 LLM")
+    # OpenAI — temporary testing override; remove when reverting to Anthropic
+    openai_api_key: str = Field("", description="OpenAI API key (testing only — swap back to Anthropic)")
 
     # Application
     app_env: str = Field("development", description="development | staging | production")
@@ -28,6 +30,15 @@ class Settings(BaseSettings):
     # Feature flags
     demo_mode: bool = Field(False, description="Demo mode: enables admin trigger endpoints")
     briefing_trigger: str = Field("07:30", description="Daily briefing generation time HH:MM UTC")
+
+    # Patient PWA
+    patient_app_url: str = Field("", description="Patient PWA origin for CORS (Vercel URL)")
+
+    # Auth
+    patient_jwt_secret: str = Field(
+        "",
+        description="Separate JWT secret for patient tokens (blast-radius isolation from clinician JWT).",
+    )
 
     # Security (Fix 35, 36)
     patient_pseudonym_key: str = Field(

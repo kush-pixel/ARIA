@@ -35,7 +35,7 @@ class OutcomeVerification(Base):
     patient_id: Mapped[str] = mapped_column(String, nullable=False)
     dismissed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     check_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    # pending → deterioration_cluster | urgent_visit | none (set when check runs)
+    # pending | deterioration_cluster | none  (set by run_outcome_checks sweep)
     outcome_type: Mapped[str] = mapped_column(String, nullable=False, default="pending")
     prompted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

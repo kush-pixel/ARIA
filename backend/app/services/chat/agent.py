@@ -1,0 +1,613 @@
+"""ARIA clinical chatbot agent.
+
+Multi-turn tool-use loop with Anthropic prompt caching and SSE streaming.
+The agent runs up to MAX_TOOL_ROUNDS of tool calls per question, then
+streams the final answer back token-by-token.
+
+Public API:
+  run_agent(question, patient_id, clinician_id, db_session) → AsyncGenerator[str, None]
+    Yields SSE-formatted event strings.
+
+  generate_suggested_questions(briefing_payload) → list[str]
+    Returns 3-4 suggested question strings based on Layer 1 signals.
+
+  generate_proactive_suggestion(briefing_payload, db_session, patient_id) → str | None
+    Returns one proactive question the clinician should consider, or None.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import AsyncGenerator
+from pathlib import Path
+from typing import Any
+
+# TEMP: OpenAI testing override — revert to `import anthropic` when switching back
+from openai import BadRequestError as OpenAIBadRequestError
+from openai import OpenAI
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import settings
+from app.services.briefing.llm_validator import ValidationResult
+from app.services.chat import session as session_store
+from app.services.chat.formatter import ChatResponse, make_blocked_response, parse_response
+from app.services.chat.tools import TOOL_SCHEMAS, dispatch_tool, get_briefing, get_clinical_context
+from app.services.chat.validator import validate_chat_response
+from app.utils.logging_utils import get_logger
+
+logger = get_logger(__name__)
+
+# TEMP: OpenAI gpt-4o-mini — revert to "claude-sonnet-4-20250514" when switching back
+_MODEL = "gpt-4o-mini"
+_MAX_TOOL_ROUNDS = 3
+_PROMPT_PATH = Path(__file__).resolve().parents[4] / "prompts" / "chat_system_prompt.md"
+
+# Keywords that indicate a patient-clinical question — at least one must be present
+_CLINICAL_KEYWORDS: frozenset[str] = frozenset({
+    "patient", "bp", "blood pressure", "systolic", "diastolic",
+    "medication", "med", "drug", "adherence", "dose", "dosage",
+    "reading", "readings", "trend", "alert", "briefing", "lab",
+    "clinical", "appointment", "condition", "problem", "hypertension",
+    "heart rate", "pulse", "monitoring", "monitor", "mmhg",
+    "prescribed", "prescription", "missed", "average", "baseline",
+    "risk", "inertia", "gap", "deterioration", "flag", "urgent",
+    "overdue", "visit", "summary", "compare", "history", "result",
+    "score", "tier", "last week", "last month", "past week", "past month",
+    "recent", "current", "today", "yesterday", "days", "weeks", "months",
+    "how is", "how has", "what is", "what are", "what was", "what were",
+    "when did", "when was", "why did", "why is", "why was", "show me",
+    "tell me", "explain", "describe", "any", "latest", "highest", "lowest",
+    "morning", "evening", "session", "confirmed", "pattern",
+})
+
+_OFF_TOPIC_RESPONSE = json.dumps({
+    "answer": "I can only answer questions about this patient's clinical data in ARIA. Please ask about BP trends, medications, adherence, lab results, or clinical alerts.",
+    "confidence": "no_data",
+    "data_gaps": [],
+})
+
+_SOCIAL_GREETINGS: frozenset[str] = frozenset({
+    "hi", "hello", "hey", "good morning", "good afternoon", "good evening",
+    "howdy", "greetings", "morning", "afternoon", "evening",
+})
+
+_SOCIAL_THANKS: frozenset[str] = frozenset({
+    "thank you", "thanks", "thank u", "thx", "ty", "cheers", "appreciate it",
+    "appreciated", "that's helpful", "that was helpful", "helpful",
+})
+
+_SOCIAL_FAREWELLS: frozenset[str] = frozenset({
+    "bye", "goodbye", "see you", "see ya", "take care", "later", "good night",
+    "goodnight", "ciao", "farewell",
+})
+
+_SOCIAL_AFFIRM: frozenset[str] = frozenset({
+    "ok", "okay", "got it", "understood", "sure", "alright", "sounds good",
+    "great", "perfect", "noted",
+})
+
+_SOCIAL_REPLIES: dict[str, str] = {
+    "greeting": "Hi! Ready to help with your pre-visit review. Ask me anything about this patient — BP, medications, adherence, or why something was flagged.",
+    "thanks": "Of course. Anything else about this patient?",
+    "farewell": "Good luck with the consultation.",
+    "affirm": "Got it — what would you like to know about this patient?",
+    "no": "No problem. Let me know if anything else comes up.",
+}
+
+
+def _social_reply(question: str) -> str | None:
+    """Return a canned reply for social phrases, or None if not social."""
+    q = question.lower().strip().rstrip("!.,?")
+    if any(q == phrase or q.startswith(phrase) for phrase in _SOCIAL_GREETINGS):
+        return _SOCIAL_REPLIES["greeting"]
+    if any(phrase in q for phrase in _SOCIAL_THANKS):
+        return _SOCIAL_REPLIES["thanks"]
+    if any(q == phrase or q.startswith(phrase) for phrase in _SOCIAL_FAREWELLS):
+        return _SOCIAL_REPLIES["farewell"]
+    if q in _SOCIAL_AFFIRM:
+        return _SOCIAL_REPLIES["affirm"]
+    if q in {"no", "nope", "nah", "not really", "no thanks"}:
+        return _SOCIAL_REPLIES["no"]
+    return None
+
+
+def _to_groq_tools(schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert Anthropic-format tool schemas to OpenAI/Groq function-calling format."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": s["name"],
+                "description": s["description"],
+                "parameters": s["input_schema"],
+            },
+        }
+        for s in schemas
+    ]
+
+
+def _is_off_topic(question: str) -> bool:
+    """Return True only if the question is clearly non-clinical with no clinical keywords.
+
+    Social phrases (greetings, thanks, farewells) are always allowed through —
+    the social reply handler deals with them before the LLM is called.
+    Short questions ("why?", "how?") are allowed through — context from history
+    makes them clinical even without explicit keywords.
+    """
+    q_lower = question.strip().lower()
+
+    # Very short follow-ups always belong to the clinical conversation
+    if len(q_lower.split()) <= 4:
+        return False
+
+    return not any(kw in q_lower for kw in _CLINICAL_KEYWORDS)
+
+
+def _load_system_prompt() -> str:
+    """Load the chatbot system prompt from prompts/chat_system_prompt.md."""
+    if not _PROMPT_PATH.exists():
+        raise FileNotFoundError(
+            f"Chat system prompt not found at {_PROMPT_PATH}. "
+            "Ensure prompts/chat_system_prompt.md exists."
+        )
+    return _PROMPT_PATH.read_text(encoding="utf-8")
+
+
+async def _build_patient_context(
+    patient_id: str,
+    db_session: AsyncSession,
+) -> str:
+    """Pre-load patient context for prompt caching.
+
+    Fetches briefing + clinical context once per session and formats as a
+    structured string block injected into the cached system content.
+
+    Args:
+        patient_id: Patient identifier.
+        db_session: Async DB session.
+
+    Returns:
+        Formatted patient context string.
+    """
+    from app.services.chat.tools import get_patient_alerts as _get_alerts
+
+    briefing = await get_briefing(db_session, patient_id)
+    ctx = await get_clinical_context(db_session, patient_id)
+
+    lines = ["## Patient Context — ID: [REDACTED]"]
+
+    if briefing.get("data_available"):
+        lines.append(f"Risk score: {briefing.get('risk_score')}")
+        lines.append(f"Urgent flags: {', '.join(briefing.get('urgent_flags', [])) or 'None'}")
+        lines.append(f"Active problems: {', '.join(briefing.get('active_problems', [])) or 'None'}")
+        lines.append(f"Trend summary: {briefing.get('trend_summary', 'N/A')}")
+        lines.append(f"Medication status: {briefing.get('medication_status', 'N/A')}")
+        lines.append(f"Visit agenda: {'; '.join(briefing.get('visit_agenda', [])) or 'None'}")
+        lines.append(f"Overdue labs: {', '.join(briefing.get('overdue_labs', [])) or 'None'}")
+    else:
+        # No briefing available (generated only at 7:30 AM on appointment days).
+        # Pre-load active alerts and problems so the LLM can answer "why flagged?"
+        # from cached context without relying on an empty tool result.
+        alerts_data = await _get_alerts(db_session, patient_id)
+        if alerts_data.get("data_available"):
+            alert_lines = [
+                f"{a['alert_type']} (triggered {a['triggered_at']})"
+                + (" escalated" if a.get("escalated") else "")
+                for a in alerts_data.get("alerts", [])
+            ]
+            lines.append(f"Active alerts: {'; '.join(alert_lines)}")
+        else:
+            lines.append("Active alerts: None")
+
+        if ctx.get("data_available"):
+            problems = ctx.get("active_problems") or []
+            if problems:
+                lines.append(f"Active problems: {', '.join(problems)}")
+
+    if ctx.get("data_available"):
+        lines.append(f"Last visit: {ctx.get('last_visit_date', 'unknown')}")
+        lines.append(f"Last clinic BP: {ctx.get('last_clinic_systolic')}/{ctx.get('last_clinic_diastolic')} mmHg")
+
+    return "\n".join(lines)
+
+
+def _sse(event: str, data: Any) -> str:
+    """Format a Server-Sent Event string."""
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+_FOLLOWUP_POOL: dict[str, list[str]] = {
+    "get_patient_readings": [
+        "Were there any monitoring gaps during this period?",
+        "How does this compare to 3 months ago?",
+        "What is the difference between morning and evening readings?",
+        "Which week had the highest average systolic?",
+        "Has variability in readings changed recently?",
+    ],
+    "get_medication_history": [
+        "When was the last medication change made?",
+        "Are any medications newly added or recently stopped?",
+        "What is the full current drug regimen?",
+        "Has the regimen changed since the last visit?",
+        "What is the current adherence rate?",
+    ],
+    "get_adherence_summary": [
+        "Which medication had the most missed doses?",
+        "How does adherence compare to the previous month?",
+        "Is there a pattern between missed doses and elevated readings?",
+        "What is the overall adherence rate across all medications?",
+        "Were there any weeks with particularly low adherence?",
+    ],
+    "get_briefing": [
+        "Are there any overdue labs flagged?",
+        "What is the patient's current risk score?",
+        "Which alerts are currently active and unacknowledged?",
+        "What is on the visit agenda for today?",
+        "What does the trend summary say about the last 28 days?",
+    ],
+    "get_clinical_context": [
+        "When was the last clinic visit?",
+        "What active conditions are in the problem list?",
+        "What was the BP recorded at the last clinic visit?",
+        "Are there any known drug allergies?",
+        "What comorbidities are relevant to the BP management?",
+    ],
+}
+
+_STOPWORDS: frozenset[str] = frozenset({
+    "the", "a", "an", "is", "are", "was", "were", "be", "been",
+    "have", "has", "had", "do", "does", "did", "will", "would",
+    "can", "could", "should", "may", "might", "this", "that",
+    "there", "their", "what", "when", "how", "why", "which",
+    "any", "and", "or", "of", "in", "on", "at", "to", "for",
+    "with", "from", "by", "about", "during", "since", "than",
+    "most", "more", "some", "all", "no", "not",
+})
+
+
+def _significant_words(text: str) -> frozenset[str]:
+    """Return lower-cased words longer than 3 chars that are not stopwords."""
+    return frozenset(
+        w for w in text.lower().split()
+        if len(w) > 3 and w.strip("?.,!") not in _STOPWORDS
+    )
+
+
+def _generate_followup_questions(tools_used: list[str], question: str) -> list[str]:
+    """Generate 2-3 contextual follow-up question chips based on tools called.
+
+    Filters out any candidate that substantially overlaps with the original
+    question so chips are always distinct from what was just asked.
+
+    Args:
+        tools_used: List of tool names called during this agent turn.
+        question: The clinician's original question for this turn.
+
+    Returns:
+        Up to 3 follow-up question strings.
+    """
+    asked_words = _significant_words(question)
+    seen = set(tools_used)
+    candidates: list[str] = []
+
+    for tool in seen:
+        candidates.extend(_FOLLOWUP_POOL.get(tool, []))
+
+    # Deduplicate while preserving order
+    seen_qs: set[str] = set()
+    unique: list[str] = []
+    for q in candidates:
+        if q not in seen_qs:
+            seen_qs.add(q)
+            unique.append(q)
+
+    # Filter: skip any candidate whose significant words overlap > 50% with the asked question
+    filtered: list[str] = []
+    for q in unique:
+        candidate_words = _significant_words(q)
+        if not candidate_words:
+            continue
+        overlap = len(asked_words & candidate_words) / len(candidate_words)
+        if overlap <= 0.5:
+            filtered.append(q)
+
+    return filtered[:3]
+
+
+async def run_agent(
+    question: str,
+    patient_id: str,
+    clinician_id: str,
+    db_session: AsyncSession,
+) -> AsyncGenerator[str, None]:
+    """Run the multi-turn chatbot agent and yield SSE events.
+
+    Flow:
+      1. Load conversation history from session store.
+      2. Build system prompt + cached patient context.
+      3. Tool-use loop (max MAX_TOOL_ROUNDS): call tools, accumulate results.
+      4. Stream final answer tokens.
+      5. Validate response. On failure: yield blocked event.
+      6. Persist turn to session store.
+      7. Write audit event.
+
+    Args:
+        question: Clinician's natural language question.
+        patient_id: Patient scope — all tool calls locked to this ID.
+        clinician_id: From JWT — used for session key and audit.
+        db_session: Async DB session.
+
+    Yields:
+        SSE-formatted strings: thinking | token | done | error events.
+    """
+    # Pre-flight: handle social phrases instantly without hitting the LLM
+    social = _social_reply(question)
+    if social:
+        yield _sse("done", {
+            "answer": social,
+            "confidence": "high",
+            "data_gaps": [],
+            "tools_used": [],
+            "blocked": False,
+        })
+        return
+
+    # Pre-flight: block off-topic questions before hitting the LLM
+    if _is_off_topic(question):
+        logger.info("Off-topic question blocked pre-flight: patient=%s", patient_id)
+        yield _sse("done", {
+            "answer": "I can only help with questions about this patient. Try asking about their BP trend, medications, adherence, or why they were flagged.",
+            "confidence": "no_data",
+            "data_gaps": [],
+            "tools_used": [],
+            "blocked": True,
+            "block_reason": "off_topic",
+        })
+        return
+
+    client = OpenAI(api_key=settings.openai_api_key)
+    groq_tools = _to_groq_tools(TOOL_SCHEMAS)
+
+    system_prompt = _load_system_prompt()
+    patient_context = await _build_patient_context(patient_id, db_session)
+    system_content = system_prompt + "\n\n" + patient_context
+
+    history = await session_store.get_history(clinician_id, patient_id, db_session)
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_content},
+        *list(history),
+        {"role": "user", "content": question},
+    ]
+
+    tool_results_accumulator: dict[str, Any] = {}
+    tools_used: list[str] = []
+    final_text = ""
+
+    # ── Tool-use loop ──────────────────────────────────────────────────────────
+    for round_num in range(_MAX_TOOL_ROUNDS):
+        try:
+            response = client.chat.completions.create(
+                model=_MODEL,
+                max_tokens=1024,
+                messages=messages,
+                tools=groq_tools,
+                tool_choice="auto",
+            )
+        except OpenAIBadRequestError as exc:
+            # Model emitted a malformed tool call (e.g. <function=null>) — fall back
+            # to a plain completion so the turn still produces an answer.
+            logger.warning("Groq tool_use_failed (round %d) — retrying without tools: %s", round_num + 1, exc)
+            fallback = client.chat.completions.create(
+                model=_MODEL,
+                max_tokens=1024,
+                messages=messages,
+            )
+            final_text = fallback.choices[0].message.content or ""
+            break
+
+        message = response.choices[0].message
+        tool_calls = message.tool_calls or []
+
+        if not tool_calls:
+            final_text = message.content or ""
+            break
+
+        # Notify frontend which tools are being called
+        for tc in tool_calls:
+            yield _sse("thinking", {"tool": tc.function.name, "round": round_num + 1})
+            tools_used.append(tc.function.name)
+
+        # Append assistant's tool_call turn to history
+        messages.append({
+            "role": "assistant",
+            "content": message.content,
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in tool_calls
+            ],
+        })
+
+        # Execute tools and append results
+        for tc in tool_calls:
+            try:
+                result = await dispatch_tool(
+                    tool_name=tc.function.name,
+                    tool_input=json.loads(tc.function.arguments),
+                    patient_id=patient_id,
+                    session=db_session,
+                )
+                tool_results_accumulator[tc.function.name] = result
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(result),
+                })
+            except Exception as exc:
+                logger.error("Tool %s failed: %s", tc.function.name, exc)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps({"error": str(exc), "data_available": False}),
+                })
+
+    # ── Synthesise after tool rounds if no text yet ────────────────────────────
+    if not final_text:
+        final_response = client.chat.completions.create(
+            model=_MODEL,
+            max_tokens=1024,
+            messages=messages,
+        )
+        final_text = final_response.choices[0].message.content or ""
+
+    # ── Parse + validate BEFORE streaming — blocked answers must not reach the screen ──
+    parsed: ChatResponse = parse_response(final_text, tools_used=tools_used)
+
+    validation: ValidationResult = await validate_chat_response(
+        text=parsed.answer,
+        tool_results=tool_results_accumulator,
+        patient_id=patient_id,
+        clinician_id=clinician_id,
+        db_session=db_session,
+    )
+
+    if not validation.passed:
+        blocked = make_blocked_response(validation.failed_check or "unknown")
+        # Do NOT persist blocked turns — prevents LLM from "learning" to comply on repeat asks
+        yield _sse("done", {
+            "answer": blocked.answer,
+            "confidence": "blocked",
+            "data_gaps": [],
+            "tools_used": tools_used,
+            "blocked": True,
+            "block_reason": blocked.block_reason,
+        })
+        return
+
+    # ── Stream validated answer tokens ────────────────────────────────────────
+    words = parsed.answer.split(" ")
+    for i, word in enumerate(words):
+        chunk = word if i == len(words) - 1 else word + " "
+        yield _sse("token", {"token": chunk})
+
+    # ── Persist conversation turn ──────────────────────────────────────────────
+    await session_store.append_messages(
+        clinician_id=clinician_id,
+        patient_id=patient_id,
+        new_messages=[
+            {"role": "user", "content": question},
+            {"role": "assistant", "content": parsed.answer},
+        ],
+        db_session=db_session,
+    )
+
+    yield _sse("done", {
+        "answer": parsed.answer,
+        "confidence": parsed.confidence,
+        "data_gaps": parsed.data_gaps,
+        "tools_used": tools_used,
+        "blocked": False,
+        "follow_up_questions": _generate_followup_questions(tools_used, question),
+    })
+
+
+def generate_suggested_questions(briefing_payload: dict[str, Any]) -> list[str]:
+    """Generate 3-4 suggested question chips based on Layer 1 briefing signals.
+
+    Args:
+        briefing_payload: The llm_response JSONB dict from a Briefing row.
+
+    Returns:
+        List of question strings for the frontend chips.
+    """
+    questions: list[str] = []
+    urgent_flags = briefing_payload.get("urgent_flags") or []
+    adherence_summary = (briefing_payload.get("adherence_summary") or "").lower()
+    overdue_labs = briefing_payload.get("overdue_labs") or []
+    flags_str = " ".join(urgent_flags).lower()
+
+    if "inertia" in flags_str:
+        questions.append("Why was treatment review flagged?")
+    if "deterioration" in flags_str:
+        questions.append("When did readings start worsening?")
+    if "gap" in flags_str:
+        questions.append("How long was the monitoring gap and when did it start?")
+    if "adherence concern" in adherence_summary:
+        questions.append("Which medications had the most missed doses?")
+    if overdue_labs:
+        questions.append("What labs are overdue and when were they last done?")
+
+    # Always include the baseline comparison question
+    questions.append("How does current BP compare to this patient's historical baseline?")
+
+    return questions[:4]
+
+
+async def generate_proactive_suggestion(
+    briefing_payload: dict[str, Any],
+    db_session: AsyncSession,
+    patient_id: str,
+) -> str | None:
+    """Generate one proactive question the clinician should consider.
+
+    Uses a lightweight LLM call (no tool use) to read the briefing payload
+    and suggest the single most clinically important question not already
+    in the suggested chips.
+
+    Args:
+        briefing_payload: The llm_response JSONB dict from a Briefing row.
+        db_session: Async DB session (unused here, kept for future use).
+        patient_id: Patient identifier (unused here, kept for future use).
+
+    Returns:
+        One proactive question string, or None if briefing has no data.
+    """
+    if not briefing_payload:
+        return None
+
+    urgent = briefing_payload.get("urgent_flags") or []
+    agenda = briefing_payload.get("visit_agenda") or []
+    if not urgent and not agenda:
+        return None
+
+    client = OpenAI(api_key=settings.openai_api_key)
+
+    prompt = (
+        "You are a clinical data assistant. A GP is reviewing a patient briefing before a consultation.\n"
+        "Suggest ONE question the clinician should ask YOU (the data system) to get the most clinically "
+        "useful insight before seeing this patient. The question must be about the patient's data — "
+        "BP trends, adherence, flags, medication history, or risk drivers.\n"
+        "Do NOT suggest questions to ask the patient. Do NOT suggest clinical actions or decisions.\n"
+        "Examples of good questions: 'Why was this patient flagged for treatment review?', "
+        "'Which medication had the lowest adherence this month?', "
+        "'How does their BP compare to their baseline over the last 28 days?'\n"
+        "Return only the question, no preamble.\n\n"
+        f"Urgent flags: {', '.join(urgent) or 'None'}\n"
+        f"Visit agenda: {'; '.join(agenda) or 'None'}\n"
+        f"Trend: {briefing_payload.get('trend_summary', 'N/A')}\n"
+        f"Adherence: {briefing_payload.get('adherence_summary', 'N/A')}"
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=_MODEL,
+            max_tokens=100,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        suggestion = response.choices[0].message.content.strip()
+        # Basic safety check — skip if it contains forbidden phrases
+        forbidden = [
+            "prescribe", "diagnos", "non-adherent", "emergency",
+            "how have you", "how are you feeling", "have you noticed",
+            "do you feel", "are you experiencing", "tell me about your",
+            "you should", "your blood pressure", "your symptoms",
+        ]
+        if any(f in suggestion.lower() for f in forbidden):
+            return None
+        return suggestion
+    except Exception as exc:
+        logger.warning("Proactive suggestion generation failed: %s", exc)
+        return None

@@ -467,7 +467,7 @@ Additionally, apply PostgreSQL Row-Level Security (RLS) on the `readings` table 
 
 **Layer 1:** Extend alert acknowledge endpoint to accept `disposition` (`agree_acting`, `agree_monitoring`, `disagree`) and optional `reason_text`. Store in new `alert_feedback` table: `alert_id`, `disposition`, `clinician_id`, `patient_id`, `detector_type`, `reason_text`, `created_at`.
 
-**Layer 2:** When a detector accumulates 4+ dismissals of the same type for the same patient, surface a calibration recommendation in the admin dashboard. Clinician approves or rejects. Approved rules stored in `calibration_rules` table with provenance: who approved, when, based on how many dismissals. Production detectors read rules at query time. No automatic self-modification — every threshold change requires explicit clinician approval.
+**Layer 2:** When a detector accumulates 4+ dismissals of the same type for the same patient, surface a calibration recommendation in the admin dashboard. Clinician approves or rejects. Approved rules stored in `calibration_rules` table with provenance: who approved, when, based on how many dismissals. **Implementation:** alert suppression, not threshold override — an approved active `CalibrationRule(patient_id, detector_type)` means that detector's alert row is not written to the inbox for that patient. Detection still runs; findings still appear in the briefing. `processor.py` queries `calibration_rules WHERE active=TRUE` before each alert write and emits an `alert_suppressed_by_calibration` audit event instead. No automatic self-modification — every suppression requires explicit clinician approval. (Note: Full Spec v5.0 Section 6.7 listed `parameter TEXT` and `adjusted_value NUMERIC` on `calibration_rules`; these were dropped in favour of suppression, which requires no internal parameter knowledge from the clinician.)
 
 **Layer 3:** When a clinician dismisses an alert, track the patient for 30 days. If a concerning event follows (deterioration cluster, urgent visit), prompt the clinician: "Alert dismissed on [date] — patient had a deterioration event 12 days later. Was the alert relevant in retrospect?" Retrospective labels feed back into Layer 2 calibration evidence.
 
@@ -662,18 +662,18 @@ Phases are ordered so that no fix depends on an incomplete prerequisite. Fixes w
 ### Phase 0 — Standalone correctness fixes
 No dependencies. Fix wrong output on current data. No re-ingestion required. Start here.
 
-| # | Fix | File | Size |
-|---|---|---|---|
-| 2 | Add threshold gate to deterioration detector | deterioration_detector.py | 1 line |
-| 3 | Pattern B treatment-working suppression + drug-class titration window | adherence_analyzer.py | ~20 lines |
-| 26 | Add class-aware med change condition to Pattern B suppression | adherence_analyzer.py | 2 lines |
-| 11 | Write adherence alert row in processor | processor.py | 3 lines |
-| 30 | Set `delivered_at` on alert insert | processor.py | 1 line |
-| 20 | Read appointment date from patient record | processor.py | 5 lines |
-| 25 | Fix comorbidity risk score saturation | risk_scorer.py | 5 lines |
-| 58 | Fix sig_gap and sig_inertia normalization in risk scorer | risk_scorer.py | 3 lines |
-| 61 | Add `risk_score_computed_at` column + set on every score update | patient.py, risk_scorer.py, setup_db.py | 4 lines |
-| 48–57 | Layer 3 LLM output validation + guardrails | llm_validator.py (new), summarizer.py | ~200 lines |
+| # | Fix | File | Size | Status |
+|---|---|---|---|---|
+| 2 | Add threshold gate to deterioration detector | deterioration_detector.py | 1 line | DONE |
+| 3 | Pattern B treatment-working suppression + drug-class titration window | adherence_analyzer.py | ~20 lines | DONE |
+| 26 | Add class-aware med change condition to Pattern B suppression | adherence_analyzer.py | 2 lines | DONE |
+| 11 | Write adherence alert row in processor | processor.py | 3 lines | DONE |
+| 30 | Set `delivered_at` on alert insert | processor.py | 1 line | DONE |
+| 20 | Read appointment date from patient record | processor.py | 5 lines | DONE |
+| 25 | Fix comorbidity risk score saturation | risk_scorer.py | 5 lines | DONE |
+| 58 | Fix sig_gap and sig_inertia normalization in risk scorer | risk_scorer.py | 3 lines | DONE |
+| 61 | Add `risk_score_computed_at` column + set on every score update | patient.py, risk_scorer.py, setup_db.py | 4 lines | DONE |
+| 48–57 | Layer 3 LLM output validation + guardrails | llm_validator.py (new), summarizer.py | ~200 lines | DONE |
 
 After Phase 0: trigger `pattern_recompute` via admin endpoint to refresh all production scores and alerts with the corrected logic.
 
@@ -682,13 +682,13 @@ After Phase 0: trigger `pattern_recompute` via admin endpoint to refresh all pro
 ### Phase 1 — Ingestion data fixes
 Apply all changes to `adapter.py` and `ingestion.py` together. Re-ingest once after all Phase 1 fixes are complete.
 
-| # | Fix | Files |
-|---|---|---|
-| 12 | Capture all visit dates for `last_visit_date` | adapter.py, ingestion.py |
-| 8 | Populate `social_context` | adapter.py, ingestion.py |
-| 9 | Allergy reactions + active-status filter | adapter.py, ingestion.py |
-| 7 | Capture physician problem assessments | adapter.py, ingestion.py, clinical_context model |
-| 6 | Capture PULSE/WEIGHT/SpO2 (+ DB migration for new columns) | adapter.py, ingestion.py, migration |
+| # | Fix | Files | Status |
+|---|---|---|---|
+| 12 | Capture all visit dates for `last_visit_date` | adapter.py, ingestion.py | DONE |
+| 8 | Populate `social_context` | adapter.py, ingestion.py | DONE |
+| 9 | Allergy reactions + active-status filter | adapter.py, ingestion.py | DONE |
+| 7 | Capture physician problem assessments | adapter.py, ingestion.py, clinical_context model | DONE |
+| 6 | Capture PULSE/WEIGHT/SpO2 (+ DB migration for new columns) | adapter.py, ingestion.py, migration | DONE |
 
 After Phase 1: `python scripts/run_adapter.py` → `python scripts/run_ingestion.py`. Verify `clinical_context` fields updated.
 
@@ -697,17 +697,17 @@ After Phase 1: `python scripts/run_adapter.py` → `python scripts/run_ingestion
 ### Phase 2 — Detector and briefing fixes
 Apply after Phase 1 data is in the DB. Fixes 1, 4, 5, 27, and 28 all touch the same two detector files (`inertia_detector.py`, `deterioration_detector.py`) and should be applied together to avoid four-touch churn. Fix 28 is included here with a conservative fallback so the code can ship before Fix 15's full-timeline data exists: when the requested window exceeds available readings, the detector logs `window_truncated_to_available` and uses the available range. Once Fix 15 lands in Phase 3, the adaptive window silently starts benefiting from the longer lookback — no further code change needed.
 
-| # | Fix | Files |
-|---|---|---|
-| 1, 4 | Patient-adaptive threshold + `med_history` in inertia detector + identical fix to risk_scorer.py | inertia_detector.py, risk_scorer.py |
-| 18 | Remove duplicate inertia from briefing composer | composer.py |
-| 5 | Apply comorbidity-adjusted threshold to production detectors (degraded mode until Fix 7 full mode) | threshold_utils.py (new), all 4 detectors |
-| 2 (ext) | Add step-change sub-detector to deterioration | deterioration_detector.py |
-| 27 | Exclude white-coat pre-visit window (5 days) | inertia_detector.py, deterioration_detector.py |
-| 28 | Adaptive window with conservative fallback when full-timeline data absent | all 4 detectors |
-| 29 | Surface social context in briefing | composer.py |
-| 34 | Surface drug-class-aware titration timing in briefing | composer.py |
-| 59 | BP variability detector — CV threshold signal | variability_detector.py (new), processor.py, composer.py |
+| # | Fix | Files | Status |
+|---|---|---|---|
+| 1, 4 | Patient-adaptive threshold + `med_history` in inertia detector + identical fix to risk_scorer.py | inertia_detector.py, risk_scorer.py | DONE |
+| 18 | Remove duplicate inertia from briefing composer | composer.py | DONE |
+| 5 | Apply comorbidity-adjusted threshold to production detectors (degraded mode until Fix 7 full mode) | threshold_utils.py (new), all 4 detectors | DONE |
+| 2 (ext) | Add step-change sub-detector to deterioration | deterioration_detector.py | DONE |
+| 27 | Exclude white-coat pre-visit window (5 days) | inertia_detector.py, deterioration_detector.py | DONE |
+| 28 | Adaptive window with conservative fallback when full-timeline data absent | all 4 detectors | DONE |
+| 29 | Surface social context in briefing | composer.py | DONE |
+| 34 | Surface drug-class-aware titration timing in briefing | composer.py | DONE |
+| 59 | BP variability detector — CV threshold signal | variability_detector.py (new), processor.py, composer.py | DONE |
 
 After Phase 2: run shadow mode. Agreement rate should be at 94.3% or better with production detectors.
 
@@ -716,12 +716,12 @@ After Phase 2: run shadow mode. Agreement rate should be at 94.3% or better with
 ### Phase 3 — Generator expansion
 Fix 22 (per-observation idempotency) is the gate for all generator work.
 
-| # | Fix | Files |
-|---|---|---|
-| 22 | Per-observation idempotency (prerequisite) | ingestion.py |
-| 19 | Parametric baseline from patient clinic BPs | reading_generator.py |
-| 15 | Full care timeline synthetic readings | reading_generator.py, run_generator.py |
-| 17 | Cold start detection (< 21 days → suppress detectors) | processor.py |
+| # | Fix | Files | Status |
+|---|---|---|---|
+| 22 | Per-observation idempotency (prerequisite) | ingestion.py | DONE |
+| 19 | Parametric baseline from patient clinic BPs | reading_generator.py | DONE |
+| 15 | Full care timeline synthetic readings | reading_generator.py, run_generator.py | DONE |
+| 17 | Cold start detection (< 21 days → suppress detectors) | processor.py | DONE |
 
 After Phase 3: `python scripts/run_generator.py` for all patients. Verify readings table has full-timeline generated readings spanning the patient's entire care history. Fix 28's adaptive window (already in Phase 2) silently starts using the longer lookback once full-timeline data exists.
 
@@ -756,13 +756,13 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 
 ### Phase 6 — Frontend
 
-| # | Fix | Files |
-|---|---|---|
-| 23 | Briefing icon for any briefing, not just today | PatientList.tsx |
-| 31 | Remove duplicate frontend sort | PatientList.tsx |
-| 14 | Multi-patient pagination and tier filter | dashboard components |
-| new | Shadow mode drill-down per visit | shadow mode frontend page |
-| new | Push notifications via Web Push service worker | Next.js |
+| # | Fix | Files | Status |
+|---|---|---|---|
+| 23 | Briefing icon for any briefing, not just today | PatientList.tsx | DONE |
+| 31 | Remove duplicate frontend sort | PatientList.tsx | DONE |
+| 14 | Multi-patient pagination and tier filter | dashboard components | DONE |
+| new | Shadow mode drill-down per visit | shadow mode frontend page | DONE |
+| new | Push notifications via Web Push service worker | Next.js | pending |
 
 ---
 
@@ -770,7 +770,7 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 
 | # | Feature | Status |
 |---|---|---|
-| 43 | Patient-facing reading submission + symptom flags | pending (separate plan) |
+| 43 | Patient-facing reading submission + symptom flags | ✓ DONE |
 | 45 | Escalation pathway + off-hours alert tagging | DONE |
 | 42 (L2) | Feedback loop Layer 2: calibration recommendations | DONE |
 | 42 (L3) | Feedback loop Layer 3: 30-day outcome verification | DONE |
@@ -795,68 +795,87 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 
 ## Summary Table
 
-| # | Severity | Description | File(s) | Phase |
-|---|---|---|---|---|
-| 1 | Critical | Inertia: hard-coded 140 threshold, no slope check | inertia_detector.py | 2 |
-| 2 | Critical | Deterioration: no threshold gate | deterioration_detector.py | 0 |
-| 3 | Critical | Adherence: no treatment-working suppression | adherence_analyzer.py | 0 |
-| 4 | Critical | Inertia: ignores med_history | inertia_detector.py | 2 |
-| 5 | Critical | Comorbidity threshold not in production | all detectors | 2 |
-| 6 | High | PULSE/WEIGHT/SpO2 lost in conversion | adapter.py, ingestion.py | 1 |
-| 7 | High | Physician problem assessments lost | adapter.py, ingestion.py | 1 |
-| 8 | High | social_context never populated | adapter.py, ingestion.py | 1 |
-| 9 | High | Allergy reactions + active-status not captured | adapter.py | 1 |
-| 10 | High | No scheduled pattern_recompute sweep | scheduler.py | 4 |
-| 11 | High | Adherence alert not written to DB | processor.py | 0 |
-| 12 | High | last_visit_date misses 71 non-vitals visits | ingestion.py | 1 |
-| 13 | High | Shadow mode hardcoded to patient 1091 | run_shadow_mode.py | 5 ✓ DONE |
-| 14 | High | Only one patient in DB | data | 5 ✓ DONE (pipeline test runner) |
-| 15 | High | Full care timeline readings not generated | reading_generator.py | 3 |
-| 16 | High | Lab values not ingested | adapter.py, ingestion.py | 8 |
-| 17 | High | Cold start misleading briefings | processor.py | 3 |
-| 18 | Medium | Briefing composer re-implements inertia with wrong threshold | composer.py | 2 |
-| 19 | Medium | Generator: single fixed scenario | reading_generator.py | 3 |
-| 20 | Medium | Appointment date from idempotency key | processor.py | 0 |
-| 21 | Medium | No next_appointment update mechanism | patients.py | 4 |
-| 22 | Medium | Batch-level idempotency blocks new clinic visits | ingestion.py | 3 |
-| 23 | Medium | Briefing icon today-only | PatientList.tsx | 6 |
-| 24 | Medium | Alert API no patient_id filter | alerts.py | 5 ✓ DONE |
-| 25 | Medium | Comorbidity score saturates at 5 problems | risk_scorer.py | 0 |
-| 26 | Medium | Pattern B suppression missing drug-class-aware med change condition | adherence_analyzer.py | 0 |
-| 27 | Medium | White-coat window not excluded from threshold comparisons | detectors | 2 |
-| 28 | Medium | 28-day window does not adapt to visit interval | all detectors | 2 |
-| 29 | Low | social_context never in briefing | composer.py | 2 |
-| 30 | Low | delivered_at never set on alerts | processor.py | 0 |
-| 31 | Low | Duplicate sort backend + frontend | PatientList.tsx | 6 |
-| 32 | Low | run_ingestion.py default bundle hardcoded | run_ingestion.py | 5 |
-| 33 | Low | Shadow mode: window overlap + CI + per-detector breakdown not reported | run_shadow_mode.py | 5 ✓ DONE |
-| 34 | Low | Medication titration timing not in briefing — use drug-class-aware window | composer.py | 2 |
-| 35 | Infra | Patient research ID — HMAC-based pseudonymization (not sequential IDs) | adapter.py, config.py | 8 |
-| 36 | Infra | JWT expiry not verified | auth config | 8 |
-| 37 | Infra | No API rate limiting | FastAPI middleware | 8 |
-| 38 | Infra | Audit trigger + Row-Level Security on readings table | DB trigger, RLS policy | 8 |
-| 39 | Infra | No MFA | Supabase Auth | 8 |
-| 40 | Infra | No dead-letter queue | processor.py | 4 |
-| 41 | Feature | Gap explanations (device vs non-compliance) | new table + API | 5 ✓ DONE |
-| 42 | Feature | Feedback loop (3 layers) | new tables + API | 5–7 ✓ L1/L2/L3 DONE |
-| 43 | Feature | Patient-facing submission interface | Next.js | 7 (separate plan) |
-| 44 | Feature | BLE connector | new | 7 ✓ DONE |
-| 45 | Feature | Escalation pathway + off-hours tagging | processor.py, alerts | 7 ✓ DONE |
-| 46 | Feature | Mini-briefing for between-visit alerts | processor.py | 4 |
-| 47 | Feature | Long-term trend layer in briefing | composer.py | 4 |
-| 48 | Critical | Layer 3: no clinical language guardrails | llm_validator.py (new) | 0 |
-| 49 | Critical | Layer 3: no faithfulness validation vs Layer 1 payload | llm_validator.py (new) | 0 |
-| 50 | Critical | Layer 3: PHI leak possible in readable_summary | llm_validator.py (new) | 0 |
-| 51 | High | Layer 3: no prompt injection detection | llm_validator.py (new) | 0 |
-| 52 | Medium | Layer 3: sentence count not validated (spec requires 3) | llm_validator.py (new) | 0 |
-| 53 | High | Layer 3: medication hallucination — use payload-derived token set + brand/generic synonyms | llm_validator.py (new) | 0 |
-| 54 | Medium | Layer 3: BP values not validated for plausibility | llm_validator.py (new) | 0 |
-| 55 | High | Layer 3: validation outcome not in audit_events | llm_validator.py (new) | 0 |
-| 56 | Low | Layer 3: no retry on validation failure | summarizer.py | 0 |
-| 57 | Medium | Layer 3: contradiction detection missing | llm_validator.py (new) | 0 |
-| 58 | Medium | Risk scorer: sig_gap saturates at 14 days, sig_inertia at 90 days — misaligned with adaptive window | risk_scorer.py | 0 |
-| 59 | High | BP variability (CV%) missing as independent risk signal | variability_detector.py (new) | 2 |
-| 60 | Medium | 30s polling — replace with PostgreSQL LISTEN/NOTIFY | processor.py, scheduler.py | 4 |
-| 61 | Low | No staleness indicator on risk_score — add risk_score_computed_at | patient.py, risk_scorer.py, setup_db.py | 0 |
+| # | Severity | Description | File(s) | Phase | Status |
+|---|---|---|---|---|---|
+| 1 | Critical | Inertia: hard-coded 140 threshold, no slope check | inertia_detector.py | 2 | ✓ DONE |
+| 2 | Critical | Deterioration: no threshold gate | deterioration_detector.py | 0 | ✓ DONE |
+| 3 | Critical | Adherence: no treatment-working suppression | adherence_analyzer.py | 0 | ✓ DONE |
+| 4 | Critical | Inertia: ignores med_history | inertia_detector.py | 2 | ✓ DONE |
+| 5 | Critical | Comorbidity threshold not in production | all detectors | 2 | ✓ DONE |
+| 6 | High | PULSE/WEIGHT/SpO2 lost in conversion | adapter.py, ingestion.py | 1 | ✓ DONE |
+| 7 | High | Physician problem assessments lost | adapter.py, ingestion.py | 1 | ✓ DONE |
+| 8 | High | social_context never populated | adapter.py, ingestion.py | 1 | ✓ DONE |
+| 9 | High | Allergy reactions + active-status not captured | adapter.py | 1 | ✓ DONE |
+| 10 | High | No scheduled pattern_recompute sweep | scheduler.py | 4 | ✓ DONE |
+| 11 | High | Adherence alert not written to DB | processor.py | 0 | ✓ DONE |
+| 12 | High | last_visit_date misses 71 non-vitals visits | ingestion.py | 1 | ✓ DONE |
+| 13 | High | Shadow mode hardcoded to patient 1091 | run_shadow_mode.py | 5 | ✓ DONE |
+| 14 | High | Only one patient in DB | data | 5 | ✓ DONE (pipeline test runner) |
+| 15 | High | Full care timeline readings not generated | reading_generator.py | 3 | ✓ DONE |
+| 16 | High | Lab values not ingested | adapter.py, ingestion.py | 8 | pending |
+| 17 | High | Cold start misleading briefings | processor.py | 3 | ✓ DONE |
+| 18 | Medium | Briefing composer re-implements inertia with wrong threshold | composer.py | 2 | ✓ DONE |
+| 19 | Medium | Generator: single fixed scenario | reading_generator.py | 3 | ✓ DONE |
+| 20 | Medium | Appointment date from idempotency key | processor.py | 0 | ✓ DONE |
+| 21 | Medium | No next_appointment update mechanism | patients.py | 4 | ✓ DONE |
+| 22 | Medium | Batch-level idempotency blocks new clinic visits | ingestion.py | 3 | ✓ DONE |
+| 23 | Medium | Briefing icon today-only | PatientList.tsx | 6 | ✓ DONE |
+| 24 | Medium | Alert API no patient_id filter | alerts.py | 5 | ✓ DONE |
+| 25 | Medium | Comorbidity score saturates at 5 problems | risk_scorer.py | 0 | ✓ DONE |
+| 26 | Medium | Pattern B suppression missing drug-class-aware med change condition | adherence_analyzer.py | 0 | ✓ DONE |
+| 27 | Medium | White-coat window not excluded from threshold comparisons | detectors | 2 | ✓ DONE |
+| 28 | Medium | 28-day window does not adapt to visit interval | all detectors | 2 | ✓ DONE |
+| 29 | Low | social_context never in briefing | composer.py | 2 | ✓ DONE |
+| 30 | Low | delivered_at never set on alerts | processor.py | 0 | ✓ DONE |
+| 31 | Low | Duplicate sort backend + frontend | PatientList.tsx | 6 | ✓ DONE |
+| 32 | Low | run_ingestion.py default bundle hardcoded | run_ingestion.py | 5 | ✓ DONE |
+| 33 | Low | Shadow mode: window overlap + CI + per-detector breakdown not reported | run_shadow_mode.py | 5 | ✓ DONE |
+| 34 | Low | Medication titration timing not in briefing — use drug-class-aware window | composer.py | 2 | ✓ DONE |
+| 35 | Infra | Patient research ID — HMAC-based pseudonymization (not sequential IDs) | adapter.py, config.py | 8 | pending |
+| 36 | Infra | JWT expiry not verified | auth config | 8 | pending |
+| 37 | Infra | No API rate limiting | FastAPI middleware | 8 | pending |
+| 38 | Infra | Audit trigger + Row-Level Security on readings table | DB trigger, RLS policy | 8 | pending |
+| 39 | Infra | No MFA | Supabase Auth | 8 | pending |
+| 40 | Infra | No dead-letter queue | processor.py | 4 | ✓ DONE |
+| 41 | Feature | Gap explanations (device vs non-compliance) | new table + API | 5 | ✓ DONE |
+| 42 | Feature | Feedback loop (3 layers) — L2 suppression wired into processor.py; 5 end-to-end tests added | new tables + API | 5–7 | ✓ L1/L2/L3 DONE (2026-05-01) |
+| 43 | Feature | Patient-facing submission interface | Next.js | 7 | ✓ DONE |
+| 44 | Feature | BLE connector | new | 7 | ✓ DONE |
+| 45 | Feature | Escalation pathway + off-hours tagging | processor.py, alerts | 7 | ✓ DONE |
+| 46 | Feature | Mini-briefing for between-visit alerts | processor.py | 4 | ✓ DONE |
+| 47 | Feature | Long-term trend layer in briefing | composer.py | 4 | ✓ DONE |
+| 48 | Critical | Layer 3: no clinical language guardrails | llm_validator.py (new) | 0 | ✓ DONE |
+| 49 | Critical | Layer 3: no faithfulness validation vs Layer 1 payload | llm_validator.py (new) | 0 | ✓ DONE |
+| 50 | Critical | Layer 3: PHI leak possible in readable_summary | llm_validator.py (new) | 0 | ✓ DONE |
+| 51 | High | Layer 3: no prompt injection detection | llm_validator.py (new) | 0 | ✓ DONE |
+| 52 | Medium | Layer 3: sentence count not validated (spec requires 3) | llm_validator.py (new) | 0 | ✓ DONE |
+| 53 | High | Layer 3: medication hallucination — use payload-derived token set + brand/generic synonyms | llm_validator.py (new) | 0 | ✓ DONE |
+| 54 | Medium | Layer 3: BP values not validated for plausibility | llm_validator.py (new) | 0 | ✓ DONE |
+| 55 | High | Layer 3: validation outcome not in audit_events | llm_validator.py (new) | 0 | ✓ DONE |
+| 56 | Low | Layer 3: no retry on validation failure | summarizer.py | 0 | ✓ DONE |
+| 57 | Medium | Layer 3: contradiction detection missing | llm_validator.py (new) | 0 | ✓ DONE |
+| 58 | Medium | Risk scorer: sig_gap saturates at 14 days, sig_inertia at 90 days — misaligned with adaptive window | risk_scorer.py | 0 | ✓ DONE |
+| 59 | High | BP variability (CV%) missing as independent risk signal | variability_detector.py (new) | 2 | ✓ DONE |
+| 60 | Medium | 30s polling — replace with PostgreSQL LISTEN/NOTIFY | processor.py, scheduler.py | 4 | ✓ DONE |
+| 61 | Low | No staleness indicator on risk_score — add risk_score_computed_at | patient.py, risk_scorer.py, setup_db.py | 0 | ✓ DONE |
+| 62 | Bug | Briefing composer hardcoded 140 mmHg threshold in adherence summary and visit agenda fallback — replaced with patient-adaptive threshold from compute_patient_threshold() | composer.py | — | ✓ DONE (2026-04-29) |
+| 63 | Bug | Shadow mode "Concerned" tab crash — toFixed() called on null adherence_pct, overall_pct, gap_days on cold-start visits | shadow-mode/page.tsx | — | ✓ DONE (2026-04-29) |
+| 64 | Feature | Alert acknowledged history — collapsible section showing last 7 days of acknowledged alerts with patient details, metrics, timestamp, and 24-hour undo button | alerts.py (new endpoints), AlertInbox.tsx, api.ts | — | ✓ DONE (2026-04-29) |
+| 65 | Feature | Chatbot three-layer guardrails — pre-flight keyword allowlist, unconditional system prompt refusal, post-LLM clinical scope validator; validation before streaming; blocked turns not persisted | agent.py, validator.py, chat_system_prompt.md | — | ✓ DONE (2026-04-30) |
+| 66 | Feature | Chatbot social phrase handling — instant canned replies for greetings/thanks/farewells without LLM call | agent.py | — | ✓ DONE (2026-04-30) |
+| 67 | Feature | Chatbot 10 UX features — tool thinking chips, confidence badges, copy button, timestamps, follow-up chips, patient header, summary endpoint, numbered citations, stale data warning, thumbs feedback | ChatPanel.tsx, chat.py, api.ts, types.ts | — | ✓ DONE (2026-04-30) |
+| 68 | Feature | Chatbot system prompt — partial data reasoning section + clinician-directed language rule (third person always) | chat_system_prompt.md | — | ✓ DONE (2026-04-30) |
 
-The five Critical items (1–5) affect clinical output correctness in live production. Items 6–17 are high-priority operational and clinical data gaps. Items 18–28 affect demo quality and detection accuracy. Items 48–50 are new Critical items affecting Layer 3 clinical safety — addressable in Phase 0 with no dependencies. Items 58 and 61 are Phase 0 fixes requiring no data migration. Phase 0 fixes require no data migration and can begin immediately.
+| 69 | Feature | Patient PWA — manual BP submission, medication confirmation, .ics reminders, patient JWT auth, symptom alerts (chest pain / SOB+CHF bypass cold-start), 28 unit tests | patient-app/, auth.py, confirmations.py, readings.py, datetime_utils.py, ics_generator.py | — | ✓ DONE (2026-04-30) |
+| 70 | Bug | `alerts.py:107` docstring stated "10-minute undo window" — constant `_UNDO_WINDOW_MINUTES` is 24 h; error message was correct, only the docstring was wrong | alerts.py | — | ✓ DONE (2026-05-01) |
+| 71 | Bug | `outcome_verification.py:38` comment listed `urgent_visit` as a valid `outcome_type` — never implemented in code or defined in CLAUDE.md; only `pending\|deterioration_cluster\|none` are valid | outcome_verification.py | — | ✓ DONE (2026-05-01) |
+| 72 | Bug | Chatbot intermittent block — "why was flagged?" intermittently answered with wrong guardrail message. Four root-cause fixes: (1) `check_empty_data_acknowledged` added clinical-terms short-circuit so LLM answers from cached context pass when all tools return empty; (2) `make_blocked_response` routing corrected — guardrail/injection/certainty failures → prescriptive-language message, clinical-scope/data failures → generic redirect (was always returning prescriptive message); (3) `\bdiagnose\b` guardrail narrowed to `\bdiagnose\s+(?:this\s+\|the\s+)?patient\b` — no longer blocks "ARIA diagnoses inertia"; (4) `"mg"` removed from proactive suggestion forbidden list — no longer blocks medication-dosage suggested questions | validator.py, formatter.py, agent.py | — | ✓ DONE (2026-05-01) |
+| 73 | Feature | Chatbot guardrail audit — full clinical review of all patterns; three structural improvements: (1) `\bemergency\b` narrowed to crisis/prescriptive forms only (`hypertensive emergency`, `emergency services/room/referral`, `call/go to emergency`) — "no emergency concerns" and "no emergency alerts" now pass; (2) `get_briefing` tool description no longer claims "why flagged?" ownership — removes non-deterministic competition with `get_patient_alerts`; (3) `_build_patient_context` enriched with active alerts + problems when no briefing exists — LLM no longer answers "why flagged?" from two-line sparse context. Pre-existing test suite failures also fixed: `test_chat_validator.py` (removed stale `check_groundedness`/`check_evidence_consistency` imports), `test_chat_agent.py` (`evidence` → `data_gaps`, blocked message text), `test_phase5_phase7.py` (`_is_off_hours` import updated to `datetime_utils`); 583 tests passing, ruff clean | validator.py, tools.py, agent.py, test_chat_validator.py, test_chat_agent.py, test_phase5_phase7.py | — | ✓ DONE (2026-05-01) |
+| 74 | Feature | Chatbot medication indication — "why was X medication given/started/prescribed" now answerable. Root cause: `med_history` JSONB entries contain only `{name, rxnorm, date, activity}` — no indication field. Fix: `get_medication_history` and `get_clinical_context` tool descriptions updated to instruct the LLM to chain both tools and correlate medication start dates with active problems to infer clinical indication. System prompt updated: "What You Answer" now explicitly includes indication inference, a worked example added ("Why was amlodipine started?"), and Tool Use section adds an explicit chaining rule for "why was X medication given" questions | tools.py, chat_system_prompt.md | — | ✓ DONE (2026-05-01) |
+
+| 75 | Feature | Risk tier reclassification system — I61 haemorrhagic stroke added to auto-override; `ON CONFLICT DO NOTHING` replaced with two-step upsert preserving clinician/score overrides; nightly `_apply_tier_reclassification()` with hysteresis bands (medium→high ≥75, high→medium <40, medium→low <25 + 90-day enrollment + comorbidity block, low→medium ≥40); break-glass at score ≥85; `PATCH /api/patients/{id}/tier` clinician override endpoint; `tier_override_source` + `tier_override_suppressed_until` columns; audit event on every tier change | ingestion.py, processor.py, patients.py, patient.py, setup_db.py | — | ✓ DONE (2026-05-01, Kush) |
+| 76 | Bug | Alert calibration suppression — dismissed alerts were re-firing on next nightly run. Fix: `_maybe_upsert_alert()` checks active `calibration_rules` rows before writing alert; suppressed alerts write audit event instead; detection still runs and findings appear in briefing | processor.py | — | ✓ DONE (2026-05-01, Kush) |
+| 77 | Bug | Chatbot follow-up chips repeated asked question — `_generate_followup_questions` had no awareness of what was asked; expanded pool to 5 candidates per tool; added `_significant_words` similarity filter (>50% word overlap → skip) | agent.py | — | ✓ DONE (2026-05-01) |
+| 78 | Bug | Clinician tier suppression window 14→28 days — 14 days clinically indefensible (NICE NG136 §1.6.3 mandates 4-week review after medication change). Changed `_CLINICIAN_SUPPRESSION_DAYS = 14` → `28` | patients.py | — | ✓ DONE (2026-05-01) |
+
+**Remaining open items:** 16 (lab values), 35–39 (infrastructure/security).

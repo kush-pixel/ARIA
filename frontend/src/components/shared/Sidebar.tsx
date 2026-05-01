@@ -11,13 +11,14 @@ interface NavItem {
   label: string
   href: string
   icon: React.ReactNode
+  tourId?: string
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { label: 'Patients',    href: '/patients',    icon: <Users size={18} strokeWidth={2} /> },
-  { label: 'Alerts',      href: '/alerts',      icon: <BellRing size={18} strokeWidth={2} /> },
-  { label: 'Shadow Mode', href: '/shadow-mode', icon: <GitBranch size={18} strokeWidth={2} /> },
-  { label: 'Admin',       href: '/admin',       icon: <Settings size={18} strokeWidth={2} /> },
+  { label: 'Patients',    href: '/patients',    icon: <Users size={18} strokeWidth={2} />,     tourId: 'nav-patients' },
+  { label: 'Alerts',      href: '/alerts',      icon: <BellRing size={18} strokeWidth={2} />,  tourId: 'nav-alerts' },
+  { label: 'Shadow Mode', href: '/shadow-mode', icon: <GitBranch size={18} strokeWidth={2} />, tourId: 'nav-shadow' },
+  { label: 'Admin',       href: '/admin',       icon: <Settings size={18} strokeWidth={2} />,  tourId: 'nav-admin' },
 ]
 
 export default function Sidebar() {
@@ -58,6 +59,7 @@ export default function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
+              {...(item.tourId ? { 'data-tour': item.tourId } : {})}
               className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-[14px] font-medium
                           transition-colors duration-150
                           ${isActive
@@ -83,7 +85,7 @@ export default function Sidebar() {
           <div className="w-7 h-7 rounded-full bg-blue-100 dark:bg-blue-900/40 flex items-center justify-center flex-shrink-0">
             <span className="text-[11px] font-bold text-blue-600 dark:text-blue-400">GP</span>
           </div>
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <p className="text-[12px] font-semibold text-gray-700 dark:text-gray-300 truncate">Clinician</p>
             <p className="text-[11px] text-gray-400 dark:text-gray-500 truncate">IIT Hypertension Clinic</p>
           </div>

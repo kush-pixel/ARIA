@@ -342,35 +342,35 @@ async def test_ble_webhook_invalid_session_rejected(client: AsyncClient):
 
 
 def test_is_off_hours_evening():
-    from app.services.worker.processor import _is_off_hours
+    from app.utils.datetime_utils import is_off_hours as _is_off_hours
 
     dt = datetime(2026, 4, 14, 19, 0, tzinfo=UTC)  # Tuesday 7 PM UTC
     assert _is_off_hours(dt) is True
 
 
 def test_is_off_hours_early_morning():
-    from app.services.worker.processor import _is_off_hours
+    from app.utils.datetime_utils import is_off_hours as _is_off_hours
 
     dt = datetime(2026, 4, 14, 6, 0, tzinfo=UTC)  # Tuesday 6 AM UTC
     assert _is_off_hours(dt) is True
 
 
 def test_is_not_off_hours_midday():
-    from app.services.worker.processor import _is_off_hours
+    from app.utils.datetime_utils import is_off_hours as _is_off_hours
 
     dt = datetime(2026, 4, 14, 12, 0, tzinfo=UTC)  # Tuesday noon UTC
     assert _is_off_hours(dt) is False
 
 
 def test_is_off_hours_saturday():
-    from app.services.worker.processor import _is_off_hours
+    from app.utils.datetime_utils import is_off_hours as _is_off_hours
 
     dt = datetime(2026, 4, 11, 14, 0, tzinfo=UTC)  # Saturday 2 PM (weekday=5)
     assert _is_off_hours(dt) is True
 
 
 def test_is_off_hours_sunday():
-    from app.services.worker.processor import _is_off_hours
+    from app.utils.datetime_utils import is_off_hours as _is_off_hours
 
     dt = datetime(2026, 4, 12, 10, 0, tzinfo=UTC)  # Sunday 10 AM (weekday=6)
     assert _is_off_hours(dt) is True

@@ -223,7 +223,7 @@ function ExpandedCard({ visit }: { visit: ShadowModeVisit }) {
           </p>
           <p className="text-[14px] text-slate-700 dark:text-slate-300 mb-3">
             <span className="font-medium">Adherence:</span>{' '}
-            {visit.with_aria.adherence_pct.toFixed(0)}%
+            {visit.with_aria.adherence_pct != null ? `${visit.with_aria.adherence_pct.toFixed(0)}%` : 'N/A'}
             {d.adherence.pattern !== 'none' && (
               <span className="ml-1 text-slate-500 dark:text-slate-400">
                 (Pattern {d.adherence.pattern})
@@ -235,7 +235,7 @@ function ExpandedCard({ visit }: { visit: ShadowModeVisit }) {
             <DetectorRow
               name="Gap"
               fired={d.gap.fired}
-              stat={`max gap ${d.gap.gap_days.toFixed(1)} days${d.gap.urgent ? ' · URGENT' : ''}`}
+              stat={`max gap ${d.gap.gap_days != null ? d.gap.gap_days.toFixed(1) : 'N/A'} days${d.gap.urgent ? ' · URGENT' : ''}`}
             />
             <DetectorRow
               name="Inertia"
@@ -245,7 +245,7 @@ function ExpandedCard({ visit }: { visit: ShadowModeVisit }) {
             <DetectorRow
               name="Adherence"
               fired={d.adherence.fired}
-              stat={`${d.adherence.overall_pct.toFixed(0)}% · ${d.adherence.interpretation}`}
+              stat={`${d.adherence.overall_pct != null ? d.adherence.overall_pct.toFixed(0) : 'N/A'}% · ${d.adherence.interpretation}`}
             />
             <DetectorRow
               name="Deterioration"

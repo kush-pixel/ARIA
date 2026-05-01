@@ -25,7 +25,10 @@ from app.models.clinical_context import ClinicalContext
 from app.models.medication_confirmation import MedicationConfirmation
 from app.models.patient import Patient
 from app.models.reading import Reading
-from app.services.pattern_engine.threshold_utils import get_titration_window
+from app.services.pattern_engine.threshold_utils import (
+    compute_patient_threshold,
+    get_titration_window,
+)
 from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -313,6 +316,7 @@ def _build_adherence_summary(
     confirmations: list[MedicationConfirmation],
     readings: list[Reading],
     monitoring_active: bool,
+    patient_threshold: float = _ELEVATED_SYSTOLIC,
 ) -> str:
     """Describe per-medication adherence rates using clinical language.
 
@@ -349,13 +353,13 @@ def _build_adherence_summary(
     # Pattern interpretation — clinical language enforced
     if readings:
         avg_sys = statistics.mean(float(r.systolic_avg) for r in readings)
-        if overall_rate < _ADHERENCE_THRESHOLD and avg_sys >= _ELEVATED_SYSTOLIC:
+        if overall_rate < _ADHERENCE_THRESHOLD and avg_sys >= patient_threshold:
             summary += (
                 " Pattern suggests possible adherence concern alongside elevated readings."
             )
-        elif overall_rate < _ADHERENCE_THRESHOLD and avg_sys < _ELEVATED_SYSTOLIC:
+        elif overall_rate < _ADHERENCE_THRESHOLD and avg_sys < patient_threshold:
             summary += " Low confirmation rate with controlled readings — contextual review."
-        elif overall_rate >= _ADHERENCE_THRESHOLD and avg_sys >= _ELEVATED_SYSTOLIC:
+        elif overall_rate >= _ADHERENCE_THRESHOLD and avg_sys >= patient_threshold:
             summary += (
                 " High confirmation rate with sustained elevated readings — "
                 "possible treatment review warranted."
@@ -404,6 +408,7 @@ def _build_visit_agenda(
     monitoring_active: bool,
     alerts: list[Alert] | None = None,
     variability_agenda_item: str | None = None,
+    patient_threshold: float = _ELEVATED_SYSTOLIC,
 ) -> list[str]:
     """Build a prioritised visit agenda (up to 6 items).
 
@@ -449,7 +454,7 @@ def _build_visit_agenda(
     elif monitoring_active and readings:
         # Fallback for mini-briefings / no alert rows yet: use raw computation
         avg_sys = statistics.mean(float(r.systolic_avg) for r in readings)
-        if avg_sys >= _ELEVATED_SYSTOLIC and last_med_change is not None:
+        if avg_sys >= patient_threshold and last_med_change is not None:
             days_since = (date.today() - last_med_change).days
             if days_since > _INERTIA_DAYS:
                 agenda.append(
@@ -457,7 +462,7 @@ def _build_visit_agenda(
                     f"{avg_sys:.0f} mmHg with no recorded medication change "
                     f"({_human_duration(days_since)})."
                 )
-        elif avg_sys >= _ELEVATED_SYSTOLIC and last_med_change is None:
+        elif avg_sys >= patient_threshold and last_med_change is None:
             agenda.append(
                 f"Review treatment plan: {len(readings)}-session average systolic "
                 f"{avg_sys:.0f} mmHg with no medication change date recorded."
@@ -698,10 +703,14 @@ async def compose_briefing(
         last_med_change=ctx.last_med_change,
         med_history=ctx.med_history,
     )
+    historic_bp = ctx.historic_bp_systolic or []
+    patient_threshold, _ = compute_patient_threshold(historic_bp)
+
     adherence_summary = _build_adherence_summary(
         confirmations=confirmations,
         readings=readings,
         monitoring_active=patient.monitoring_active,
+        patient_threshold=patient_threshold,
     )
     urgent_flags = _build_urgent_flags(alerts)
 
@@ -721,6 +730,7 @@ async def compose_briefing(
         monitoring_active=patient.monitoring_active,
         alerts=alerts,
         variability_agenda_item=variability_agenda_item,
+        patient_threshold=patient_threshold,
     )
     data_limitations = _build_data_limitations(
         readings=readings,

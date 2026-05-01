@@ -160,6 +160,29 @@ export interface ShadowModeBestWindow {
   summary: string
 }
 
+export interface ChatDoneEvent {
+  answer: string
+  confidence: 'high' | 'medium' | 'low' | 'no_data' | 'blocked'
+  data_gaps: string[]
+  tools_used: string[]
+  blocked: boolean
+  block_reason?: string
+  follow_up_questions?: string[]
+}
+
+export interface ChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+  confidence?: ChatDoneEvent['confidence']
+  data_gaps?: string[]
+  tools_used?: string[]
+  blocked?: boolean
+  timestamp?: Date
+  id?: number
+  follow_up_questions?: string[]
+  feedback?: 'up' | 'down' | null
+}
+
 export interface ShadowModeResults {
   generated_at: string
   patient_id: string

@@ -11,7 +11,7 @@ Device outages are represented as absent rows, never null values.
 from datetime import datetime
 
 from sqlalchemy import DateTime, Numeric, SmallInteger, String, func, text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -60,6 +60,10 @@ class Reading(Base):
     medication_taken: Mapped[str | None] = mapped_column(
         String, nullable=True
     )  # yes|no|partial|NULL
+
+    symptoms: Mapped[list[str] | None] = mapped_column(
+        ARRAY(String), nullable=True
+    )  # patient-reported: headache|dizziness|chest_pain|shortness_of_breath
 
     created_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, server_default=func.now()
