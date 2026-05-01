@@ -93,8 +93,10 @@ Database: PostgreSQL via Supabase | DATABASE_URL in backend/.env | asyncpg drive
 Backend: Python 3.11, FastAPI, SQLAlchemy 2.0 async, Pydantic v2
 Database: PostgreSQL (Supabase) — 12 tables, asyncpg
 Frontend: Next.js 14, TypeScript strict, Tailwind CSS, recharts
+Patient PWA: Next.js 14 PWA at patient-app/ (port 3001) — @ducanh2912/next-pwa, standalone display
 AI: Anthropic claude-sonnet-4-20250514 (Layer 3 only)
 Background: processing_jobs table + Python polling worker | Auth: JWT, clinician/admin roles
+Patient Auth: separate patient_jwt_secret (blast-radius isolation), 8h expiry, role="patient"
 
 ---
 
@@ -124,7 +126,8 @@ backend/app/
            alert_feedback, briefing, processing_job, audit_event,
            gap_explanation, calibration_rule, outcome_verification
   api/: patients, readings, briefings, alerts, ingest, admin, adherence,
-        shadow_mode, ble_webhook, calibration, gap_explanations
+        shadow_mode, ble_webhook, calibration, gap_explanations,
+        auth (patient JWT), confirmations (pending/confirm/ics)
   services/
     fhir/: adapter.py (iEMR→FHIR), ingestion.py (FHIR→DB), validator.py
     generator/: reading_generator.py, confirmation_generator.py
@@ -134,7 +137,8 @@ backend/app/
     briefing/: composer.py (Layer 1 output), summarizer.py (Layer 3), llm_validator.py
     feedback/: calibration_engine.py, outcome_tracker.py
     worker/: processor.py (30s poll loop + escalation), scheduler.py (7:30 AM)
-  utils/: datetime_utils, fhir_utils, clinical_utils, logging_utils
+  utils/: datetime_utils (is_off_hours shared util), fhir_utils, clinical_utils,
+          logging_utils, ics_generator (medication .ics calendar files)
 
 frontend/src/
   app/: page.tsx, layout.tsx, patients/page.tsx, patients/[id]/page.tsx
@@ -146,6 +150,11 @@ frontend/src/
 scripts/: run_adapter, run_ingestion, run_generator, run_worker, run_scheduler,
           run_shadow_mode, setup_db
 prompts/: briefing_summary_prompt.md
+patient-app/: Next.js 14 PWA (port 3001) — login, BP submit, medication confirm pages
+  src/app/: page.tsx (login), submit/page.tsx, confirm/page.tsx
+  src/lib/: api.ts (all patient API calls), auth.ts (JWT helpers)
+  public/: manifest.json, icons/
+documentation/: team_access_guide.md, patientapp.md, kush_patientapp.md, chatbot.md
 
 ---
 
@@ -185,6 +194,7 @@ source TEXT NOT NULL (generated|manual|ble_auto|clinic) [used by idempotency che
 submitted_by TEXT NOT NULL (patient|carer|generator|clinic)
 bp_position TEXT (seated|standing) | bp_site TEXT (left_arm|right_arm)
 consent_version TEXT DEFAULT '1.0' | medication_taken TEXT (yes|no|partial|NULL)
+symptoms TEXT[] [patient-reported: headache|dizziness|chest_pain|shortness_of_breath]
 
 ### medication_confirmations
 confirmation_id UUID PK | patient_id TEXT REF patients

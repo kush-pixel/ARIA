@@ -770,7 +770,7 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 
 | # | Feature | Status |
 |---|---|---|
-| 43 | Patient-facing reading submission + symptom flags | pending (separate plan) |
+| 43 | Patient-facing reading submission + symptom flags | ✓ DONE |
 | 45 | Escalation pathway + off-hours alert tagging | DONE |
 | 42 (L2) | Feedback loop Layer 2: calibration recommendations | DONE |
 | 42 (L3) | Feedback loop Layer 3: 30-day outcome verification | DONE |
@@ -839,7 +839,7 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 | 40 | Infra | No dead-letter queue | processor.py | 4 | ✓ DONE |
 | 41 | Feature | Gap explanations (device vs non-compliance) | new table + API | 5 | ✓ DONE |
 | 42 | Feature | Feedback loop (3 layers) | new tables + API | 5–7 | ✓ L1/L2/L3 DONE |
-| 43 | Feature | Patient-facing submission interface | Next.js | 7 | pending (separate plan) |
+| 43 | Feature | Patient-facing submission interface | Next.js | 7 | ✓ DONE |
 | 44 | Feature | BLE connector | new | 7 | ✓ DONE |
 | 45 | Feature | Escalation pathway + off-hours tagging | processor.py, alerts | 7 | ✓ DONE |
 | 46 | Feature | Mini-briefing for between-visit alerts | processor.py | 4 | ✓ DONE |
@@ -866,4 +866,6 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 | 67 | Feature | Chatbot 10 UX features — tool thinking chips, confidence badges, copy button, timestamps, follow-up chips, patient header, summary endpoint, numbered citations, stale data warning, thumbs feedback | ChatPanel.tsx, chat.py, api.ts, types.ts | — | ✓ DONE (2026-04-30) |
 | 68 | Feature | Chatbot system prompt — partial data reasoning section + clinician-directed language rule (third person always) | chat_system_prompt.md | — | ✓ DONE (2026-04-30) |
 
-**Remaining open items:** 16 (lab values), 35–39 (infrastructure/security), 43 (patient-facing submission).
+| 69 | Feature | Patient PWA — manual BP submission, medication confirmation, .ics reminders, patient JWT auth, symptom alerts (chest pain / SOB+CHF bypass cold-start), 28 unit tests | patient-app/, auth.py, confirmations.py, readings.py, datetime_utils.py, ics_generator.py | — | ✓ DONE (2026-04-30) |
+
+**Remaining open items:** 16 (lab values), 35–39 (infrastructure/security).
