@@ -62,10 +62,50 @@ _CLINICAL_KEYWORDS: frozenset[str] = frozenset({
 
 _OFF_TOPIC_RESPONSE = json.dumps({
     "answer": "I can only answer questions about this patient's clinical data in ARIA. Please ask about BP trends, medications, adherence, lab results, or clinical alerts.",
-    "evidence": [],
     "confidence": "no_data",
     "data_gaps": [],
 })
+
+_SOCIAL_GREETINGS: frozenset[str] = frozenset({
+    "hi", "hello", "hey", "good morning", "good afternoon", "good evening",
+    "howdy", "greetings", "morning", "afternoon", "evening",
+})
+
+_SOCIAL_THANKS: frozenset[str] = frozenset({
+    "thank you", "thanks", "thank u", "thx", "ty", "cheers", "appreciate it",
+    "appreciated", "that's helpful", "that was helpful", "helpful",
+})
+
+_SOCIAL_FAREWELLS: frozenset[str] = frozenset({
+    "bye", "goodbye", "see you", "see ya", "take care", "later", "good night",
+    "goodnight", "ciao", "farewell",
+})
+
+_SOCIAL_AFFIRM: frozenset[str] = frozenset({
+    "ok", "okay", "got it", "understood", "sure", "alright", "sounds good",
+    "great", "perfect", "noted",
+})
+
+_SOCIAL_REPLIES: dict[str, str] = {
+    "greeting": "Hello! I'm here to help with your pre-visit review. What would you like to know about this patient?",
+    "thanks": "You're welcome! Let me know if there's anything else about this patient I can help with.",
+    "farewell": "Goodbye! Hope the consultation goes well.",
+    "affirm": "Of course — feel free to ask anything about this patient's clinical data.",
+}
+
+
+def _social_reply(question: str) -> str | None:
+    """Return a canned reply for social phrases, or None if not social."""
+    q = question.lower().strip().rstrip("!.,?")
+    if any(q == phrase or q.startswith(phrase) for phrase in _SOCIAL_GREETINGS):
+        return _SOCIAL_REPLIES["greeting"]
+    if any(phrase in q for phrase in _SOCIAL_THANKS):
+        return _SOCIAL_REPLIES["thanks"]
+    if any(q == phrase or q.startswith(phrase) for phrase in _SOCIAL_FAREWELLS):
+        return _SOCIAL_REPLIES["farewell"]
+    if q in _SOCIAL_AFFIRM:
+        return _SOCIAL_REPLIES["affirm"]
+    return None
 
 
 def _to_groq_tools(schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -197,12 +237,23 @@ async def run_agent(
     Yields:
         SSE-formatted strings: thinking | token | done | error events.
     """
+    # Pre-flight: handle social phrases instantly without hitting the LLM
+    social = _social_reply(question)
+    if social:
+        yield _sse("done", {
+            "answer": social,
+            "confidence": "high",
+            "data_gaps": [],
+            "tools_used": [],
+            "blocked": False,
+        })
+        return
+
     # Pre-flight: block off-topic questions before hitting the LLM
     if _is_off_topic(question):
         logger.info("Off-topic question blocked pre-flight: patient=%s", patient_id)
         yield _sse("done", {
             "answer": "My role is to support pre-visit clinical review for this patient. I'm not able to answer general questions outside that scope.",
-            "evidence": [],
             "confidence": "no_data",
             "data_gaps": [],
             "tools_used": [],
@@ -314,7 +365,6 @@ async def run_agent(
 
     validation: ValidationResult = await validate_chat_response(
         text=parsed.answer,
-        evidence=parsed.evidence,
         tool_results=tool_results_accumulator,
         patient_id=patient_id,
         clinician_id=clinician_id,
@@ -326,7 +376,6 @@ async def run_agent(
         # Do NOT persist blocked turns — prevents LLM from "learning" to comply on repeat asks
         yield _sse("done", {
             "answer": blocked.answer,
-            "evidence": [],
             "confidence": "blocked",
             "data_gaps": [],
             "tools_used": tools_used,
@@ -354,7 +403,6 @@ async def run_agent(
 
     yield _sse("done", {
         "answer": parsed.answer,
-        "evidence": parsed.evidence,
         "confidence": parsed.confidence,
         "data_gaps": parsed.data_gaps,
         "tools_used": tools_used,

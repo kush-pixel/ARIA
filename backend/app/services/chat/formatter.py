@@ -23,7 +23,6 @@ class ChatResponse:
     """Parsed chatbot response ready for the API layer."""
 
     answer: str
-    evidence: list[str] = field(default_factory=list)
     confidence: str = "medium"  # high | medium | low | no_data | blocked
     data_gaps: list[str] = field(default_factory=list)
     tools_used: list[str] = field(default_factory=list)
@@ -58,7 +57,7 @@ def parse_response(raw: str, tools_used: list[str] | None = None) -> ChatRespons
     """Parse the LLM's structured JSON response into a ChatResponse.
 
     Attempts JSON extraction first. Falls back to treating the whole string
-    as a plain-text answer with no evidence, to handle malformed LLM output.
+    as a plain-text answer, to handle malformed LLM output.
 
     Args:
         raw: Raw string from the LLM (expected to be JSON).
@@ -79,7 +78,6 @@ def parse_response(raw: str, tools_used: list[str] | None = None) -> ChatRespons
         data = json.loads(json_str)
         return ChatResponse(
             answer=str(data.get("answer", raw)),
-            evidence=list(data.get("evidence", [])),
             confidence=str(data.get("confidence", "medium")),
             data_gaps=list(data.get("data_gaps", [])),
             tools_used=tools_used,
@@ -88,7 +86,6 @@ def parse_response(raw: str, tools_used: list[str] | None = None) -> ChatRespons
         logger.warning("LLM response was not valid JSON — treating as plain text")
         return ChatResponse(
             answer=raw.strip(),
-            evidence=[],
             confidence="medium",
             data_gaps=[],
             tools_used=tools_used,

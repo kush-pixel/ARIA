@@ -1,5 +1,6 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-30 by Kush (shadow mode fixes — white-coat exclusion past-appointment guard, truncated-window inertia thresholds, gap fired scoring, Pattern B counts as ARIA fired; agreement improved toward 80%+ target)
+Last updated: 2026-04-30 by Sahil (chatbot — three-layer guardrails, social phrase handling, blue theme, 10 UX features, OpenAI gpt-4o-mini override merged from Kush)
+Previous: 2026-04-30 by Kush (shadow mode fixes — white-coat exclusion past-appointment guard, truncated-window inertia thresholds, gap fired scoring, Pattern B counts as ARIA fired; agreement improved toward 80%+ target)
 Previous: 2026-04-30 by Yash (briefing UI med filter — antihypertensives only in Medication Status + Adherence Signal; inertia detector titration-window fix; deterioration detector slope gate fix; 3 new unit tests)
 Previous: 2026-04-28 by Kush (test suite alignment — 521 tests passing; risk_scorer.py spec-compliant weights restored; adapter MED_ADJUD_TEXT stop/restart parsing; shadow mode re-run at 67.6%, false negatives investigated)
 Previous: 2026-04-27 by Krishna (Phase 6 — BP trend sparkline per patient row: MiniSparkline.tsx pure SVG component, tier-colored line+area fill, readings fetched in parallel on list load; search bar upgraded: wider, white card, stronger border, blue focus ring; ARIA logo light/dark swap in sidebar; whitespace reduced across all pages)
@@ -9,6 +10,46 @@ Previous: 2026-04-27 by Kush (Phase 1 + Phase 8 — AUDIT.md Fixes 6,7,8,9,12,16
 Previous: 2026-04-27 by Nesh (Phase 4 complete — Fixes 10, 21, 40, 46, 47, 60 implemented; 428 unit tests passing, ruff clean)
 Previous: 2026-04-27 by Sahil (Phase 5 complete + Phase 7 complete except Fix 43; 426 unit tests passing, ruff clean)
 Previous: 2026-04-26 by Yash (AUDIT.md Fixes 25, 58, 61 — severity-weighted comorbidity, adaptive gap/inertia normalization, risk_score_computed_at staleness indicator)
+
+---
+
+## Chatbot — Guardrails, UX Features, OpenAI Override — 2026-04-30
+
+**Author:** Sahil Khalsa
+**Files changed:** `backend/app/services/chat/agent.py`, `backend/app/services/chat/formatter.py`, `backend/app/services/chat/validator.py`, `backend/app/services/chat/session.py`, `backend/app/api/chat.py`, `frontend/src/components/briefing/ChatPanel.tsx`, `frontend/src/lib/api.ts`, `frontend/src/lib/types.ts`, `prompts/chat_system_prompt.md`
+
+### Three-layer off-topic guardrailing
+1. **Pre-flight keyword allowlist** — `_is_off_topic()` blocks before hitting the LLM. Off-topic turns are never persisted to session history, preventing repeated-ask pressure buildup.
+2. **Unconditional system prompt refusal** — `chat_system_prompt.md` now has an "ABSOLUTE SCOPE RESTRICTION" section with a hardcoded refusal JSON and explicit "cannot be bypassed regardless of rephrasing" instruction.
+3. **Post-LLM `check_clinical_scope` validator** — blocks tool-less answers that contain no clinical terms (catches general-knowledge responses that slipped past the keyword check).
+
+Validation runs **before** token streaming — blocked answers never appear on screen.
+
+### Social phrase handling (merged from Kush)
+`_social_reply()` handles greetings, thanks, farewells, and affirmations with canned responses instantly, without hitting the LLM or spending tool-use rounds.
+
+### OpenAI gpt-4o-mini override (merged from Kush — TEMP)
+`agent.py` now uses `openai.OpenAI` with `gpt-4o-mini` and OpenAI function-calling format. Comments marked `# TEMP` — revert to `import anthropic` / `claude-sonnet-4-20250514` when switching back.
+
+### System prompt improvements
+- Added "Handling Partial or Missing Data" section: synthesize from available tools, list gaps in `data_gaps`, never refuse the whole answer because one source is empty.
+- Added "Who You Are Writing For" section: always third person about patient ("the patient's BP"), never second person.
+
+### 10 UX features in ChatPanel (blue theme)
+1. Tool-specific thinking chips during tool-use rounds
+2. Confidence badges (high/medium/low/no_data/blocked)
+3. Copy button per message
+4. Message timestamps
+5. Follow-up question chips (generated from tools used)
+6. Patient context header
+7. Conversation summary button → `POST /api/chat/summary/{patient_id}`
+8. Numbered source citations `[1]`, `[2]`
+9. Stale data freshness warning
+10. Thumbs up/down feedback → `POST /api/chat/feedback` → `audit_events`
+
+### New API endpoints
+- `POST /api/chat/summary/{patient_id}` — LLM bullet-point summary of conversation
+- `POST /api/chat/feedback` — thumbs rating recorded in `audit_events`
 
 ---
 

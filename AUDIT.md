@@ -861,5 +861,9 @@ After Phase 3: `python scripts/run_generator.py` for all patients. Verify readin
 | 62 | Bug | Briefing composer hardcoded 140 mmHg threshold in adherence summary and visit agenda fallback — replaced with patient-adaptive threshold from compute_patient_threshold() | composer.py | — | ✓ DONE (2026-04-29) |
 | 63 | Bug | Shadow mode "Concerned" tab crash — toFixed() called on null adherence_pct, overall_pct, gap_days on cold-start visits | shadow-mode/page.tsx | — | ✓ DONE (2026-04-29) |
 | 64 | Feature | Alert acknowledged history — collapsible section showing last 7 days of acknowledged alerts with patient details, metrics, timestamp, and 24-hour undo button | alerts.py (new endpoints), AlertInbox.tsx, api.ts | — | ✓ DONE (2026-04-29) |
+| 65 | Feature | Chatbot three-layer guardrails — pre-flight keyword allowlist, unconditional system prompt refusal, post-LLM clinical scope validator; validation before streaming; blocked turns not persisted | agent.py, validator.py, chat_system_prompt.md | — | ✓ DONE (2026-04-30) |
+| 66 | Feature | Chatbot social phrase handling — instant canned replies for greetings/thanks/farewells without LLM call | agent.py | — | ✓ DONE (2026-04-30) |
+| 67 | Feature | Chatbot 10 UX features — tool thinking chips, confidence badges, copy button, timestamps, follow-up chips, patient header, summary endpoint, numbered citations, stale data warning, thumbs feedback | ChatPanel.tsx, chat.py, api.ts, types.ts | — | ✓ DONE (2026-04-30) |
+| 68 | Feature | Chatbot system prompt — partial data reasoning section + clinician-directed language rule (third person always) | chat_system_prompt.md | — | ✓ DONE (2026-04-30) |
 
 **Remaining open items:** 16 (lab values), 35–39 (infrastructure/security), 43 (patient-facing submission).

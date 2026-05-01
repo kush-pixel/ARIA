@@ -203,40 +203,8 @@ def check_clinical_scope(
     )
 
 
-def check_evidence_consistency(
-    evidence: list[str],
-    tool_results: dict[str, Any],
-) -> ValidationResult:
-    """Validate that cited evidence items reference tools that were actually called.
-
-    Args:
-        evidence: List of evidence strings from the structured response.
-        tool_results: Dict of tool_name → result for this turn.
-
-    Returns:
-        Failed result if an evidence item references a tool not in tool_results.
-    """
-    if not evidence or not tool_results:
-        return ValidationResult(passed=True)
-
-    tool_names = set(tool_results.keys())
-    for item in evidence:
-        item_lower = item.lower()
-        # Check if the evidence item mentions a source that was NOT called
-        for source in ["get_patient_readings", "get_patient_alerts", "get_medication_history",
-                       "get_adherence_summary", "get_clinical_context", "get_briefing"]:
-            if source.replace("get_", "").replace("_", " ") in item_lower and source not in tool_names:
-                return ValidationResult(
-                    passed=False,
-                    failed_check="evidence_inconsistency",
-                    detail=f"Evidence references '{source}' but that tool was not called this turn",
-                )
-    return ValidationResult(passed=True)
-
-
 async def validate_chat_response(
     text: str,
-    evidence: list[str],
     tool_results: dict[str, Any],
     patient_id: str,
     clinician_id: str,
@@ -247,13 +215,12 @@ async def validate_chat_response(
     Execution order:
       Group A (safety): PHI leak, prompt injection.
       Group B (guardrails): forbidden clinical language.
-      Group C (chatbot-specific): groundedness, empty data, certainty, scope, evidence.
+      Group C (chatbot-specific): groundedness, empty data, certainty, scope.
 
     Writes an audit_events row regardless of outcome.
 
     Args:
         text: Raw LLM answer string.
-        evidence: Evidence list from structured response.
         tool_results: Tool results from this agent turn.
         patient_id: Patient identifier — checked for PHI leak.
         clinician_id: Clinician identifier — for audit row.
@@ -279,7 +246,6 @@ async def validate_chat_response(
         lambda: check_empty_data_acknowledged(text, tool_results),
         lambda: check_no_certainty_predictions(text),
         lambda: check_scope_boundary(text),
-        lambda: check_evidence_consistency(evidence, tool_results),
     ]
 
     result: ValidationResult = ValidationResult(passed=True)

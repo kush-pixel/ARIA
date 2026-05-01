@@ -162,7 +162,6 @@ export interface ShadowModeBestWindow {
 
 export interface ChatDoneEvent {
   answer: string
-  evidence: string[]
   confidence: 'high' | 'medium' | 'low' | 'no_data' | 'blocked'
   data_gaps: string[]
   tools_used: string[]
@@ -174,7 +173,6 @@ export interface ChatDoneEvent {
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
-  evidence?: string[]
   confidence?: ChatDoneEvent['confidence']
   data_gaps?: string[]
   tools_used?: string[]
