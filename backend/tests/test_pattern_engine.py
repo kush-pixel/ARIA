@@ -909,3 +909,194 @@ async def test_deterioration_barely_positive_slope_does_not_fire() -> None:
     session = _session(_no_cc(), _appt(), _rows(*readings))
     result = await run_deterioration_detector(session, "1091")
     assert result["deterioration"] is False
+
+
+# ===========================================================================
+# _apply_tier_reclassification — nightly tier reclassification logic
+# ===========================================================================
+
+
+from app.services.worker.processor import _apply_tier_reclassification  # noqa: E402
+
+
+def _patient_mock(
+    risk_tier: str,
+    tier_override_source: str | None,
+    tier_override_suppressed_until: datetime | None = None,
+    enrolled_at: datetime | None = None,
+) -> MagicMock:
+    """Build a minimal Patient mock for reclassification tests."""
+    p = MagicMock()
+    p.risk_tier = risk_tier
+    p.tier_override_source = tier_override_source
+    p.tier_override_suppressed_until = tier_override_suppressed_until
+    p.enrolled_at = enrolled_at or (datetime.now(UTC) - timedelta(days=120))
+    return p
+
+
+def _cc_mock(problem_codes: list[str] | None = None) -> MagicMock:
+    cc = MagicMock()
+    cc.problem_codes = problem_codes or []
+    return cc
+
+
+@pytest.mark.asyncio
+async def test_reclassification_medium_to_high() -> None:
+    """Score ≥ 75 promotes medium → high."""
+    patient = _patient_mock("medium", None)
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=[
+        _scalar(patient),   # Patient query
+    ])
+    session.add = MagicMock()
+
+    await _apply_tier_reclassification(session, "1091", 78.0)
+
+    assert patient.risk_tier == "high"
+    assert patient.tier_override_source == "system_score"
+    assert patient.tier_override == "Sustained high risk score"
+    session.add.assert_called_once()
+    session.commit.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_reclassification_no_change_in_band() -> None:
+    """Score in the 40–74 band leaves medium tier unchanged."""
+    patient = _patient_mock("medium", None)
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=_scalar(patient))
+    session.add = MagicMock()
+
+    await _apply_tier_reclassification(session, "1091", 55.0)
+
+    assert patient.risk_tier == "medium"
+    session.add.assert_not_called()
+    session.commit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reclassification_high_to_medium_system_score_only() -> None:
+    """Score < 40 demotes system_score high → medium, but not system high."""
+    # system_score high → medium (allowed)
+    patient = _patient_mock("high", "system_score")
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=_scalar(patient))
+    session.add = MagicMock()
+
+    await _apply_tier_reclassification(session, "1091", 35.0)
+    assert patient.risk_tier == "medium"
+
+    # system high → NOT demoted
+    patient2 = _patient_mock("high", "system")
+    session2 = AsyncMock()
+    session2.execute = AsyncMock(return_value=_scalar(patient2))
+    session2.add = MagicMock()
+
+    await _apply_tier_reclassification(session2, "1091", 35.0)
+    assert patient2.risk_tier == "high"
+    session2.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reclassification_medium_to_low_blocked_comorbidity() -> None:
+    """Score < 25 with CKD (N18) blocks demotion to low."""
+    patient = _patient_mock("medium", None, enrolled_at=datetime.now(UTC) - timedelta(days=120))
+    cc = _cc_mock(problem_codes=["I10", "N18.3"])  # hypertension + CKD
+    no_urgent_alert = _scalar(None)
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=[
+        _scalar(patient),
+        _scalar(cc),
+        no_urgent_alert,
+    ])
+    session.add = MagicMock()
+
+    await _apply_tier_reclassification(session, "1091", 20.0)
+
+    assert patient.risk_tier == "medium"
+    session.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reclassification_medium_to_low_blocked_enrollment() -> None:
+    """Score < 25 but enrolled < 90 days blocks demotion to low."""
+    patient = _patient_mock(
+        "medium", None, enrolled_at=datetime.now(UTC) - timedelta(days=30)
+    )
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=_scalar(patient))
+    session.add = MagicMock()
+
+    await _apply_tier_reclassification(session, "1091", 20.0)
+
+    assert patient.risk_tier == "medium"
+    session.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reclassification_medium_to_low_success() -> None:
+    """Score < 25, enrolled ≥ 90 days, no comorbidities, no urgent alerts → low."""
+    patient = _patient_mock("medium", None, enrolled_at=datetime.now(UTC) - timedelta(days=120))
+    cc = _cc_mock(problem_codes=["I10"])  # hypertension only
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=[
+        _scalar(patient),
+        _scalar(cc),
+        _scalar(None),   # no urgent alert
+    ])
+    session.add = MagicMock()
+
+    await _apply_tier_reclassification(session, "1091", 18.0)
+
+    assert patient.risk_tier == "low"
+    assert patient.tier_override_source == "system_score"
+    assert patient.tier_override == "Stable — low risk score"
+    session.add.assert_called_once()
+    session.commit.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_reclassification_low_to_medium() -> None:
+    """Score ≥ 40 on a low-tier patient promotes back to medium."""
+    patient = _patient_mock("low", "system_score")
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=_scalar(patient))
+    session.add = MagicMock()
+
+    await _apply_tier_reclassification(session, "1091", 45.0)
+
+    assert patient.risk_tier == "medium"
+    assert patient.tier_override_source is None
+    session.add.assert_called_once()
+    session.commit.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_reclassification_break_glass() -> None:
+    """Score ≥ 85 overrides clinician suppression and promotes to high."""
+    suppressed_until = datetime.now(UTC) + timedelta(days=10)
+    patient = _patient_mock("medium", "clinician", suppressed_until)
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=_scalar(patient))
+    session.add = MagicMock()
+
+    await _apply_tier_reclassification(session, "1091", 88.0)
+
+    assert patient.risk_tier == "high"
+    assert patient.tier_override_source == "system_score"
+    session.add.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_reclassification_clinician_suppression_blocks_normal_promotion() -> None:
+    """Score = 76 inside a clinician suppression window does NOT promote."""
+    suppressed_until = datetime.now(UTC) + timedelta(days=5)
+    patient = _patient_mock("medium", "clinician", suppressed_until)
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=_scalar(patient))
+    session.add = MagicMock()
+
+    await _apply_tier_reclassification(session, "1091", 76.0)
+
+    assert patient.risk_tier == "medium"
+    session.add.assert_not_called()

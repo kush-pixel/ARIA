@@ -21,8 +21,8 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy import func as sa_func
-from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -82,32 +82,37 @@ def _group_entries(bundle: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     return groups
 
 
-def _determine_risk_tier(problem_codes: list[str]) -> tuple[str, str | None]:
+def _determine_risk_tier(problem_codes: list[str]) -> tuple[str, str | None, str | None]:
     """Apply clinical auto-override rules to determine the initial risk tier.
 
     Checks problem codes in the order they appear; first match wins.
     The default when no override applies is ``"medium"``.
 
-    Override rules (per CLAUDE.md):
-    - Any code starting with ``I50`` (CHF)    → high / "CHF in problem list"
-    - Any code starting with ``I63`` or ``I64`` (Stroke) → high / "Stroke history"
-    - Any code starting with ``G45`` (TIA)   → high / "TIA history"
+    Override rules:
+    - Any code starting with ``I50`` (CHF)                  → high / "CHF in problem list"
+    - Any code starting with ``I61`` (haemorrhagic stroke)   → high / "Haemorrhagic stroke history"
+    - Any code starting with ``I63`` or ``I64`` (ischaemic stroke) → high / "Stroke history"
+    - Any code starting with ``G45`` (TIA)                   → high / "TIA history"
 
     Args:
         problem_codes: ICD-10 / SNOMED codes from Condition resources.
 
     Returns:
-        Tuple ``(risk_tier, tier_override)``. ``tier_override`` is ``None``
-        when the default "medium" tier applies.
+        Tuple ``(risk_tier, tier_override, tier_override_source)``.
+        ``tier_override`` and ``tier_override_source`` are ``None`` when the
+        default "medium" tier applies.  ``tier_override_source`` is ``"system"``
+        for all auto-override cases — these are immovable safety floors.
     """
     for code in problem_codes:
         if code.startswith("I50"):
-            return "high", "CHF in problem list"
+            return "high", "CHF in problem list", "system"
+        if code.startswith("I61"):
+            return "high", "Haemorrhagic stroke history", "system"
         if code.startswith("I63") or code.startswith("I64"):
-            return "high", "Stroke history"
+            return "high", "Stroke history", "system"
         if code.startswith("G45"):
-            return "high", "TIA history"
-    return "medium", None
+            return "high", "TIA history", "system"
+    return "medium", None, None
 
 
 def _extract_obs_components(obs: dict[str, Any]) -> tuple[int | None, int | None]:
@@ -269,15 +274,32 @@ async def ingest_fhir_bundle(
                 if code:
                     problem_codes.append(code)
 
-        risk_tier, tier_override = _determine_risk_tier(problem_codes)
+        risk_tier, tier_override, tier_override_source = _determine_risk_tier(problem_codes)
 
         # Check existence before the INSERT so we can track the inserted count
-        # accurately (ON CONFLICT DO NOTHING rowcount is unreliable in asyncpg).
+        # accurately (ON CONFLICT DO UPDATE rowcount is unreliable in asyncpg).
         existing_result = await session.execute(
             select(Patient).where(Patient.patient_id == patient_id)
         )
         patient_existed = existing_result.scalar_one_or_none() is not None
 
+        # Two-step upsert:
+        #
+        # Step A — INSERT with ON CONFLICT DO UPDATE for demographics only.
+        #   Tier columns are intentionally NOT included here — they are handled
+        #   in Step B with explicit safety conditions.
+        #
+        # Step B — Conditional UPDATE of tier columns.
+        #   When new source is "system" (auto-override): always overwrite.
+        #   When current source is "system": overwrite to reflect the removal
+        #     of a condition (e.g. CHF resolved in EHR).
+        #   When current source is NULL: no prior override, safe to update.
+        #   When current source is "clinician" or "system_score": DO NOT touch —
+        #     clinician judgement and score-promoted tiers survive re-ingestion.
+        #
+        # Operational columns (monitoring_active, enrolled_at, enrolled_by,
+        # next_appointment, risk_score, risk_score_computed_at,
+        # tier_override_suppressed_until) are never touched by ingestion.
         await session.execute(
             pg_insert(Patient)
             .values(
@@ -286,15 +308,44 @@ async def ingest_fhir_bundle(
                 age=age,
                 risk_tier=risk_tier,
                 tier_override=tier_override,
+                tier_override_source=tier_override_source,
                 monitoring_active=True,
             )
-            .on_conflict_do_nothing(index_elements=["patient_id"])
+            .on_conflict_do_update(
+                index_elements=["patient_id"],
+                set_={"gender": gender, "age": age},
+            )
+        )
+
+        # Step B: update tier columns conditionally
+        if tier_override_source == "system":
+            # Auto-override always wins — no condition on current source
+            tier_where = Patient.patient_id == patient_id
+        else:
+            # Preserve clinician and score-promoted tiers through re-ingestion
+            tier_where = and_(
+                Patient.patient_id == patient_id,
+                or_(
+                    Patient.tier_override_source == "system",  # was auto, now removed
+                    Patient.tier_override_source.is_(None),    # no active override
+                ),
+            )
+        await session.execute(
+            update(Patient)
+            .where(tier_where)
+            .values(
+                risk_tier=risk_tier,
+                tier_override=tier_override,
+                tier_override_source=tier_override_source,
+            )
         )
         summary["patients_inserted"] = 0 if patient_existed else 1
         logger.info(
-            "Patient %s: %s",
+            "Patient %s: %s (tier=%s source=%s)",
             patient_id,
-            "already exists" if patient_existed else f"inserted (tier={risk_tier})",
+            "updated" if patient_existed else "inserted",
+            risk_tier,
+            tier_override_source or "none",
         )
 
         # ------------------------------------------------------------------ #

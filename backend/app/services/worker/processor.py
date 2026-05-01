@@ -54,6 +54,21 @@ _RETRY_BACKOFF_SECONDS: list[int] = [30, 120, 480]  # backoff for retry 1, 2, 3
 # Alert types eligible for escalation after 24h unacknowledged
 _ESCALATION_ALERT_TYPES: tuple[str, ...] = ("gap_urgent", "deterioration")
 
+# Tier reclassification thresholds (hysteresis bands)
+_TIER_PROMOTE_THRESHOLD: float = 75.0   # medium → high
+_TIER_DEMOTE_THRESHOLD: float = 40.0    # high → medium, low → medium (re-promote)
+_TIER_LOW_THRESHOLD: float = 25.0       # medium → low
+_TIER_BREAK_GLASS: float = 85.0         # overrides clinician suppression window
+
+# Minimum days enrolled before demotion to low is permitted (clinical evidence base)
+_MIN_ENROLMENT_DAYS_FOR_LOW: int = 90
+
+# ICD-10 prefixes that block demotion to low — SEVERE and MODERATE comorbidities
+_COMORBIDITY_BLOCK_PREFIXES: tuple[str, ...] = (
+    "I50", "I61", "I63", "I64", "G45",  # SEVERE: CHF, haemorrhagic/ischaemic stroke, TIA
+    "E11", "N18", "I25",                 # MODERATE: diabetes, CKD, CAD
+)
+
 # Type alias for async job handler functions
 _JobHandler = Callable[[ProcessingJob, AsyncSession], Awaitable[None]]
 
@@ -321,6 +336,13 @@ async def _handle_pattern_recompute(job: ProcessingJob, session: AsyncSession) -
 
     score = await compute_risk_score(pid, session)
     logger.info(
+        "risk_score computed: patient=%s score=%.2f",
+        pid,
+        score,
+    )
+
+    await _apply_tier_reclassification(session, pid, score)
+    logger.info(
         "pattern_recompute completed: patient=%s risk_score=%.2f",
         pid,
         score,
@@ -418,6 +440,177 @@ async def _run_escalation_sweep(session: AsyncSession) -> int:
         await session.commit()
         logger.info("escalation_sweep: %d alert(s) escalated", count)
     return count
+
+
+async def _apply_tier_reclassification(
+    session: AsyncSession,
+    patient_id: str,
+    score: float,
+) -> None:
+    """Reclassify risk tier based on the freshly computed Layer 2 score.
+
+    Applies hysteresis bands to prevent oscillation:
+      medium → high:   score ≥ 75  (no further conditions)
+      high → medium:   score < 40  (only when source == "system_score")
+      medium → low:    score < 25  + enrolled ≥ 90 days + no SEVERE/MODERATE
+                       comorbidities + no active unacknowledged urgent alerts
+      low → medium:    score ≥ 40  (no further conditions)
+
+    Guards:
+      - source == "system" (CHF/Stroke/TIA/haemorrhagic stroke): never touched.
+      - Clinician-suppressed (source == "clinician", now < suppressed_until):
+        skipped unless score ≥ 85 (break-glass promotion only).
+
+    Writes an AuditEvent on every tier change and commits.
+
+    Args:
+        session: Active async SQLAlchemy session.
+        patient_id: Patient to reclassify.
+        score: Freshly computed risk score (0.0–100.0).
+    """
+    from app.models.clinical_context import ClinicalContext
+
+    patient_row = await session.execute(
+        select(Patient).where(Patient.patient_id == patient_id)
+    )
+    patient = patient_row.scalar_one_or_none()
+    if patient is None:
+        logger.warning("tier_reclassification: patient %s not found — skipping", patient_id)
+        return
+
+    current_tier = patient.risk_tier
+    source = patient.tier_override_source
+    suppressed_until = patient.tier_override_suppressed_until
+    now = datetime.now(UTC)
+
+    # Guard 1 — immovable auto-override floor
+    if source == "system":
+        return
+
+    # Guard 2 — clinician suppression window
+    in_suppression = (
+        source == "clinician"
+        and suppressed_until is not None
+        and now < suppressed_until
+    )
+    if in_suppression:
+        if score >= _TIER_BREAK_GLASS and current_tier != "high":
+            logger.warning(
+                "tier_reclassification break-glass: patient=%s score=%.2f overrides "
+                "clinician suppression (suppressed_until=%s)",
+                patient_id,
+                score,
+                suppressed_until.isoformat(),
+            )
+            # Clear stale suppression window — source will change to system_score
+            patient.tier_override_suppressed_until = None
+            # Fall through to promotion check only
+        else:
+            logger.info(
+                "tier_reclassification: patient=%s clinician-suppressed until %s — skipping",
+                patient_id,
+                suppressed_until.isoformat(),
+            )
+            return
+
+    new_tier: str | None = None
+    new_source: str | None = source
+
+    if current_tier == "medium" and score >= _TIER_PROMOTE_THRESHOLD:
+        new_tier = "high"
+        new_source = "system_score"
+
+    elif current_tier == "high" and source == "system_score" and score < _TIER_DEMOTE_THRESHOLD:
+        new_tier = "medium"
+        new_source = None
+
+    elif current_tier == "medium" and score < _TIER_LOW_THRESHOLD:
+        days_enrolled = (
+            (now - patient.enrolled_at).days if patient.enrolled_at is not None else 0
+        )
+        if days_enrolled < _MIN_ENROLMENT_DAYS_FOR_LOW:
+            logger.info(
+                "tier_reclassification: patient=%s score=%.2f below threshold but "
+                "enrolled only %d days — demotion to low suppressed",
+                patient_id,
+                score,
+                days_enrolled,
+            )
+        else:
+            cc_row = await session.execute(
+                select(ClinicalContext).where(ClinicalContext.patient_id == patient_id)
+            )
+            ctx = cc_row.scalar_one_or_none()
+            codes: list[str] = (ctx.problem_codes or []) if ctx is not None else []
+            has_blocking_comorbidity = any(
+                code.startswith(_COMORBIDITY_BLOCK_PREFIXES) for code in codes
+            )
+            if has_blocking_comorbidity:
+                logger.info(
+                    "tier_reclassification: patient=%s score=%.2f below threshold but "
+                    "comorbidity blocks demotion to low",
+                    patient_id,
+                    score,
+                )
+            else:
+                urgent_row = await session.execute(
+                    select(Alert)
+                    .where(
+                        Alert.patient_id == patient_id,
+                        Alert.alert_type.in_(("gap_urgent", "deterioration")),
+                        Alert.acknowledged_at.is_(None),
+                    )
+                    .limit(1)
+                )
+                if urgent_row.scalar_one_or_none() is not None:
+                    logger.info(
+                        "tier_reclassification: patient=%s score=%.2f below threshold but "
+                        "active urgent alerts block demotion to low",
+                        patient_id,
+                        score,
+                    )
+                else:
+                    new_tier = "low"
+                    new_source = "system_score"
+
+    elif current_tier == "low" and score >= _TIER_DEMOTE_THRESHOLD:
+        new_tier = "medium"
+        new_source = None
+
+    if new_tier is None or new_tier == current_tier:
+        return
+
+    old_tier = current_tier
+    patient.risk_tier = new_tier
+    patient.tier_override_source = new_source
+    patient.tier_override = (
+        "Sustained high risk score"
+        if new_tier == "high"
+        else "Stable — low risk score"
+        if new_tier == "low"
+        else None
+    )
+
+    session.add(
+        AuditEvent(
+            actor_type="system",
+            actor_id="tier_reclassifier",
+            patient_id=patient_id,
+            action="tier_reclassified",
+            resource_type="Patient",
+            resource_id=patient_id,
+            outcome="success",
+            details=f"tier={old_tier}→{new_tier} score={score} source={new_source or 'none'}",
+        )
+    )
+    await session.commit()
+    logger.info(
+        "tier_reclassification: patient=%s %s→%s score=%.2f",
+        patient_id,
+        old_tier,
+        new_tier,
+        score,
+    )
 
 
 # Registry of all supported job_type values → handler functions.

@@ -214,6 +214,15 @@ INDEXES: list[tuple[str, str]] = [
         "readings_symptoms_col",
         "ALTER TABLE readings ADD COLUMN IF NOT EXISTS symptoms TEXT[]",
     ),
+    # Risk tier overhaul — tier_override_source and suppression window
+    (
+        "patients_tier_override_source_col",
+        "ALTER TABLE patients ADD COLUMN IF NOT EXISTS tier_override_source TEXT",
+    ),
+    (
+        "patients_tier_override_suppressed_until_col",
+        "ALTER TABLE patients ADD COLUMN IF NOT EXISTS tier_override_suppressed_until TIMESTAMPTZ",
+    ),
 ]
 
 # ---------------------------------------------------------------------------

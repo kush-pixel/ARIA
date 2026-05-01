@@ -39,3 +39,7 @@ class Patient(Base):
     risk_score_computed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    tier_override_source: Mapped[str | None] = mapped_column(String, nullable=True)
+    tier_override_suppressed_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

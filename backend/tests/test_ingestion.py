@@ -165,9 +165,10 @@ def _make_mock_session(
 
     Call order that ingestion.py follows (per-observation ON CONFLICT path):
       0. SELECT Patient (existence check)
-      1. INSERT Patient ON CONFLICT DO NOTHING
-      2. INSERT/UPSERT ClinicalContext ON CONFLICT DO UPDATE
-      3..N. INSERT Reading ON CONFLICT DO NOTHING (one per Observation)
+      1. INSERT Patient ON CONFLICT DO UPDATE (demographics only)
+      2. UPDATE Patient tier columns (conditional — Step B)
+      3. INSERT/UPSERT ClinicalContext ON CONFLICT DO UPDATE
+      4..N. INSERT Reading ON CONFLICT DO NOTHING (one per Observation)
     """
     # Result for SELECT Patient
     existing_patient = MagicMock()
@@ -175,8 +176,11 @@ def _make_mock_session(
         MagicMock() if patient_exists else None
     )
 
-    # Result for INSERT Patient
+    # Result for INSERT Patient (Step A — demographics upsert)
     insert_patient_result = MagicMock()
+
+    # Result for UPDATE Patient tier columns (Step B — conditional)
+    tier_update_result = MagicMock()
 
     # Result for UPSERT ClinicalContext
     upsert_cc_result = MagicMock()
@@ -191,6 +195,7 @@ def _make_mock_session(
         side_effect=[
             existing_patient,
             insert_patient_result,
+            tier_update_result,
             upsert_cc_result,
             reading_insert_result,  # one per Observation in the bundle
         ]
@@ -240,43 +245,67 @@ class TestValidateFhirBundle:
 
 class TestDetermineRiskTier:
     def test_chf_code_returns_high(self) -> None:
-        tier, override = _determine_risk_tier(["I50.0"])
+        tier, override, source = _determine_risk_tier(["I50.0"])
         assert tier == "high"
         assert override == "CHF in problem list"
+        assert source == "system"
 
     def test_chf_code_prefix_i50_variants(self) -> None:
         for code in ["I50", "I50.1", "I50.9"]:
-            tier, override = _determine_risk_tier([code])
+            tier, override, source = _determine_risk_tier([code])
             assert tier == "high", f"Expected high for {code}"
+            assert source == "system"
 
     def test_stroke_i63_returns_high(self) -> None:
-        tier, override = _determine_risk_tier(["I63.0"])
+        tier, override, source = _determine_risk_tier(["I63.0"])
         assert tier == "high"
         assert override == "Stroke history"
+        assert source == "system"
 
     def test_stroke_i64_returns_high(self) -> None:
-        tier, override = _determine_risk_tier(["I64"])
+        tier, override, source = _determine_risk_tier(["I64"])
         assert tier == "high"
         assert override == "Stroke history"
+        assert source == "system"
 
     def test_tia_returns_high(self) -> None:
-        tier, override = _determine_risk_tier(["G45.9"])
+        tier, override, source = _determine_risk_tier(["G45.9"])
         assert tier == "high"
         assert override == "TIA history"
+        assert source == "system"
+
+    def test_haemorrhagic_stroke_i61_returns_high(self) -> None:
+        tier, override, source = _determine_risk_tier(["I61.0"])
+        assert tier == "high"
+        assert override == "Haemorrhagic stroke history"
+        assert source == "system"
+
+    def test_i61_variants(self) -> None:
+        for code in ["I61", "I61.0", "I61.9"]:
+            tier, override, source = _determine_risk_tier([code])
+            assert tier == "high", f"Expected high for {code}"
+            assert source == "system"
+
+    def test_i61_before_i63_in_priority(self) -> None:
+        # I61 should match before I63 — both high but different override text
+        tier, override, source = _determine_risk_tier(["I61.0", "I63.0"])
+        assert override == "Haemorrhagic stroke history"
 
     def test_no_override_returns_medium(self) -> None:
-        tier, override = _determine_risk_tier(["I10", "E11.9", "Z00.00"])
+        tier, override, source = _determine_risk_tier(["I10", "E11.9", "Z00.00"])
         assert tier == "medium"
         assert override is None
+        assert source is None
 
     def test_empty_list_returns_medium(self) -> None:
-        tier, override = _determine_risk_tier([])
+        tier, override, source = _determine_risk_tier([])
         assert tier == "medium"
         assert override is None
+        assert source is None
 
     def test_first_match_wins(self) -> None:
         # CHF before stroke — CHF override should win
-        tier, override = _determine_risk_tier(["I50.0", "I63.0"])
+        tier, override, source = _determine_risk_tier(["I50.0", "I63.0"])
         assert override == "CHF in problem list"
 
 
@@ -511,9 +540,9 @@ async def test_ingest_med_history_stored(full_bundle: dict) -> None:
     """med_history from _aria_med_history is written into the ClinicalContext upsert."""
     session = _make_mock_session()
     await ingest_fhir_bundle(full_bundle, session)
-    # The ClinicalContext upsert is execute call index 2 (0=SELECT Patient,
-    # 1=INSERT Patient, 2=UPSERT ClinicalContext, 3+=INSERT Reading per obs).
-    upsert_call = session.execute.call_args_list[2]
+    # The ClinicalContext upsert is execute call index 3 (0=SELECT Patient,
+    # 1=INSERT Patient Step A, 2=UPDATE tier Step B, 3=UPSERT ClinicalContext, 4+=Readings).
+    upsert_call = session.execute.call_args_list[3]
     stmt = upsert_call.args[0]
     # Compile without literal_binds (JSONB cannot be rendered as literal).
     # The column name "med_history" must appear in the compiled SQL and its
@@ -554,6 +583,7 @@ def _make_extended_mock_session(reading_rowcount: int = 1, extra_results: int = 
     existing_patient = MagicMock()
     existing_patient.scalar_one_or_none.return_value = None
     insert_patient_result = MagicMock()
+    tier_update_result = MagicMock()
     upsert_cc_result = MagicMock()
     reading_insert_result = MagicMock()
     reading_insert_result.rowcount = reading_rowcount
@@ -561,6 +591,7 @@ def _make_extended_mock_session(reading_rowcount: int = 1, extra_results: int = 
     side_effects = [
         existing_patient,
         insert_patient_result,
+        tier_update_result,
         upsert_cc_result,
         reading_insert_result,
     ] + [MagicMock() for _ in range(extra_results)]
@@ -606,7 +637,7 @@ async def test_last_visit_date_from_aria_visit_dates(full_bundle: dict) -> None:
     session = _make_mock_session()
     await ingest_fhir_bundle(full_bundle, session)
 
-    upsert_call = session.execute.call_args_list[2]
+    upsert_call = session.execute.call_args_list[3]
     compiled = upsert_call.args[0].compile()
     assert compiled.params.get("last_visit_date") == date(2021, 3, 1)
 
@@ -620,7 +651,7 @@ async def test_last_visit_date_fallback_to_obs_when_no_visit_dates(full_bundle: 
     session = _make_mock_session()
     await ingest_fhir_bundle(full_bundle, session)
 
-    upsert_call = session.execute.call_args_list[2]
+    upsert_call = session.execute.call_args_list[3]
     compiled = upsert_call.args[0].compile()
     assert compiled.params.get("last_visit_date") == date(2020, 6, 15)
 
@@ -639,7 +670,7 @@ async def test_problem_assessments_stored_in_cc_values(full_bundle: dict) -> Non
     session = _make_mock_session()
     await ingest_fhir_bundle(full_bundle, session)
 
-    upsert_call = session.execute.call_args_list[2]
+    upsert_call = session.execute.call_args_list[3]
     compiled = upsert_call.args[0].compile()
     assert "problem_assessments" in str(compiled)
     assert compiled.params.get("problem_assessments") == assessments
@@ -655,7 +686,7 @@ async def test_social_context_stored_in_cc_values(full_bundle: dict) -> None:
     session = _make_mock_session()
     await ingest_fhir_bundle(full_bundle, session)
 
-    upsert_call = session.execute.call_args_list[2]
+    upsert_call = session.execute.call_args_list[3]
     compiled = upsert_call.args[0].compile()
     assert compiled.params.get("social_context") == "SMOKING: Never smoked"
 
@@ -676,7 +707,7 @@ async def test_allergy_reactions_stored_parallel_to_allergies() -> None:
     session = _make_mock_session()
     await ingest_fhir_bundle(bundle, session)
 
-    upsert_call = session.execute.call_args_list[2]
+    upsert_call = session.execute.call_args_list[3]
     compiled = upsert_call.args[0].compile()
     reactions = compiled.params.get("allergy_reactions")
     assert reactions is not None
@@ -702,7 +733,7 @@ async def test_last_clinic_pulse_stored() -> None:
     session = _make_mock_session()
     await ingest_fhir_bundle(bundle, session)
 
-    upsert_call = session.execute.call_args_list[2]
+    upsert_call = session.execute.call_args_list[3]
     compiled = upsert_call.args[0].compile()
     assert compiled.params.get("last_clinic_pulse") == 68
 
@@ -722,7 +753,7 @@ async def test_last_clinic_spo2_stored_and_historic_populated() -> None:
     session = _make_mock_session()
     await ingest_fhir_bundle(bundle, session)
 
-    upsert_call = session.execute.call_args_list[2]
+    upsert_call = session.execute.call_args_list[3]
     compiled = upsert_call.args[0].compile()
     # last_clinic_spo2 is the last (most recent) SpO2 value
     assert compiled.params.get("last_clinic_spo2") == 91.0
@@ -756,9 +787,10 @@ async def test_non_bp_observations_not_inserted_as_readings() -> None:
     summary = await ingest_fhir_bundle(bundle, session)
 
     assert summary["readings_inserted"] == 1
-    # Calls: 0=SELECT Patient, 1=INSERT Patient, 2=UPSERT CC, 3=INSERT 1 BP reading
-    # If pulse/spo2 were mistakenly inserted, call_count would be 6+ (plus audit commit)
-    assert session.execute.call_count == 4  # exactly 4 execute calls
+    # Calls: 0=SELECT, 1=INSERT Patient (Step A), 2=UPDATE tier (Step B),
+    #        3=UPSERT CC, 4=INSERT 1 BP reading
+    # If pulse/spo2 were mistakenly inserted, call_count would be 7+ (plus audit commit)
+    assert session.execute.call_count == 5  # exactly 5 execute calls
 
 
 # --- Fix 16: recent_labs skeleton ---
@@ -771,7 +803,7 @@ async def test_recent_labs_none_when_no_aria_recent_labs(full_bundle: dict) -> N
     session = _make_mock_session()
     await ingest_fhir_bundle(full_bundle, session)
 
-    upsert_call = session.execute.call_args_list[2]
+    upsert_call = session.execute.call_args_list[3]
     compiled = upsert_call.args[0].compile()
     assert compiled.params.get("recent_labs") is None
 
@@ -785,7 +817,7 @@ async def test_recent_labs_stored_when_present(full_bundle: dict) -> None:
     session = _make_mock_session()
     await ingest_fhir_bundle(full_bundle, session)
 
-    upsert_call = session.execute.call_args_list[2]
+    upsert_call = session.execute.call_args_list[3]
     compiled = upsert_call.args[0].compile()
     labs = compiled.params.get("recent_labs")
     assert labs is not None
