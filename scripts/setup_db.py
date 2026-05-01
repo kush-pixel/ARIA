@@ -209,6 +209,11 @@ INDEXES: list[tuple[str, str]] = [
         "CREATE INDEX IF NOT EXISTS idx_gap_explanations_patient "
         "ON gap_explanations (patient_id, gap_start DESC)",
     ),
+    # Fix 43 — patient PWA: symptom reporting
+    (
+        "readings_symptoms_col",
+        "ALTER TABLE readings ADD COLUMN IF NOT EXISTS symptoms TEXT[]",
+    ),
 ]
 
 # ---------------------------------------------------------------------------

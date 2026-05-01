@@ -38,6 +38,7 @@ from app.db.base import AsyncSessionLocal
 from app.models.alert import Alert
 from app.models.patient import Patient
 from app.models.processing_job import ProcessingJob
+from app.utils.datetime_utils import is_off_hours
 from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -49,28 +50,11 @@ _BATCH_SIZE: int = 10
 _MAX_RETRIES: int = 3
 _RETRY_BACKOFF_SECONDS: list[int] = [30, 120, 480]  # backoff for retry 1, 2, 3
 
-# Off-hours window: 6 PM (18) to 8 AM (8) local UTC, or weekends
-_OFF_HOURS_START: int = 18
-_OFF_HOURS_END: int = 8
 # Alert types eligible for escalation after 24h unacknowledged
 _ESCALATION_ALERT_TYPES: tuple[str, ...] = ("gap_urgent", "deterioration")
 
 # Type alias for async job handler functions
 _JobHandler = Callable[[ProcessingJob, AsyncSession], Awaitable[None]]
-
-
-# ---------------------------------------------------------------------------
-# Off-hours helper
-# ---------------------------------------------------------------------------
-
-
-def _is_off_hours(dt: datetime) -> bool:
-    """Return True if dt falls between 6 PM–8 AM UTC or on a weekend."""
-    hour = dt.hour
-    weekday = dt.weekday()  # 5=Saturday, 6=Sunday
-    if weekday >= 5:
-        return True
-    return hour >= _OFF_HOURS_START or hour < _OFF_HOURS_END
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +98,7 @@ async def _upsert_alert(
                 gap_days=gap_days,
                 triggered_at=now,
                 delivered_at=now,
-                off_hours=_is_off_hours(now),
+                off_hours=is_off_hours(now),
             )
         )
 

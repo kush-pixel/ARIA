@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     demo_mode: bool = Field(False, description="Demo mode: enables admin trigger endpoints")
     briefing_trigger: str = Field("07:30", description="Daily briefing generation time HH:MM UTC")
 
+    # Patient PWA
+    patient_app_url: str = Field("", description="Patient PWA origin for CORS (Vercel URL)")
+
     # Auth
     patient_jwt_secret: str = Field(
         "",
