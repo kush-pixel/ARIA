@@ -50,7 +50,7 @@ export default function RiskScoreBar({ score, tier: _tier }: RiskScoreBarProps) 
                        px-3.5 py-2 shadow-lg leading-snug z-50"
             sideOffset={6}
           >
-            Priority score based on BP trend, medication history, and adherence signal.
+            Today's urgency score (0–100) — how much attention this patient needs right now. Weighted across BP vs baseline (30%), days since last med change (25%), adherence (20%), monitoring gap (15%), and comorbidities (10%). A High Risk patient can score low if currently stable and well-managed.
             <Tooltip.Arrow className="fill-gray-900 dark:fill-gray-700" />
           </Tooltip.Content>
         </Tooltip.Portal>

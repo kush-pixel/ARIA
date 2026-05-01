@@ -1,5 +1,6 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-04-30 by Sahil (chatbot — three-layer guardrails, social phrase handling, blue theme, 10 UX features, OpenAI gpt-4o-mini override merged from Kush)
+Last updated: 2026-05-01 by Krishna (frontend clinical UI — dashboard column redesign, BP chart single-source average, chatbot guardrail fix, interactive tour, patient panel de-coloring, adherence card layout, SparklineChart data consistency)
+Previous: 2026-04-30 by Sahil (chatbot — three-layer guardrails, social phrase handling, blue theme, 10 UX features, OpenAI gpt-4o-mini override merged from Kush)
 Previous: 2026-04-30 by Kush (shadow mode fixes — white-coat exclusion past-appointment guard, truncated-window inertia thresholds, gap fired scoring, Pattern B counts as ARIA fired; agreement improved toward 80%+ target)
 Previous: 2026-04-30 by Yash (briefing UI med filter — antihypertensives only in Medication Status + Adherence Signal; inertia detector titration-window fix; deterioration detector slope gate fix; 3 new unit tests)
 Previous: 2026-04-28 by Kush (test suite alignment — 521 tests passing; risk_scorer.py spec-compliant weights restored; adapter MED_ADJUD_TEXT stop/restart parsing; shadow mode re-run at 67.6%, false negatives investigated)
@@ -10,6 +11,64 @@ Previous: 2026-04-27 by Kush (Phase 1 + Phase 8 — AUDIT.md Fixes 6,7,8,9,12,16
 Previous: 2026-04-27 by Nesh (Phase 4 complete — Fixes 10, 21, 40, 46, 47, 60 implemented; 428 unit tests passing, ruff clean)
 Previous: 2026-04-27 by Sahil (Phase 5 complete + Phase 7 complete except Fix 43; 426 unit tests passing, ruff clean)
 Previous: 2026-04-26 by Yash (AUDIT.md Fixes 25, 58, 61 — severity-weighted comorbidity, adaptive gap/inertia normalization, risk_score_computed_at staleness indicator)
+
+---
+
+## Frontend Clinical UI Redesign — 2026-05-01
+
+**Author:** Krishna Patel
+**Files changed:** `frontend/src/components/dashboard/PatientList.tsx`, `frontend/src/components/dashboard/RiskTierBadge.tsx`, `frontend/src/components/dashboard/RiskScoreBar.tsx`, `frontend/src/components/briefing/SparklineChart.tsx`, `frontend/src/components/briefing/AdherenceSummary.tsx`, `frontend/src/components/briefing/BriefingCard.tsx`, `frontend/src/components/briefing/ChatPanel.tsx`, `frontend/src/components/shared/Topbar.tsx`, `frontend/src/components/shared/Sidebar.tsx`, `frontend/src/components/shared/Tour.tsx` (new), `frontend/src/components/shared/WalkthroughModal.tsx` (new), `frontend/src/app/(main)/layout.tsx`, `frontend/src/app/(main)/patients/[id]/page.tsx`, `frontend/src/lib/api.ts`, `backend/app/api/patients.py`, `backend/app/services/chat/validator.py`, `backend/app/services/chat/agent.py`, `backend/app/services/chat/formatter.py`, `prompts/chat_system_prompt.md`
+
+### Dashboard — Patient Panel columns
+
+- **Removed** BP sparkline graph (`MiniSparkline`) — replaced with text-only BP Trend column
+- **Added** Chief Concern column — derives conditions (CHF, Stroke, TIA, Diabetes, CKD, CAD, Hypertension, AF) from `tier_override`, always appends Hypertension, shows plain text
+- **Renamed** "Risk Tier" → "Chronic Risk", "Priority Score" → "Priority Score" (reverted), "Urgency Today" → "Priority Score"
+- **Column order:** Patient | Chronic Risk | Chief Concern | Priority Score | BP Trend | Appointment
+- **BP Trend:** 3-label system (Low / Stable / High) relative to patient's personal baseline from `historic_bp_systolic`; new `GET /api/patients/{id}/baseline` endpoint computes median from `clinical_context`
+- **Removed** "CHF in problem list" tier_override text under patient name
+- **Removed** Briefing column icon; Alert bell in Topbar now routes to `/alerts`
+
+### Dashboard — visual de-coloring (clinical style)
+
+- `RiskTierBadge`: neutral gray background for all tiers; only High uses faint red tint; colored dot removed; shorter labels ("High" not "High Risk"); Radix tooltip explains diagnosis-based classification
+- `RiskScoreBar`: tooltip updated — explains "today's urgency" vs chronic risk distinction; "Score stale" → "Score outdated (>26h)"
+- Filter tabs: neutral white active state, no red/amber/green fill
+- Row hover: `hover:bg-gray-50` instead of blue tint
+- Chief Concern: plain gray text, no badge/border
+- BP Trend: plain text label, threshold as muted secondary line — no colored pill
+
+### BP Trend chart (`SparklineChart`) — data consistency fix
+
+- **Root cause fixed:** two separate computation paths produced different averages. `buildChartData` used a 7-day rolling average; `computeSummary` used raw last-14-reading mean — structurally different numbers.
+- **Fix:** single `buildData` pass. Daily avg = mean of morning+evening sessions that day. Summary header uses `points.slice(-14)` — mathematically identical to what the chart draws at the right edge.
+- **Flat average line:** `ReferenceLine` at `avgSystolic` with label on right side — same number as header "Avg X/Y mmHg". No conflicting rolling line.
+- Removed inline AM/PM/Avg labels repeated across chart.
+- Background threshold zones: `fillOpacity` reduced to 0.15–0.18 (barely visible).
+- Summary header: trend arrow (↑ → ↓), level label ("elevated"/"borderline"/"within target"), single avg value.
+- Morning/Evening lines: slate gray, 40–60% opacity, secondary to the avg line.
+
+### Adherence summary — compact layout
+
+- Replaced tall progress bars with a single bordered table-style list.
+- Each row: medication name → confirmed/total doses (muted) → % in color (text only, no background pill).
+- `py-1.5` per row vs the previous `space-y-4` — 14 medications now fit in the same space that 3 used to.
+
+### Chatbot guardrail fix
+
+- `check_guardrails` (briefing-level) was imported into the chat validator — it matches `\bdiagnos` which blocks "diagnosed", "no gaps were diagnosed during this period" etc.
+- **Fix:** removed `check_guardrails` import; added `check_chat_guardrails` — narrower set that blocks only active prescriptive language (`prescribe`, `increase X mg`, `tell the patient`, `emergency`, `diagnose` as verb). `diagnosed`, `monitoring gap`, all descriptive clinical language now pass.
+- Proactive suggestion prompt reframed: now asks for a question the clinician should ask ARIA (the data system), not the patient. Forbidden filter extended with patient-facing phrase patterns.
+- System prompt persona: "never apologise", "lead with the finding", concrete examples of good vs bad responses, "if vague question, call `get_briefing` and answer — do not ask for clarification".
+
+### Interactive tour (`Tour.tsx`)
+
+- Permanent `HelpCircle` icon in Topbar (replaces `?` text button).
+- `TourProvider` wraps main layout; route-aware — dashboard shows 12 steps, patient page shows 9 steps.
+- Smart positioning (`smartPos`): measures available space on all 4 sides, uses preferred side if it fits, falls back to side with most room. Clamped to viewport. Scroll-settle polling (50ms intervals, 3 stable samples) before measuring rect — eliminates stale-position bug.
+- `data-tour` attributes added to: all nav items (Patients, Alerts, Shadow Mode, Admin), search bar, alert bell, theme toggle, all 5 patient table column headers, briefing header, AI summary, BP trend section, medication section, adherence section, active problems section, overdue labs section, visit agenda section, chat panel.
+- **Dashboard tour order:** Patients → Alerts → Shadow Mode → Admin → Search → Alert Bell → Light/Dark → Chronic Risk → Chief Concern → Priority Score → BP Trend → Appointment
+- **Patient page tour order:** Briefing Header → AI Summary → BP Trend Chart → Medication Status → Adherence Signal → Active Problems → Overdue Investigations → Visit Agenda → Ask ARIA
 
 ---
 
