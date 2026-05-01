@@ -1,5 +1,5 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-05-01 by Kush (alert feedback loop — Fix 42 L2 calibration suppression wired into processor.py; doc bugs 70 and 71 fixed; 5 new end-to-end feedback loop tests; 82 tests passing, ruff clean)
+Last updated: 2026-05-01 by Kush (chatbot — guardrail audit + 3 structural fixes (emergency narrowed, tool schema disambiguation, context fallback enriched); medication indication answers enabled; 4 validator/formatter bugs fixed; pre-existing test failures cleaned; 583 tests passing, ruff clean)
 Previous: 2026-05-01 by Krishna (frontend clinical UI — dashboard column redesign, BP chart single-source average, chatbot guardrail fix, interactive tour, patient panel de-coloring, adherence card layout, SparklineChart data consistency)
 Previous: 2026-04-30 by Sahil (chatbot — three-layer guardrails, social phrase handling, blue theme, 10 UX features, OpenAI gpt-4o-mini override merged from Kush)
 Previous: 2026-04-30 by Kush (shadow mode fixes — white-coat exclusion past-appointment guard, truncated-window inertia thresholds, gap fired scoring, Pattern B counts as ARIA fired; agreement improved toward 80%+ target)
@@ -48,6 +48,57 @@ All use `_mock_session()` fixture pattern; no real DB connection.
 | `test_outcome_check_resolves_deterioration_cluster` | `run_outcome_checks()` direct call → `outcome_type = "deterioration_cluster"` when concerning alert exists |
 
 **Test run:** 82 tests passing across `test_api.py` + `test_worker.py`; zero regressions in existing worker tests (new calibration query hits same mock → returns empty set → no behaviour change). `ruff check app/` clean.
+
+---
+
+## Chatbot Guardrail Fixes + Medication Indication — 2026-05-01
+
+**Author:** Kush Patel
+**Files changed:** `backend/app/services/chat/validator.py`, `backend/app/services/chat/formatter.py`, `backend/app/services/chat/agent.py`, `backend/app/services/chat/tools.py`, `backend/tests/test_chat_validator.py`, `backend/tests/test_chat_agent.py`, `backend/tests/test_phase5_phase7.py`, `prompts/chat_system_prompt.md`
+
+### Root cause — "why was flagged?" intermittent block (AUDIT.md item 72)
+
+"Why was this patient flagged?" was intermittently answered with "That question touches on prescriptive clinical decisions, which are outside my scope" — the wrong blocked message for a data-availability failure, not a guardrail violation. Three root causes:
+
+1. `check_empty_data_acknowledged` fired when `get_briefing` returned empty (briefings only exist on appointment days) and the LLM answered from cached context without saying "no data".
+2. `make_blocked_response` always returned the prescriptive-language message for ALL block reasons.
+3. `\bdiagnose\b` matched "ARIA diagnoses inertia" and other descriptive uses.
+
+**Four fixes applied:**
+- `check_empty_data_acknowledged` — added clinical-terms short-circuit before the acknowledgement-phrase check. Answers grounded in cached patient context now pass when all tools return empty.
+- `make_blocked_response` — guardrail/certainty/injection failures → prescriptive-language message; clinical-scope/data failures → generic redirect.
+- `\bdiagnose\b` narrowed to `\bdiagnose\s+(?:this\s+|the\s+)?patient\b` — descriptive clinical uses pass.
+- `"mg"` removed from proactive suggestion forbidden list — medication-dosage suggested questions no longer blocked.
+
+### Guardrail audit — three structural improvements (AUDIT.md item 73)
+
+Full clinical review of all 14 guardrail, 4 certainty, and 5 scope patterns. All patterns confirmed appropriate for a GP-facing chatbot. Three improvements:
+
+- **`\bemergency\b` narrowed** — old pattern blocked "no emergency concerns", "no emergency alerts". New pattern targets only `hypertensive emergency`, `emergency services/room/referral/department/care`, and `call/go to/attend/visit emergency`. Descriptive uses now pass.
+- **`get_briefing` tool description** — removed "why something was flagged" trigger. Both `get_briefing` and `get_patient_alerts` claimed this — gpt-4o-mini picked non-deterministically, and `get_briefing` often had no data. `get_patient_alerts` is now the sole "why flagged?" handler; `get_briefing` is for "overview / assessment / visit agenda".
+- **`_build_patient_context` enriched** — when no briefing exists, context was two lines (last visit date + clinic BP). Now also queries active alerts and active problems so the LLM can answer "why flagged?" from cached context without relying on an empty tool result.
+
+### Medication indication enabled (AUDIT.md item 74)
+
+`med_history` JSONB entries only contain `{name, rxnorm, date, activity}` — no indication/reason field. The LLM can infer indication by correlating medication start dates with active problems, but needed explicit instruction.
+
+- `get_medication_history` tool description: added "why a specific medication was prescribed — pair with get_clinical_context to correlate active problems with each drug and infer clinical indication."
+- `get_clinical_context` tool description: added "active problems reveal the clinical indication for each drug in the regimen."
+- System prompt "What You Answer": now explicitly includes indication inference.
+- System prompt example added: "Why was amlodipine started?" with a worked answer correlating start date with active problem list.
+- System prompt "Tool Use": added explicit chaining rule for "why was X medication given" questions.
+
+### Pre-existing test suite failures fixed
+
+9 tests that were already failing before this session (unrelated to the chatbot fixes above):
+
+| Test file | Issue | Fix |
+|-----------|-------|-----|
+| `test_chat_validator.py` | Imported `check_groundedness`, `check_evidence_consistency` from chat validator — these were removed when the chat validator was narrowed. Tests for those functions also removed. `test_empty_data_fails_when_not_acknowledged` used a clinical answer that now passes the clinical-terms short-circuit — updated to use a non-clinical answer. `test_certainty_blocked_will_improve` tested "will improve" which doesn't match any certainty pattern — updated to "will definitely improve". | Removed stale imports and tests; updated assertions to match current code |
+| `test_chat_agent.py` | `response.evidence` — `ChatResponse` has `data_gaps` not `evidence` (old field name). `test_blocked_response_structure` checked for "can't reliably" — never a real message. | `evidence` → `data_gaps`; assertion updated to match `_BLOCKED_ANSWER_GUARDRAIL` text |
+| `test_phase5_phase7.py` | `_is_off_hours` imported from `processor` — function was moved to `datetime_utils` in an earlier session. | Updated to `from app.utils.datetime_utils import is_off_hours as _is_off_hours` |
+
+**Test run:** 583 tests passing (up from 574 before pre-existing fixes); `ruff check app/` clean.
 
 ---
 

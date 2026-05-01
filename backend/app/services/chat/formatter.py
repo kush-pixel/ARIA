@@ -40,10 +40,14 @@ def make_blocked_response(reason: str) -> ChatResponse:
     Returns:
         ChatResponse with blocked=True and a reason-appropriate answer.
     """
+    # Prescriptive-language guardrails → clinical decisions message.
+    # Off-topic / scope / data issues → generic redirect.
     answer = (
-        _BLOCKED_ANSWER
-        if reason in ("clinical_scope", "off_topic")
-        else _BLOCKED_ANSWER_GUARDRAIL
+        _BLOCKED_ANSWER_GUARDRAIL
+        if reason.startswith("guardrail:") or reason in (
+            "certainty_prediction", "scope_boundary", "phi_leak", "prompt_injection"
+        )
+        else _BLOCKED_ANSWER
     )
     return ChatResponse(
         answer=answer,

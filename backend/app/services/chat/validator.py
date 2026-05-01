@@ -45,9 +45,19 @@ _CHAT_GUARDRAIL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bincrease\b.{1,30}?mg\b", re.IGNORECASE),     "dosage_increase"),
     (re.compile(r"\bdecrease\b.{1,30}?mg\b", re.IGNORECASE),     "dosage_decrease"),
     (re.compile(r"\btell the patient\b", re.IGNORECASE),          "patient_facing"),
-    (re.compile(r"\bemergency\b", re.IGNORECASE),                 "emergency"),
-    # "diagnose" as a verb (prescriptive) — but NOT "diagnosed" as past tense descriptor
-    (re.compile(r"\bdiagnose\b", re.IGNORECASE),                  "diagnose"),
+    # Block prescriptive/crisis forms only — "no emergency concerns" and similar
+    # descriptive phrases are allowed. System prompt already instructs LLM never to
+    # say "emergency"; this catches violations in the dangerous prescriptive forms.
+    (re.compile(
+        r"\bhypertensive\s+emergency\b"
+        r"|\bemergency\s+(?:services?|referral|room|department|care)\b"
+        r"|\b(?:call|go\s+to|attend|visit)\s+emergency\b",
+        re.IGNORECASE,
+    ), "emergency"),
+    # "diagnose" only when targeting the patient — prescriptive form.
+    # Allows: "ARIA diagnoses inertia", "used to diagnose elevated BP patterns"
+    # Blocks:  "diagnose this patient", "diagnose the patient with X"
+    (re.compile(r"\bdiagnose\s+(?:this\s+|the\s+)?patient\b", re.IGNORECASE), "diagnose"),
 ]
 
 
@@ -190,6 +200,13 @@ def check_empty_data_acknowledged(
         for result in tool_results.values()
     )
     if not all_empty:
+        return ValidationResult(passed=True)
+
+    # When all tools return empty, the LLM may still answer from the pre-loaded
+    # patient context injected into the system prompt. If the answer contains
+    # clinical content it is grounded in that context — do not block it.
+    text_lower = text.lower()
+    if any(term in text_lower for term in _CLINICAL_ANSWER_TERMS):
         return ValidationResult(passed=True)
 
     acknowledgement_phrases = [

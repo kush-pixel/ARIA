@@ -169,6 +169,8 @@ async def _build_patient_context(
     Returns:
         Formatted patient context string.
     """
+    from app.services.chat.tools import get_patient_alerts as _get_alerts
+
     briefing = await get_briefing(db_session, patient_id)
     ctx = await get_clinical_context(db_session, patient_id)
 
@@ -182,6 +184,25 @@ async def _build_patient_context(
         lines.append(f"Medication status: {briefing.get('medication_status', 'N/A')}")
         lines.append(f"Visit agenda: {'; '.join(briefing.get('visit_agenda', [])) or 'None'}")
         lines.append(f"Overdue labs: {', '.join(briefing.get('overdue_labs', [])) or 'None'}")
+    else:
+        # No briefing available (generated only at 7:30 AM on appointment days).
+        # Pre-load active alerts and problems so the LLM can answer "why flagged?"
+        # from cached context without relying on an empty tool result.
+        alerts_data = await _get_alerts(db_session, patient_id)
+        if alerts_data.get("data_available"):
+            alert_lines = [
+                f"{a['alert_type']} (triggered {a['triggered_at']})"
+                + (" escalated" if a.get("escalated") else "")
+                for a in alerts_data.get("alerts", [])
+            ]
+            lines.append(f"Active alerts: {'; '.join(alert_lines)}")
+        else:
+            lines.append("Active alerts: None")
+
+        if ctx.get("data_available"):
+            problems = ctx.get("active_problems") or []
+            if problems:
+                lines.append(f"Active problems: {', '.join(problems)}")
 
     if ctx.get("data_available"):
         lines.append(f"Last visit: {ctx.get('last_visit_date', 'unknown')}")
@@ -579,7 +600,7 @@ async def generate_proactive_suggestion(
         suggestion = response.choices[0].message.content.strip()
         # Basic safety check — skip if it contains forbidden phrases
         forbidden = [
-            "prescribe", "diagnos", "non-adherent", "emergency", "mg",
+            "prescribe", "diagnos", "non-adherent", "emergency",
             "how have you", "how are you feeling", "have you noticed",
             "do you feel", "are you experiencing", "tell me about your",
             "you should", "your blood pressure", "your symptoms",

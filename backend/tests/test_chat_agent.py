@@ -55,11 +55,11 @@ def test_suggested_questions_empty_payload():
 # ── parse_response ─────────────────────────────────────────────────────────────
 
 def test_parse_valid_json():
-    raw = '{"answer": "BP is elevated.", "evidence": ["164 mmHg (source: readings)"], "confidence": "high", "data_gaps": []}'
+    raw = '{"answer": "BP is elevated.", "confidence": "high", "data_gaps": []}'
     response = parse_response(raw, tools_used=["get_patient_readings"])
     assert response.answer == "BP is elevated."
     assert response.confidence == "high"
-    assert len(response.evidence) == 1
+    assert response.data_gaps == []
     assert response.tools_used == ["get_patient_readings"]
     assert not response.blocked
 
@@ -76,14 +76,13 @@ def test_parse_plain_text_fallback():
     response = parse_response(raw)
     assert response.answer == "The patient has elevated BP."
     assert response.confidence == "medium"
-    assert response.evidence == []
+    assert response.data_gaps == []
 
 
 def test_parse_missing_fields_use_defaults():
     raw = '{"answer": "Some answer."}'
     response = parse_response(raw)
     assert response.answer == "Some answer."
-    assert response.evidence == []
     assert response.data_gaps == []
 
 
@@ -93,5 +92,5 @@ def test_blocked_response_structure():
     blocked = make_blocked_response("guardrail:prescribe")
     assert blocked.blocked is True
     assert blocked.block_reason == "guardrail:prescribe"
-    assert "can't reliably" in blocked.answer.lower()
+    assert "prescriptive clinical decisions" in blocked.answer.lower()
     assert blocked.confidence == "blocked"
