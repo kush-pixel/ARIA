@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session
 from app.models.briefing import Briefing
+from app.models.clinical_context import ClinicalContext
 from app.models.patient import Patient
 from app.utils.logging_utils import get_logger
 
@@ -111,6 +112,34 @@ async def update_appointment(
         select(Briefing.patient_id).where(Briefing.patient_id == patient_id).limit(1)
     )
     return _serialise(patient, has_briefing=briefing_check2.scalar_one_or_none() is not None)
+
+
+@router.get("/patients/{patient_id}/baseline")
+async def get_patient_baseline(
+    patient_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Return the patient's personal systolic baseline from clinic readings.
+
+    Computes median of historic_bp_systolic stored in clinical_context.
+    Falls back to 163.0 if fewer than 2 clinic readings are available.
+    """
+    result = await session.execute(
+        select(ClinicalContext).where(ClinicalContext.patient_id == patient_id)
+    )
+    ctx = result.scalar_one_or_none()
+    if ctx is None:
+        raise HTTPException(status_code=404, detail="Clinical context not found")
+
+    values: list[int] = ctx.historic_bp_systolic or []
+    if len(values) < 2:
+        return {"baseline_systolic": 163.0, "reading_count": len(values)}
+
+    sorted_vals = sorted(values)
+    n = len(sorted_vals)
+    mid = n // 2
+    median = sorted_vals[mid] if n % 2 == 1 else (sorted_vals[mid - 1] + sorted_vals[mid]) / 2
+    return {"baseline_systolic": float(median), "reading_count": n}
 
 
 def _serialise(p: Patient, has_briefing: bool = False) -> dict:

@@ -14,8 +14,8 @@ from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
 
-_BLOCKED_ANSWER = "My role is to support pre-visit clinical review for this patient. I'm not able to answer general questions outside that scope."
-_BLOCKED_ANSWER_GUARDRAIL = "That response was blocked by ARIA's clinical safety guardrails."
+_BLOCKED_ANSWER = "I can only help with questions about this patient. Try asking about their BP trend, medications, adherence, or why they were flagged."
+_BLOCKED_ANSWER_GUARDRAIL = "That question touches on prescriptive clinical decisions, which are outside my scope. I can explain what the data shows — ask me about BP patterns, adherence rates, or what drove the flag."
 
 
 @dataclass

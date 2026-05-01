@@ -66,7 +66,7 @@ export default function PatientPage() {
       {/* Two-column layout: briefing left, chat right */}
       <div className="flex flex-1 gap-0 overflow-hidden px-5 pb-5">
         {/* Left — scrollable briefing */}
-        <div className="flex-1 overflow-y-auto pr-4 min-w-0">
+        <div className="flex-1 overflow-y-auto pr-4 min-w-0" data-tour="briefing-card">
           <BriefingCard
             patient={patient}
             briefing={briefing}
@@ -76,7 +76,7 @@ export default function PatientPage() {
         </div>
 
         {/* Right — fixed chat panel */}
-        <div className="w-[380px] flex-shrink-0">
+        <div className="w-[380px] flex-shrink-0" data-tour="chat-panel">
           <ChatPanel patientId={id} patient={patient} readings={readings} />
         </div>
       </div>
