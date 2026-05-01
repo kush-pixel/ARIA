@@ -1,14 +1,14 @@
 'use client'
 
 import {
-  LineChart,
+  ComposedChart,
   Line,
+  ReferenceArea,
+  ReferenceLine,
   XAxis,
   YAxis,
-  ReferenceLine,
   Tooltip as RechartsTooltip,
   ResponsiveContainer,
-  Legend,
 } from 'recharts'
 import type { Reading } from '@/lib/types'
 
@@ -17,172 +17,214 @@ interface SparklineChartProps {
 }
 
 interface ChartPoint {
-  date: string
   dateLabel: string
   morning: number | null
   evening: number | null
-  rollingAvg: number | null
+  avg: number | null
+  diastolicAvg: number | null
 }
 
-function formatDate(iso: string): string {
+interface BuiltData {
+  points: ChartPoint[]
+  summary: {
+    avgSystolic: number
+    avgDiastolic: number
+    trend: 'rising' | 'stable' | 'falling'
+    arrow: '↑' | '→' | '↓'
+    dayCount: number
+  } | null
+}
+
+function fmt(iso: string): string {
   const d = new Date(iso)
   return `${d.getDate()}/${d.getMonth() + 1}`
 }
 
-function buildChartData(readings: Reading[]): ChartPoint[] {
-  // Group by date + session
-  const byDate = new Map<string, { morning?: number; evening?: number }>()
+// Single pass — chart and summary header use IDENTICAL numbers
+function buildData(readings: Reading[]): BuiltData {
+  const home = readings
+    .filter((r) => r.source !== 'clinic')
+    .sort((a, b) => new Date(a.effective_datetime).getTime() - new Date(b.effective_datetime).getTime())
 
-  for (const r of readings) {
+  if (home.length < 3) return { points: [], summary: null }
+
+  const byDate = new Map<string, { morning?: number; evening?: number; dias: number[] }>()
+  for (const r of home) {
     const date = r.effective_datetime.slice(0, 10)
-    const existing = byDate.get(date) ?? {}
-    if (r.session === 'morning') existing.morning = r.systolic_avg
-    else if (r.session === 'evening') existing.evening = r.systolic_avg
-    byDate.set(date, existing)
+    const e = byDate.get(date) ?? { dias: [] }
+    if (r.session === 'morning') e.morning = r.systolic_avg
+    else if (r.session === 'evening') e.evening = r.systolic_avg
+    e.dias.push(r.diastolic_avg)
+    byDate.set(date, e)
   }
 
-  // Sort by date
   const sorted = Array.from(byDate.entries()).sort(([a], [b]) => a.localeCompare(b))
 
-  // Build points with 7-day rolling average
-  const points: ChartPoint[] = sorted.map(([date, vals], i) => {
-    const window = sorted.slice(Math.max(0, i - 6), i + 1)
-    const allVals = window.flatMap(([, v]) => [v.morning, v.evening].filter((x): x is number => x !== undefined))
-    const rollingAvg = allVals.length > 0
-      ? parseFloat((allVals.reduce((s, v) => s + v, 0) / allVals.length).toFixed(1))
+  const points: ChartPoint[] = sorted.map(([date, v]) => {
+    const sessions = [v.morning, v.evening].filter((x): x is number => x !== undefined)
+    const avg = sessions.length > 0
+      ? parseFloat((sessions.reduce((s, x) => s + x, 0) / sessions.length).toFixed(1))
       : null
-
-    return {
-      date,
-      dateLabel: formatDate(date),
-      morning: vals.morning ?? null,
-      evening: vals.evening ?? null,
-      rollingAvg,
-    }
+    const diastolicAvg = v.dias.length > 0
+      ? parseFloat((v.dias.reduce((s, x) => s + x, 0) / v.dias.length).toFixed(1))
+      : null
+    return { dateLabel: fmt(date), morning: v.morning ?? null, evening: v.evening ?? null, avg, diastolicAvg }
   })
 
-  return points
+  // Summary = last 14 chart points — same slice the right side of the graph shows
+  const recent = points.slice(-14)
+  const validS = recent.filter((p) => p.avg !== null)
+  const validD = recent.filter((p) => p.diastolicAvg !== null)
+  if (validS.length === 0) return { points, summary: null }
+
+  const avgSystolic = Math.round(validS.reduce((s, p) => s + p.avg!, 0) / validS.length)
+  const avgDiastolic = Math.round(validD.reduce((s, p) => s + p.diastolicAvg!, 0) / Math.max(validD.length, 1))
+
+  // Trend: first third vs last third of all days
+  const third = Math.max(1, Math.floor(points.length / 3))
+  const firstAvg = points.slice(0, third).filter((p) => p.avg !== null).reduce((s, p) => s + p.avg!, 0) / third
+  const lastAvg  = points.slice(-third).filter((p) => p.avg !== null).reduce((s, p) => s + p.avg!, 0) / third
+  const delta = lastAvg - firstAvg
+
+  const trend  = delta > 4 ? 'rising'  : delta < -4 ? 'falling'  : 'stable'
+  const arrow  = delta > 4 ? '↑'       : delta < -4 ? '↓'        : '→'
+
+  return { points, summary: { avgSystolic, avgDiastolic, trend, arrow, dayCount: recent.length } }
 }
 
-interface TooltipPayloadEntry {
-  name: string
-  value: number | null
-  color: string
-}
+interface TooltipEntry { name: string; value: number | null; color: string }
 
-interface CustomTooltipProps {
-  active?: boolean
-  payload?: TooltipPayloadEntry[]
-  label?: string
-}
-
-function CustomTooltip({ active, payload, label }: CustomTooltipProps) {
+function CustomTooltip({ active, payload, label }: {
+  active?: boolean; payload?: TooltipEntry[]; label?: string
+}) {
   if (!active || !payload?.length) return null
+  const entries = payload.filter((e) => e.value !== null)
+  if (!entries.length) return null
   return (
-    <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700
-                    rounded-lg px-4 py-3 shadow-lg text-[14px]">
-      <p className="font-semibold text-slate-700 dark:text-slate-200 mb-2">{label}</p>
-      {payload.map((entry) =>
-        entry.value !== null ? (
-          <p key={entry.name} style={{ color: entry.color }} className="tabular-nums">
-            {entry.name}: <span className="font-semibold">{entry.value} mmHg</span>
-          </p>
-        ) : null
-      )}
+    <div className="bg-white dark:bg-[#1a2235] border border-gray-100 dark:border-[#2a3548]
+                    rounded-lg px-3 py-2 shadow-md text-[12px]">
+      <p className="font-medium text-gray-400 mb-1">{label}</p>
+      {entries.map((e) => (
+        <p key={e.name} className="tabular-nums" style={{ color: e.color }}>
+          {e.name}: <span className="font-semibold">{e.value} mmHg</span>
+        </p>
+      ))}
     </div>
   )
 }
 
 export default function SparklineChart({ readings }: SparklineChartProps) {
-  const data = buildChartData(readings)
+  const { points, summary } = buildData(readings)
 
-  if (data.length === 0) {
+  if (points.length === 0) {
     return (
-      <div className="h-[220px] flex items-center justify-center text-[15px] text-slate-400 italic">
-        No reading data available for chart.
+      <div className="h-[180px] flex items-center justify-center text-[13px] text-gray-400 italic">
+        No home reading data available.
       </div>
     )
   }
 
+  const levelLabel = !summary ? '' :
+    summary.avgSystolic > 140 ? 'elevated' :
+    summary.avgSystolic > 130 ? 'borderline' : 'within target'
+
+  const isElevated = summary && summary.avgSystolic > 140
+  const trendClass = summary?.trend === 'rising' ? 'text-red-500 dark:text-red-400' : 'text-gray-500 dark:text-gray-400'
+
   return (
-    <div className="w-full" style={{ minHeight: 220 }}>
-      <ResponsiveContainer width="100%" height={240}>
-        <LineChart data={data} margin={{ top: 8, right: 16, bottom: 4, left: 4 }}>
+    <div className="w-full space-y-2">
+
+      {/* Summary — numbers come from the same slice the chart draws */}
+      {summary && (
+        <div className="flex items-start justify-between px-1 gap-4">
+          <p className="text-[13px] text-gray-600 dark:text-gray-300 leading-snug">
+            BP is{' '}
+            <span className={isElevated ? 'text-red-500 dark:text-red-400 font-medium' : 'font-medium'}>
+              {levelLabel}
+            </span>
+            {' '}and{' '}
+            <span className={`font-medium ${trendClass}`}>{summary.arrow} {summary.trend}</span>
+            {' '}over the last {summary.dayCount} days
+          </p>
+        </div>
+      )}
+
+      {/* Chart */}
+      <ResponsiveContainer width="100%" height={195}>
+        <ComposedChart data={points} margin={{ top: 4, right: 56, bottom: 2, left: 0 }}>
+
+          {/* Threshold zones — very subtle */}
+          <ReferenceArea y1={130} y2={140} fill="#FEF3C7" fillOpacity={0.18} ifOverflow="visible" />
+          <ReferenceArea y1={140} y2={200} fill="#FEE2E2" fillOpacity={0.15} ifOverflow="visible" />
+
           <XAxis
             dataKey="dateLabel"
-            tick={{ fontSize: 12, fill: '#94A3B8' }}
-            interval={Math.floor(data.length / 7)}
+            tick={{ fontSize: 11, fill: '#CBD5E1' }}
+            interval={Math.max(0, Math.floor(points.length / 6) - 1)}
             axisLine={false}
             tickLine={false}
           />
           <YAxis
-            domain={[80, 200]}
-            ticks={[80, 100, 120, 130, 140, 160, 180, 200]}
-            tick={{ fontSize: 12, fill: '#94A3B8' }}
+            domain={[90, 190]}
+            ticks={[120, 130, 140, 160, 180]}
+            tick={{ fontSize: 11, fill: '#CBD5E1' }}
             axisLine={false}
             tickLine={false}
-            width={36}
-            unit=" "
+            width={28}
           />
-          <RechartsTooltip content={<CustomTooltip />} />
-          <Legend
-            wrapperStyle={{ fontSize: 13, paddingTop: 8 }}
-            formatter={(value) => <span style={{ color: '#64748B' }}>{value}</span>}
+          <RechartsTooltip content={<CustomTooltip />} cursor={{ stroke: '#E2E8F0', strokeWidth: 1 }} />
+
+          {/* Morning — light, thin */}
+          <Line
+            type="monotone" dataKey="morning" name="Morning"
+            stroke="#94A3B8" strokeWidth={1} strokeOpacity={0.6}
+            dot={false} connectNulls={false}
+            activeDot={{ r: 3, fill: '#94A3B8' }}
           />
 
-          {/* Stage 1 threshold — 130 */}
-          <ReferenceLine
-            y={130}
-            stroke="#94A3B8"
-            strokeDasharray="4 4"
-            strokeWidth={1}
-            label={{ value: 'Stage 1 (130)', position: 'insideTopRight', fontSize: 11, fill: '#94A3B8' }}
-          />
-          {/* Stage 2 threshold — 140 */}
-          <ReferenceLine
-            y={140}
-            stroke="#EF4444"
-            strokeDasharray="4 4"
-            strokeWidth={1.5}
-            label={{ value: 'Stage 2 (140)', position: 'insideTopRight', fontSize: 11, fill: '#EF4444' }}
+          {/* Evening — dashed, subtler */}
+          <Line
+            type="monotone" dataKey="evening" name="Evening"
+            stroke="#94A3B8" strokeWidth={1} strokeOpacity={0.4}
+            strokeDasharray="4 3"
+            dot={false} connectNulls={false}
+            activeDot={{ r: 3, fill: '#94A3B8' }}
           />
 
-          {/* Morning — teal solid */}
+          {/* Average — bold, dark, primary */}
           <Line
-            type="monotone"
-            dataKey="morning"
-            name="Morning"
-            stroke="#0F766E"
-            strokeWidth={2}
-            dot={false}
-            connectNulls={false}
-            activeDot={{ r: 4, fill: '#0F766E' }}
+            type="monotone" dataKey="avg" name="Avg"
+            stroke="#374151" strokeWidth={2.5}
+            dot={false} connectNulls={false}
+            activeDot={{ r: 4, fill: '#374151' }}
           />
-          {/* Evening — teal dashed */}
-          <Line
-            type="monotone"
-            dataKey="evening"
-            name="Evening"
-            stroke="#0F766E"
-            strokeWidth={2}
-            strokeDasharray="5 4"
-            dot={false}
-            connectNulls={false}
-            activeDot={{ r: 4, fill: '#0F766E' }}
-          />
-          {/* 7-day rolling average — darker, thicker */}
-          <Line
-            type="monotone"
-            dataKey="rollingAvg"
-            name="7-day avg"
-            stroke="#115E59"
-            strokeWidth={2.5}
-            dot={false}
-            connectNulls={false}
-            activeDot={{ r: 4, fill: '#115E59' }}
-          />
-        </LineChart>
+
+        </ComposedChart>
       </ResponsiveContainer>
+
+      {/* Legend */}
+      <div className="flex items-center gap-5 px-1 text-[11px] text-gray-400 dark:text-gray-500">
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-5 h-[2px] bg-gray-600 dark:bg-gray-400 rounded" />
+          Avg
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-4 h-[1px] bg-gray-400 opacity-60" />
+          Morning
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-4 border-t border-dashed border-gray-400 opacity-50" />
+          Evening
+        </span>
+        <span className="flex items-center gap-1.5 ml-2">
+          <span className="inline-block w-3 h-3 rounded-sm" style={{ background: '#FEF3C7' }} />
+          130–140
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-3 h-3 rounded-sm" style={{ background: '#FEE2E2' }} />
+          &gt;140
+        </span>
+      </div>
     </div>
   )
 }

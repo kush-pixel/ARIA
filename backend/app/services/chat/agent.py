@@ -87,10 +87,11 @@ _SOCIAL_AFFIRM: frozenset[str] = frozenset({
 })
 
 _SOCIAL_REPLIES: dict[str, str] = {
-    "greeting": "Hello! I'm here to help with your pre-visit review. What would you like to know about this patient?",
-    "thanks": "You're welcome! Let me know if there's anything else about this patient I can help with.",
-    "farewell": "Goodbye! Hope the consultation goes well.",
-    "affirm": "Of course — feel free to ask anything about this patient's clinical data.",
+    "greeting": "Hi! Ready to help with your pre-visit review. Ask me anything about this patient — BP, medications, adherence, or why something was flagged.",
+    "thanks": "Of course. Anything else about this patient?",
+    "farewell": "Good luck with the consultation.",
+    "affirm": "Got it — what would you like to know about this patient?",
+    "no": "No problem. Let me know if anything else comes up.",
 }
 
 
@@ -105,6 +106,8 @@ def _social_reply(question: str) -> str | None:
         return _SOCIAL_REPLIES["farewell"]
     if q in _SOCIAL_AFFIRM:
         return _SOCIAL_REPLIES["affirm"]
+    if q in {"no", "nope", "nah", "not really", "no thanks"}:
+        return _SOCIAL_REPLIES["no"]
     return None
 
 
@@ -124,13 +127,19 @@ def _to_groq_tools(schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _is_off_topic(question: str) -> bool:
-    """Return True if the question has no clinical keywords — block before hitting LLM.
+    """Return True only if the question is clearly non-clinical with no clinical keywords.
 
-    Uses a conservative allowlist: if any clinical keyword appears, the question
-    is allowed through. Only pure off-topic questions (politics, geography, general
-    knowledge) will have zero matches.
+    Social phrases (greetings, thanks, farewells) are always allowed through —
+    the social reply handler deals with them before the LLM is called.
+    Short questions ("why?", "how?") are allowed through — context from history
+    makes them clinical even without explicit keywords.
     """
-    q_lower = question.lower()
+    q_lower = question.strip().lower()
+
+    # Very short follow-ups always belong to the clinical conversation
+    if len(q_lower.split()) <= 4:
+        return False
+
     return not any(kw in q_lower for kw in _CLINICAL_KEYWORDS)
 
 
@@ -253,7 +262,7 @@ async def run_agent(
     if _is_off_topic(question):
         logger.info("Off-topic question blocked pre-flight: patient=%s", patient_id)
         yield _sse("done", {
-            "answer": "My role is to support pre-visit clinical review for this patient. I'm not able to answer general questions outside that scope.",
+            "answer": "I can only help with questions about this patient. Try asking about their BP trend, medications, adherence, or why they were flagged.",
             "confidence": "no_data",
             "data_gaps": [],
             "tools_used": [],
@@ -473,9 +482,15 @@ async def generate_proactive_suggestion(
     client = OpenAI(api_key=settings.openai_api_key)
 
     prompt = (
-        "You are assisting a GP reviewing a patient briefing before a consultation.\n"
-        "Based on the briefing below, suggest ONE specific question the clinician should ask "
-        "that would be most clinically valuable. Return only the question, no preamble.\n\n"
+        "You are a clinical data assistant. A GP is reviewing a patient briefing before a consultation.\n"
+        "Suggest ONE question the clinician should ask YOU (the data system) to get the most clinically "
+        "useful insight before seeing this patient. The question must be about the patient's data — "
+        "BP trends, adherence, flags, medication history, or risk drivers.\n"
+        "Do NOT suggest questions to ask the patient. Do NOT suggest clinical actions or decisions.\n"
+        "Examples of good questions: 'Why was this patient flagged for treatment review?', "
+        "'Which medication had the lowest adherence this month?', "
+        "'How does their BP compare to their baseline over the last 28 days?'\n"
+        "Return only the question, no preamble.\n\n"
         f"Urgent flags: {', '.join(urgent) or 'None'}\n"
         f"Visit agenda: {'; '.join(agenda) or 'None'}\n"
         f"Trend: {briefing_payload.get('trend_summary', 'N/A')}\n"
@@ -490,7 +505,12 @@ async def generate_proactive_suggestion(
         )
         suggestion = response.choices[0].message.content.strip()
         # Basic safety check — skip if it contains forbidden phrases
-        forbidden = ["prescribe", "diagnos", "non-adherent", "emergency", "mg"]
+        forbidden = [
+            "prescribe", "diagnos", "non-adherent", "emergency", "mg",
+            "how have you", "how are you feeling", "have you noticed",
+            "do you feel", "are you experiencing", "tell me about your",
+            "you should", "your blood pressure", "your symptoms",
+        ]
         if any(f in suggestion.lower() for f in forbidden):
             return None
         return suggestion

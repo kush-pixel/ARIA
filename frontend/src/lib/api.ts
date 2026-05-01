@@ -48,6 +48,17 @@ export async function getReadings(patientId: string): Promise<Reading[]> {
   return apiFetch<Reading[]>(`/api/readings?patient_id=${patientId}`)
 }
 
+// GET /api/patients/:patientId/baseline
+export async function getPatientBaseline(
+  patientId: string,
+): Promise<{ baseline_systolic: number; reading_count: number }> {
+  try {
+    return await apiFetch(`/api/patients/${patientId}/baseline`)
+  } catch {
+    return { baseline_systolic: 163.0, reading_count: 0 }
+  }
+}
+
 // GET /api/alerts
 export async function getAlerts(): Promise<Alert[]> {
   return apiFetch<Alert[]>('/api/alerts')
