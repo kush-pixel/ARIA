@@ -195,29 +195,102 @@ def _sse(event: str, data: Any) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-def _generate_followup_questions(tools_used: list[str]) -> list[str]:
+_FOLLOWUP_POOL: dict[str, list[str]] = {
+    "get_patient_readings": [
+        "Were there any monitoring gaps during this period?",
+        "How does this compare to 3 months ago?",
+        "What is the difference between morning and evening readings?",
+        "Which week had the highest average systolic?",
+        "Has variability in readings changed recently?",
+    ],
+    "get_medication_history": [
+        "When was the last medication change made?",
+        "Are any medications newly added or recently stopped?",
+        "What is the full current drug regimen?",
+        "Has the regimen changed since the last visit?",
+        "What is the current adherence rate?",
+    ],
+    "get_adherence_summary": [
+        "Which medication had the most missed doses?",
+        "How does adherence compare to the previous month?",
+        "Is there a pattern between missed doses and elevated readings?",
+        "What is the overall adherence rate across all medications?",
+        "Were there any weeks with particularly low adherence?",
+    ],
+    "get_briefing": [
+        "Are there any overdue labs flagged?",
+        "What is the patient's current risk score?",
+        "Which alerts are currently active and unacknowledged?",
+        "What is on the visit agenda for today?",
+        "What does the trend summary say about the last 28 days?",
+    ],
+    "get_clinical_context": [
+        "When was the last clinic visit?",
+        "What active conditions are in the problem list?",
+        "What was the BP recorded at the last clinic visit?",
+        "Are there any known drug allergies?",
+        "What comorbidities are relevant to the BP management?",
+    ],
+}
+
+_STOPWORDS: frozenset[str] = frozenset({
+    "the", "a", "an", "is", "are", "was", "were", "be", "been",
+    "have", "has", "had", "do", "does", "did", "will", "would",
+    "can", "could", "should", "may", "might", "this", "that",
+    "there", "their", "what", "when", "how", "why", "which",
+    "any", "and", "or", "of", "in", "on", "at", "to", "for",
+    "with", "from", "by", "about", "during", "since", "than",
+    "most", "more", "some", "all", "no", "not",
+})
+
+
+def _significant_words(text: str) -> frozenset[str]:
+    """Return lower-cased words longer than 3 chars that are not stopwords."""
+    return frozenset(
+        w for w in text.lower().split()
+        if len(w) > 3 and w.strip("?.,!") not in _STOPWORDS
+    )
+
+
+def _generate_followup_questions(tools_used: list[str], question: str) -> list[str]:
     """Generate 2-3 contextual follow-up question chips based on tools called.
+
+    Filters out any candidate that substantially overlaps with the original
+    question so chips are always distinct from what was just asked.
 
     Args:
         tools_used: List of tool names called during this agent turn.
+        question: The clinician's original question for this turn.
 
     Returns:
         Up to 3 follow-up question strings.
     """
+    asked_words = _significant_words(question)
     seen = set(tools_used)
-    questions: list[str] = []
-    if "get_patient_readings" in seen:
-        questions.append("Were there any monitoring gaps during this period?")
-        questions.append("How does this compare to 3 months ago?")
-    if "get_medication_history" in seen:
-        questions.append("What is the current adherence rate?")
-    if "get_adherence_summary" in seen:
-        questions.append("Which medication had the most missed doses?")
-    if "get_briefing" in seen:
-        questions.append("Are there any overdue labs flagged?")
-    if "get_clinical_context" in seen:
-        questions.append("When was the last clinic visit?")
-    return questions[:3]
+    candidates: list[str] = []
+
+    for tool in seen:
+        candidates.extend(_FOLLOWUP_POOL.get(tool, []))
+
+    # Deduplicate while preserving order
+    seen_qs: set[str] = set()
+    unique: list[str] = []
+    for q in candidates:
+        if q not in seen_qs:
+            seen_qs.add(q)
+            unique.append(q)
+
+    # Filter: skip any candidate whose significant words overlap > 50% with the asked question
+    filtered: list[str] = []
+    for q in unique:
+        candidate_words = _significant_words(q)
+        if not candidate_words:
+            continue
+        overlap = len(asked_words & candidate_words) / len(candidate_words)
+        if overlap <= 0.5:
+            filtered.append(q)
+
+    return filtered[:3]
 
 
 async def run_agent(
@@ -416,7 +489,7 @@ async def run_agent(
         "data_gaps": parsed.data_gaps,
         "tools_used": tools_used,
         "blocked": False,
-        "follow_up_questions": _generate_followup_questions(tools_used),
+        "follow_up_questions": _generate_followup_questions(tools_used, question),
     })
 
 
