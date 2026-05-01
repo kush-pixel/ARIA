@@ -42,7 +42,7 @@ class TierOverrideRequest(BaseModel):
 
 
 # How long a clinician demotion suppresses nightly reclassification
-_CLINICIAN_SUPPRESSION_DAYS: int = 14
+_CLINICIAN_SUPPRESSION_DAYS: int = 28
 
 
 @router.get("/patients")

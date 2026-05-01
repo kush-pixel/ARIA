@@ -154,7 +154,7 @@ patient-app/: Next.js 14 PWA (port 3001) — login, BP submit, medication confir
   src/app/: page.tsx (login), submit/page.tsx, confirm/page.tsx
   src/lib/: api.ts (all patient API calls), auth.ts (JWT helpers)
   public/: manifest.json, icons/
-documentation/: team_access_guide.md, patientapp.md, kush_patientapp.md, chatbot.md
+documentation/: team_access_guide.md, patientapp.md, kush_patientapp.md, chatbot.md, risk_tier_reclassification_v1_0.md
 
 ---
 
@@ -163,6 +163,8 @@ documentation/: team_access_guide.md, patientapp.md, kush_patientapp.md, chatbot
 ### patients
 patient_id TEXT PK | gender CHAR(1) M|F|U | age SMALLINT
 risk_tier TEXT NOT NULL (high|medium|low) | tier_override TEXT
+tier_override_source TEXT [system|system_score|clinician|NULL — controls reclassification guards]
+tier_override_suppressed_until TIMESTAMPTZ [clinician demotion suppression expiry; NULL if not suppressed]
 risk_score NUMERIC(5,2) [Layer 2, 0.0-100.0]
 risk_score_computed_at TIMESTAMPTZ [staleness badge if >26h]
 monitoring_active BOOLEAN DEFAULT TRUE [FALSE = EHR-only]
@@ -286,6 +288,7 @@ Migrations (ADD COLUMN IF NOT EXISTS — safe to re-run via setup_db.py):
                     last_clinic_pulse SMALLINT, last_clinic_weight_kg NUMERIC(5,1),
                     last_clinic_spo2 NUMERIC(4,1), historic_spo2 NUMERIC[], allergy_reactions TEXT[]
   patients: risk_score_computed_at TIMESTAMPTZ
+  patients: tier_override_source TEXT, tier_override_suppressed_until TIMESTAMPTZ
   alerts: off_hours BOOLEAN DEFAULT FALSE, escalated BOOLEAN DEFAULT FALSE
 
 ---
@@ -440,9 +443,42 @@ Patient B — iEMR Only (1091, monitoring_active=FALSE)
 
 ## RISK TIER AUTO-OVERRIDES (at ingestion)
 
-CHF → tier_override="CHF in problem list", risk_tier="high"
-Stroke → tier_override="Stroke history", risk_tier="high"
-TIA → tier_override="TIA history", risk_tier="high"
+CHF (I50)               → tier_override="CHF in problem list",          tier_override_source="system", risk_tier="high"
+Haemorrhagic stroke (I61) → tier_override="Haemorrhagic stroke history", tier_override_source="system", risk_tier="high"
+Ischaemic stroke (I63/I64) → tier_override="Stroke history",            tier_override_source="system", risk_tier="high"
+TIA (G45)               → tier_override="TIA history",                  tier_override_source="system", risk_tier="high"
+
+source="system" overrides are immovable floors — re-ingestion and the nightly job both respect them.
+Clinician PATCH /api/patients/{id}/tier returns 409 for system-override patients.
+
+## NIGHTLY TIER RECLASSIFICATION (processor.py — runs after Layer 2 scoring)
+
+_apply_tier_reclassification() called after every pattern_recompute job.
+
+Guard order (first match wins):
+  1. tier_override_source == "system" → return immediately (immovable)
+  2. tier_override_source == "clinician" AND now < suppressed_until AND score < 85 → skip
+  3. tier_override_source == "clinician" AND now < suppressed_until AND score >= 85 → break-glass, promote only
+  4. Apply hysteresis transition table:
+
+| Transition      | Score condition | Additional gates |
+|---|---|---|
+| medium → high   | score ≥ 75      | None |
+| high → medium   | score < 40      | source == "system_score" only |
+| medium → low    | score < 25      | enrolled ≥ 90 days + no SEVERE/MODERATE comorbidity + no active urgent alerts |
+| low → medium    | score ≥ 40      | None |
+
+Comorbidity block for medium→low: I50, I61, I63, I64, G45 (SEVERE) + E11, N18, I25 (MODERATE)
+Every tier change writes an audit_events row (actor_type="system", action="tier_reclassified").
+
+## CLINICIAN TIER OVERRIDE ENDPOINT
+
+PATCH /api/patients/{patient_id}/tier  [requires clinician JWT]
+  Body: { "risk_tier": "high"|"medium"|"low", "reason": str (1–500 chars) }
+  Demotion → sets tier_override_suppressed_until = now + 28 days (NICE NG136 §1.6.3 — 4-week review standard)
+  Promotion → clears tier_override_suppressed_until
+  409 if tier_override_source == "system" (EHR update + re-ingest required)
+  File: backend/app/api/patients.py | Constant: _CLINICIAN_SUPPRESSION_DAYS = 28
 
 ---
 
