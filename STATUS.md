@@ -1,5 +1,6 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-05-01 by Kush (chatbot — guardrail audit + 3 structural fixes (emergency narrowed, tool schema disambiguation, context fallback enriched); medication indication answers enabled; 4 validator/formatter bugs fixed; pre-existing test failures cleaned; 583 tests passing, ruff clean)
+Last updated: 2026-05-02 by Kush (patient panel + briefing lifecycle fixes — BP Trend single source of truth via trend_avg_systolic, briefing API post-visit filter, 5 hardcoded value fixes, ruff clean)
+Previous: 2026-05-01 by Kush (chatbot — guardrail audit + 3 structural fixes (emergency narrowed, tool schema disambiguation, context fallback enriched); medication indication answers enabled; 4 validator/formatter bugs fixed; pre-existing test failures cleaned; 583 tests passing, ruff clean)
 Previous: 2026-05-01 by Krishna (frontend clinical UI — dashboard column redesign, BP chart single-source average, chatbot guardrail fix, interactive tour, patient panel de-coloring, adherence card layout, SparklineChart data consistency)
 Previous: 2026-04-30 by Sahil (chatbot — three-layer guardrails, social phrase handling, blue theme, 10 UX features, OpenAI gpt-4o-mini override merged from Kush)
 Previous: 2026-04-30 by Kush (shadow mode fixes — white-coat exclusion past-appointment guard, truncated-window inertia thresholds, gap fired scoring, Pattern B counts as ARIA fired; agreement improved toward 80%+ target)
@@ -12,6 +13,77 @@ Previous: 2026-04-27 by Kush (Phase 1 + Phase 8 — AUDIT.md Fixes 6,7,8,9,12,16
 Previous: 2026-04-27 by Nesh (Phase 4 complete — Fixes 10, 21, 40, 46, 47, 60 implemented; 428 unit tests passing, ruff clean)
 Previous: 2026-04-27 by Sahil (Phase 5 complete + Phase 7 complete except Fix 43; 426 unit tests passing, ruff clean)
 Previous: 2026-04-26 by Yash (AUDIT.md Fixes 25, 58, 61 — severity-weighted comorbidity, adaptive gap/inertia normalization, risk_score_computed_at staleness indicator)
+
+---
+
+## Patient Panel + Briefing Lifecycle Fixes — 2026-05-02
+
+**Author:** Kush Patel
+**Files changed:** `frontend/src/components/dashboard/PatientList.tsx`, `frontend/src/lib/types.ts`, `frontend/src/lib/mockData.ts`, `backend/app/api/briefings.py`, `backend/app/api/patients.py`, `backend/app/services/briefing/composer.py`, `CLAUDE.md`, `.claude/skills/briefing.md`, `.claude/skills/review.md`, `.claude/agents/briefing-engineer.md`, `.claude/agents/frontend-engineer.md`
+
+### Problem — five hardcoded values in PatientList.tsx
+
+1. **`slice(-7)` reading window** — BP Trend used last 7 readings regardless of time. Fixed to date-filter last 28 days (matches backend adaptive-window fallback).
+2. **`±15 mmHg` band** — Stable/High threshold was relative to personal baseline. A patient at baseline 163 mmHg needed avg >178 to show "High". Fixed to 140 mmHg (NICE/ESC clinical target). Tooltip for High now shows `target <140` instead of baseline.
+3. **`chiefConcern` returning null** — Patients with `tier_override = null` showed `—` in Chief Concern even though all patients in ARIA have hypertension. Fixed: always returns at least "Hypertension". Return type changed from `string | null` to `string`; null-branch render removed.
+4. **White-coat exclusion applied to past appointments** — `whiteCoatCutoff` was computed from any `next_appointment` regardless of whether it was in the future. When appointment was in the past, `whiteCoatCutoff < cutoff` → zero readings passed → "No data". Fixed: exclusion only applies when `next_appointment > now`.
+5. **`baseline_systolic: 163.0` applied to all API errors** — noted; left as-is since spec prescribes this fallback and the `home.length < 3` guard prevents it from producing misleading output.
+
+### Problem — two different BP numbers (dashboard vs briefing)
+
+The frontend recomputed BP average independently using a fixed 28-day window, no adaptive clamping, and different white-coat logic. The briefing used the backend's authoritative computation. Numbers diverged by up to 14 mmHg, eroding clinician trust.
+
+**Fix — `trend_avg_systolic` single source of truth:**
+- `composer.py`: added `trend_avg_systolic` (home-readings-only mean, `source != "clinic"`) to both `compose_briefing` and `compose_mini_briefing` payloads.
+- `patients.py`: `GET /api/patients` and `GET /api/patients/{id}` now join to the most-recent *active* briefing and extract `trend_avg_systolic`. All four patient endpoints updated.
+- `types.ts`: `trend_avg_systolic: number | null` added to `Patient` interface.
+- `PatientList.tsx`: `buildTrendLabel(avg, baseline)` extracted as shared helper. When `patient.trend_avg_systolic != null`, used directly (skips readings fetch entirely). Falls back to `computeBpTrend` with live readings when null.
+
+### Problem — briefing shown after the visit has ended
+
+`GET /api/briefings/{patient_id}` returned the most-recent briefing with no date filter. After a visit, clicking a patient showed the pre-visit briefing with stale visit agenda and urgent flags.
+
+**Fix — active briefing filter:**
+- `briefings.py`: query now filters `appointment_date IS NULL OR appointment_date >= today`. Past appointment briefings are excluded; mini-briefings always pass through.
+- Fixed pre-existing `None` crash: `briefing.appointment_date.isoformat()` would fail for mini-briefings (`appointment_date = NULL`). Now guarded.
+
+### Problem — trend_avg_systolic stale between visits
+
+`patients.py` initially fetched `trend_avg_systolic` from the most-recent briefing with no date filter. A patient between visits would receive last appointment's frozen average, preventing the live-computation fallback from running.
+
+**Fix:** same `appointment_date >= today OR IS NULL` filter applied to the briefing subquery in all four patient endpoints. Between visits: `trend_avg_systolic = null` → frontend falls back to live 28-day window from readings.
+
+### Consistent behaviour across visit lifecycle
+
+| State | Briefing API | Dashboard BP Trend |
+|---|---|---|
+| Appointment day | Returns today's briefing | Uses `trend_avg_systolic` from briefing (single source) |
+| Between visits | 404 — no active briefing | `trend_avg_systolic = null` → live 28-day computation |
+| Urgent alert between visits | Returns mini-briefing | Uses mini-briefing's 7-day `trend_avg_systolic` |
+
+### Pre-existing changes documented (from prior commit `50a2ee2`)
+
+These were in the working tree but not yet captured in CLAUDE.md or STATUS.md:
+
+**`patients.name TEXT` column**
+- `backend/app/models/patient.py`: `name: Mapped[str | None]` added to Patient ORM.
+- `scripts/setup_db.py`: `ALTER TABLE patients ADD COLUMN IF NOT EXISTS name TEXT` migration added.
+- `_serialise()` in `patients.py` already returned `p.name`; `Patient` TypeScript type had `name: string | null`.
+- CLAUDE.md patients table schema and migrations section updated to reflect this.
+
+**Drug interaction detector (`medication_safety.py`)**
+- New file: `backend/app/services/briefing/medication_safety.py` — `check_interactions(ctx)`.
+- Four deterministic rules (no LLM): `nsaid_antihypertensive` | `triple_whammy` | `k_sparing_ace_arb` | `bb_non_dhp_ccb`.
+- Severity levels: `warning` → `concern` → `critical` based on CHF (I50) / CKD (N18) comorbidities.
+- Triple whammy (NSAID + ACE/ARB + diuretic) supersedes `nsaid_antihypertensive` to avoid duplicate flags.
+- Called from `composer.py` at briefing generation time — zero additional DB queries (uses already-fetched `ClinicalContext`).
+- Output stored as `drug_interactions` in `llm_response` JSONB.
+- `visit_agenda` priority updated: critical interactions before all items; concern alongside urgent alerts; warning after adherence concern.
+- `data_limitations` appended with interaction scope notice when interactions found.
+- `DrugInteraction` TypeScript interface in `types.ts`; `BriefingPayload.drug_interactions?: DrugInteraction[]`.
+- Tests: `backend/tests/test_medication_safety.py` (new).
+
+**ruff check app/:** all checks passed. `npx tsc --noEmit`: no errors.
 
 ---
 

@@ -38,6 +38,20 @@ _DIURETIC_NAMES = frozenset({
     "indapamide", "torsemide", "spironolactone", "eplerenone", "metolazone",
 })
 
+_NSAID_NAMES = frozenset({
+    "ibuprofen", "diclofenac", "naproxen", "celecoxib", "meloxicam",
+    "indometacin", "piroxicam", "ketoprofen", "mefenamic acid",
+})
+_NON_DHP_CCB_NAMES = frozenset({"verapamil", "diltiazem"})
+_K_SPARING_DIURETIC_NAMES = frozenset({
+    "spironolactone", "amiloride", "eplerenone", "triamterene",
+    "co-amilofruse", "co amilofruse",
+})
+_LOOP_DIURETIC_NAMES = frozenset({"furosemide", "bumetanide", "torasemide"})
+_THIAZIDE_NAMES = frozenset({
+    "bendroflumethiazide", "indapamide", "hydrochlorothiazide", "chlortalidone", "hctz",
+})
+
 
 # ---------------------------------------------------------------------------
 # Adaptive detection window
@@ -225,16 +239,45 @@ def apply_comorbidity_adjustment(
 # ---------------------------------------------------------------------------
 
 
-def _infer_drug_class(drug_name: str) -> str:
-    """Infer drug class from medication name using suffix and exact-match patterns."""
+def infer_drug_class(drug_name: str) -> str:
+    """Infer drug class from medication name using suffix and explicit-match patterns.
+
+    Explicit list checks run before suffix checks to avoid false positives.
+    Returns one of: nsaid, non_dhp_ccb, k_sparing_diuretic, loop_diuretic,
+    thiazide, amlodipine, dhp_ccb, beta_blocker, ace_inhibitor, arb,
+    diuretic (legacy catch-all), or default.
+
+    Args:
+        drug_name: Medication name string (case-insensitive, may include dose).
+
+    Returns:
+        Lowercase drug class string.
+    """
     name = drug_name.lower().strip()
-    if "amlodipine" in name:
+    # Explicit substring checks run on the full string — handles multi-word names
+    # ("mefenamic acid") and dose-appended names ("ibuprofen 400mg").
+    if any(n in name for n in _NSAID_NAMES):
+        return "nsaid"
+    if any(n in name for n in _NON_DHP_CCB_NAMES):
+        return "non_dhp_ccb"
+    if any(n in name for n in _K_SPARING_DIURETIC_NAMES):
+        return "k_sparing_diuretic"
+    if any(n in name for n in _LOOP_DIURETIC_NAMES):
+        return "loop_diuretic"
+    if any(n in name for n in _THIAZIDE_NAMES):
+        return "thiazide"
+    # Suffix checks use only the first word so dose info ("10mg", "5mg BID") does
+    # not prevent matching ("lisinopril 10mg" → first word ends with "pril").
+    first_word = name.split()[0] if name else name
+    if "amlodipine" in first_word:
         return "amlodipine"
-    if name.endswith("olol"):
+    if first_word.endswith("dipine"):
+        return "dhp_ccb"
+    if first_word.endswith("olol"):
         return "beta_blocker"
-    if name.endswith("pril"):
+    if first_word.endswith("pril"):
         return "ace_inhibitor"
-    if name.endswith("sartan"):
+    if first_word.endswith("sartan"):
         return "arb"
     if any(d in name for d in _DIURETIC_NAMES):
         return "diuretic"
@@ -279,7 +322,7 @@ def get_titration_window(
     if not best_name:
         return _TITRATION_WINDOWS["default"]
 
-    drug_class = _infer_drug_class(best_name)
+    drug_class = infer_drug_class(best_name)
     return _TITRATION_WINDOWS.get(drug_class, _TITRATION_WINDOWS["default"])
 
 

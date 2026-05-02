@@ -134,7 +134,8 @@ backend/app/
     pattern_engine/: gap_detector, inertia_detector, adherence_analyzer,
                      deterioration_detector, variability_detector,
                      risk_scorer (Layer 2), threshold_utils
-    briefing/: composer.py (Layer 1 output), summarizer.py (Layer 3), llm_validator.py
+    briefing/: composer.py (Layer 1 output), summarizer.py (Layer 3), llm_validator.py,
+               medication_safety.py (drug interaction detector — called from composer, no LLM)
     feedback/: calibration_engine.py, outcome_tracker.py
     worker/: processor.py (30s poll loop + escalation), scheduler.py (7:30 AM)
   utils/: datetime_utils (is_off_hours shared util), fhir_utils, clinical_utils,
@@ -161,7 +162,7 @@ documentation/: team_access_guide.md, patientapp.md, kush_patientapp.md, chatbot
 ## DATABASE — 12 TABLES
 
 ### patients
-patient_id TEXT PK | gender CHAR(1) M|F|U | age SMALLINT
+patient_id TEXT PK | name TEXT [patient full name — nullable, added via migration] | gender CHAR(1) M|F|U | age SMALLINT
 risk_tier TEXT NOT NULL (high|medium|low) | tier_override TEXT
 tier_override_source TEXT [system|system_score|clinician|NULL — controls reclassification guards]
 tier_override_suppressed_until TIMESTAMPTZ [clinician demotion suppression expiry; NULL if not suppressed]
@@ -289,6 +290,7 @@ Migrations (ADD COLUMN IF NOT EXISTS — safe to re-run via setup_db.py):
                     last_clinic_spo2 NUMERIC(4,1), historic_spo2 NUMERIC[], allergy_reactions TEXT[]
   patients: risk_score_computed_at TIMESTAMPTZ
   patients: tier_override_source TEXT, tier_override_suppressed_until TIMESTAMPTZ
+  patients: name TEXT
   alerts: off_hours BOOLEAN DEFAULT FALSE, escalated BOOLEAN DEFAULT FALSE
 
 ---
@@ -412,18 +414,50 @@ Dashboard sorts: risk_tier first (High > Medium > Low), then risk_score DESC wit
 
 briefings.llm_response JSONB fields:
   trend_summary: adaptive-window BP pattern (14-90 days) + 90-day trajectory from historic_bp_systolic
+  trend_avg_systolic: float | None — home-readings-only average (excludes source="clinic") for the window.
+    Structured companion to trend_summary text. Surfaced via GET /api/patients so the dashboard
+    BP Trend column shows the identical number the briefing shows (no independent recomputation).
+    Null when no home readings exist in the window.
   medication_status: current regimen + last change date; append titration notice when within window
     titration_window drug-class-aware: diuretics/beta-blockers 14d, ACE/ARBs 28d, amlodipine 56d, default 42d
   adherence_summary: per-med rate + pattern (A/B/C) interpretation
   active_problems: list from clinical_context.active_problems
   problem_assessments: {problem_name: most_recent_assessment_text}
   overdue_labs: from clinical_context.overdue_labs + abnormal recent_labs flags
+  drug_interactions: list of interaction dicts from medication_safety.py — deterministic, no LLM.
+    Each entry: {rule, severity (warning|concern|critical), drugs_involved[], description, comorbidity_amplified}
+    Four rules: nsaid_antihypertensive | triple_whammy | k_sparing_ace_arb | bb_non_dhp_ccb
+    Severity escalates when CHF (I50) or CKD (N18) comorbidities present.
+    Triple whammy supersedes nsaid_antihypertensive (deduplication).
   visit_agenda: 3-6 items in priority order:
-    1. Urgent alerts  2. Inertia  3. Adherence concern  4. Overdue labs
-    5. Active problems review  6. Next appointment recommendation
+    0. Critical drug interactions (before all other items)
+    1. Urgent alerts
+    1a. Concern-level drug interactions (alongside urgent alerts)
+    2. Inertia  3. Adherence concern
+    3a. Warning-level drug interactions (before variability flag)
+    4. Variability  5. Overdue labs  6. Active problems review
   urgent_flags: active unacknowledged alerts (all types including adherence)
   risk_score: float (Layer 2)
   data_limitations: monitoring availability; cold-start notice if <21 days enrolled
+  patient_context: clinical_context.social_context — living situation, carer notes (null if absent)
+
+### Briefing API lifecycle
+GET /api/briefings/{patient_id} returns the most-recent *active* briefing only:
+  Active = appointment_date IS NULL (mini-briefing) OR appointment_date >= today
+  Past appointment briefings are excluded — clinician sees current state between visits, not
+  stale pre-visit content from an appointment that has already occurred.
+  Mini-briefings (appointment_date IS NULL) are always active — generated for between-visit alerts.
+  appointment_date may be None in the response when briefing is a mini-briefing.
+
+### Dashboard BP Trend — single source of truth
+GET /api/patients and GET /api/patients/{id} extract trend_avg_systolic from the most-recent
+active briefing (same appointment_date filter) and include it as Patient.trend_avg_systolic.
+  Appointment day (active briefing exists): frontend uses trend_avg_systolic directly.
+    Dashboard BP Trend = briefing value. No independent recomputation.
+  Between visits (no active briefing): trend_avg_systolic = null. Frontend falls back to live
+    computeBpTrend: 28-day window, home readings only, white-coat exclusion for upcoming
+    appointments only (past appointments do not trigger exclusion).
+  Display threshold: 140 mmHg (NICE/ESC target). Labels: High ≥140 | Stable <140 | Low <baseline−15.
 
 ---
 

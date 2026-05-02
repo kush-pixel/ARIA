@@ -74,7 +74,7 @@ export default function BriefingCard({ patient, briefing, readings, adherence }:
               Pre-Visit Clinical Briefing
             </p>
             <h1 className="text-[24px] font-bold text-gray-900 dark:text-gray-100">
-              Patient {patient.patient_id}
+              {patient.name ?? `Patient ${patient.patient_id}`}
             </h1>
             <p className="text-[14px] text-gray-500 dark:text-gray-400 mt-1">
               {patient.gender === 'M' ? 'Male' : patient.gender === 'F' ? 'Female' : 'Unknown'}, {patient.age} years
@@ -201,6 +201,56 @@ export default function BriefingCard({ patient, briefing, readings, adherence }:
                       <span className="mt-2 h-1.5 w-1.5 rounded-full bg-red-500 flex-shrink-0" aria-hidden />
                       {lab}
                     </p>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {/* Medication Safety — drug interactions */}
+            {payload?.drug_interactions && payload.drug_interactions.length > 0 && (
+              <section className="py-6 border-b border-gray-100 dark:border-[#1F2937]">
+                <h2 className="flex items-center gap-2 text-[13px] font-semibold uppercase tracking-widest text-amber-600 dark:text-amber-400 mb-4">
+                  <AlertTriangle size={14} strokeWidth={2} />
+                  Medication Safety
+                </h2>
+                <div className="space-y-3">
+                  {payload.drug_interactions.map((ix) => (
+                    <div
+                      key={ix.rule}
+                      className={`rounded-xl border px-5 py-4 flex items-start gap-3
+                        ${ix.severity === 'critical'
+                          ? 'bg-red-50 dark:bg-red-900/10 border-red-200 dark:border-red-900/30'
+                          : ix.severity === 'concern'
+                          ? 'bg-amber-50 dark:bg-amber-900/10 border-amber-100 dark:border-amber-900/30'
+                          : 'bg-yellow-50 dark:bg-yellow-900/10 border-yellow-100 dark:border-yellow-900/30'}`}
+                    >
+                      <AlertTriangle
+                        size={16}
+                        strokeWidth={1.75}
+                        aria-hidden
+                        className={`flex-shrink-0 mt-0.5
+                          ${ix.severity === 'critical' ? 'text-red-600'
+                            : ix.severity === 'concern' ? 'text-amber-500'
+                            : 'text-yellow-500'}`}
+                      />
+                      <div>
+                        <p className={`text-[13px] font-semibold mb-1
+                          ${ix.severity === 'critical' ? 'text-red-700 dark:text-red-300'
+                            : ix.severity === 'concern' ? 'text-amber-800 dark:text-amber-300'
+                            : 'text-yellow-800 dark:text-yellow-200'}`}>
+                          {ix.severity.toUpperCase()} — {ix.rule.replace(/_/g, ' ')}
+                        </p>
+                        <p className={`text-[14px] leading-relaxed
+                          ${ix.severity === 'critical' ? 'text-red-700 dark:text-red-300'
+                            : ix.severity === 'concern' ? 'text-amber-800 dark:text-amber-300'
+                            : 'text-yellow-800 dark:text-yellow-200'}`}>
+                          {ix.description}
+                        </p>
+                        <p className="text-[12px] text-gray-500 dark:text-gray-400 mt-1">
+                          Drugs involved: {ix.drugs_involved.join(', ')}
+                        </p>
+                      </div>
+                    </div>
                   ))}
                 </div>
               </section>

@@ -9,6 +9,7 @@ const TODAY_APPT = `${TODAY}T09:30:00Z`
 export const MOCK_PATIENTS: Patient[] = [
   {
     patient_id: '1091',
+    name: 'John Doe',
     gender: 'M',
     age: 67,
     risk_tier: 'high',
@@ -20,9 +21,11 @@ export const MOCK_PATIENTS: Patient[] = [
     enrolled_at: '2026-01-10T08:00:00Z',
     enrolled_by: 'dr.mehta',
     has_briefing: true,
+    trend_avg_systolic: 161.4,
   },
   {
     patient_id: '1092',
+    name: 'Jane Smith',
     gender: 'F',
     age: 58,
     risk_tier: 'medium',
@@ -34,9 +37,11 @@ export const MOCK_PATIENTS: Patient[] = [
     enrolled_at: '2026-01-15T09:00:00Z',
     enrolled_by: 'dr.mehta',
     has_briefing: false,
+    trend_avg_systolic: null,
   },
   {
     patient_id: '1093',
+    name: 'Robert Johnson',
     gender: 'M',
     age: 52,
     risk_tier: 'low',
@@ -48,6 +53,7 @@ export const MOCK_PATIENTS: Patient[] = [
     enrolled_at: '2026-02-01T10:00:00Z',
     enrolled_by: 'dr.mehta',
     has_briefing: true,
+    trend_avg_systolic: 136.3,
   },
 ]
 

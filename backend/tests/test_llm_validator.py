@@ -20,6 +20,7 @@ from app.services.briefing.llm_validator import (
     check_bp_plausibility,
     check_contradiction,
     check_data_limitations,
+    check_drug_interactions,
     check_guardrails,
     check_medication_hallucination,
     check_overdue_labs,
@@ -517,3 +518,78 @@ async def test_validate_passes_compliant_summary(
     )
     assert result.passed
     assert result.failed_check is None
+
+
+# ── check_drug_interactions ────────────────────────────────────────────────────
+
+
+class TestCheckDrugInteractions:
+    """Tests for check_drug_interactions() faithfulness check."""
+
+    def test_passes_when_only_warning_severity(self) -> None:
+        """Warning-only interactions do not require a keyword in the summary."""
+        payload: dict[str, Any] = {
+            "drug_interactions": [{
+                "rule": "nsaid_antihypertensive",
+                "severity": "warning",
+                "drugs_involved": ["ibuprofen", "atenolol"],
+                "description": "NSAID + antihypertensive.",
+                "comorbidity_amplified": False,
+            }]
+        }
+        text = "BP is stable at 128/82 mmHg. Medication review may be warranted. No urgent flags."
+        result = check_drug_interactions(text, payload)
+        assert result.passed
+
+    def test_passes_when_concern_and_keyword_in_text(self) -> None:
+        """Concern severity passes when an accepted keyword appears in summary."""
+        payload: dict[str, Any] = {
+            "drug_interactions": [{
+                "rule": "triple_whammy",
+                "severity": "concern",
+                "drugs_involved": ["ibuprofen", "lisinopril", "furosemide"],
+                "description": "Triple whammy combination.",
+                "comorbidity_amplified": False,
+            }]
+        }
+        text = (
+            "BP elevated at 162/98 mmHg with sustained Stage 2 readings. "
+            "Triple whammy combination identified — NSAID with ACE inhibitor and diuretic noted. "
+            "Visit agenda should prioritise drug interaction review and renal function check."
+        )
+        result = check_drug_interactions(text, payload)
+        assert result.passed
+
+    def test_fails_when_concern_present_and_no_keyword(self) -> None:
+        """Concern severity fails validation when no interaction keyword is in the summary."""
+        payload: dict[str, Any] = {
+            "drug_interactions": [{
+                "rule": "bb_non_dhp_ccb",
+                "severity": "concern",
+                "drugs_involved": ["bisoprolol", "verapamil"],
+                "description": "Beta-blocker + non-DHP CCB.",
+                "comorbidity_amplified": False,
+            }]
+        }
+        text = (
+            "BP average is 158/100 mmHg with sustained Stage 2 hypertension. "
+            "High medication adherence at 91% alongside persistent elevation supports a treatment-review case. "
+            "Visit agenda should prioritise medication review and CHF follow-up."
+        )
+        result = check_drug_interactions(text, payload)
+        assert not result.passed
+        assert result.failed_check == "drug_interaction_unsupported"
+
+    def test_passes_when_drug_interactions_key_absent(self) -> None:
+        """Missing drug_interactions key in payload must not cause a failure."""
+        payload: dict[str, Any] = {"trend_summary": "BP is normal."}
+        text = "BP is normal. No concerns. Routine review recommended."
+        result = check_drug_interactions(text, payload)
+        assert result.passed
+
+    def test_passes_when_drug_interactions_empty_list(self) -> None:
+        """Empty drug_interactions list must not require any keyword."""
+        payload: dict[str, Any] = {"drug_interactions": []}
+        text = "BP is stable. No issues. Continue current management."
+        result = check_drug_interactions(text, payload)
+        assert result.passed

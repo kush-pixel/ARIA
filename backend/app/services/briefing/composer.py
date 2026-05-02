@@ -25,6 +25,7 @@ from app.models.clinical_context import ClinicalContext
 from app.models.medication_confirmation import MedicationConfirmation
 from app.models.patient import Patient
 from app.models.reading import Reading
+from app.services.briefing.medication_safety import check_interactions
 from app.services.pattern_engine.threshold_utils import (
     compute_patient_threshold,
     get_titration_window,
@@ -409,13 +410,17 @@ def _build_visit_agenda(
     alerts: list[Alert] | None = None,
     variability_agenda_item: str | None = None,
     patient_threshold: float = _ELEVATED_SYSTOLIC,
+    drug_interactions: list[dict] | None = None,
 ) -> list[str]:
     """Build a prioritised visit agenda (up to 6 items).
 
-    Priority order per CLAUDE.md:
+    Priority order per CLAUDE.md (drug interactions inserted by severity):
+    0. Critical drug interactions (before all other items)
     1. Urgent alerts
+    1a. Concern-level drug interactions (alongside urgent alerts)
     2. Inertia flag (from alert rows — Fix 18, avoids double-computation)
     3. Adherence concern
+    3a. Warning-level drug interactions (before variability flag)
     4. Variability flag (Fix 59)
     5. Overdue labs
     6. Active problems review / next appointment recommendation
@@ -430,18 +435,36 @@ def _build_visit_agenda(
         monitoring_active: Whether home monitoring is active.
         alerts: Unacknowledged Alert rows for this patient (Fix 18).
         variability_agenda_item: Variability agenda string from detector, or None.
+        drug_interactions: Interaction dicts from check_interactions(), or None.
+            critical items go at position 0; concern alongside urgent flags;
+            warning after adherence concern (before variability flag).
 
     Returns:
         Ordered list of visit agenda item strings (max 6).
     """
     agenda: list[str] = []
     _alerts = alerts or []
+    _interactions = drug_interactions or []
+
+    # 0. Critical drug interactions — before all other items
+    for ix in _interactions:
+        if ix["severity"] == "critical":
+            agenda.append(f"CRITICAL: {ix['description']}")
+            if len(agenda) >= 6:
+                return agenda
 
     # 1. Urgent alerts
     for flag in urgent_flags:
         agenda.append(f"URGENT: {flag}")
         if len(agenda) >= 6:
             return agenda
+
+    # 1a. Concern-level drug interactions — alongside urgent alerts
+    for ix in _interactions:
+        if ix["severity"] == "concern":
+            agenda.append(f"Drug interaction — {ix['description']}")
+            if len(agenda) >= 6:
+                return agenda
 
     # 2. Therapeutic inertia — derived from alert rows (Fix 18)
     if any(a.alert_type == "inertia" for a in _alerts):
@@ -481,6 +504,11 @@ def _build_visit_agenda(
                 f"Discuss possible adherence concern: {overall_rate:.0f}% overall "
                 f"confirmation rate across all medications in the past 28 days."
             )
+
+    # 3a. Warning-level drug interactions — before variability flag
+    for ix in _interactions:
+        if ix["severity"] == "warning" and len(agenda) < 6:
+            agenda.append(f"Medication review — {ix['description']}")
 
     # 4. Variability flag (Fix 59)
     if variability_agenda_item and len(agenda) < 6:
@@ -720,6 +748,21 @@ async def compose_briefing(
         None,
     )
 
+    data_limitations = _build_data_limitations(
+        readings=readings,
+        monitoring_active=patient.monitoring_active,
+        enrolled_at=patient.enrolled_at,
+    )
+
+    # ── Drug interaction check ─────────────────────────────────────────────────
+    drug_interactions = check_interactions(ctx)
+    if drug_interactions:
+        data_limitations = (
+            data_limitations
+            + " Drug interaction check covers hypertension-related interactions only"
+            " (NSAIDs, K-sparing diuretics, rate-limiting CCBs)."
+        )
+
     visit_agenda = _build_visit_agenda(
         urgent_flags=urgent_flags,
         readings=readings,
@@ -731,15 +774,20 @@ async def compose_briefing(
         alerts=alerts,
         variability_agenda_item=variability_agenda_item,
         patient_threshold=patient_threshold,
+        drug_interactions=drug_interactions,
     )
-    data_limitations = _build_data_limitations(
-        readings=readings,
-        monitoring_active=patient.monitoring_active,
-        enrolled_at=patient.enrolled_at,
+
+    # Structured average for dashboard display — home readings only, consistent
+    # with the pattern engine which excludes clinic readings from trend analysis.
+    home_readings = [r for r in readings if r.source != "clinic"]
+    trend_avg_systolic: float | None = (
+        round(statistics.mean(float(r.systolic_avg) for r in home_readings), 1)
+        if home_readings else None
     )
 
     payload: dict[str, Any] = {
         "trend_summary": trend_summary,
+        "trend_avg_systolic": trend_avg_systolic,
         "medication_status": medication_status,
         "adherence_summary": adherence_summary,
         "active_problems": _sort_problems(ctx.active_problems or [], ctx.problem_codes or []),
@@ -747,6 +795,7 @@ async def compose_briefing(
             ctx.problem_assessments, ctx.active_problems, ctx.problem_codes
         ),
         "overdue_labs": ctx.overdue_labs or [],
+        "drug_interactions": drug_interactions,
         "visit_agenda": visit_agenda,
         "urgent_flags": urgent_flags,
         "risk_score": float(patient.risk_score) if patient.risk_score is not None else None,
@@ -898,6 +947,23 @@ async def compose_mini_briefing(
         last_med_change=ctx.last_med_change,
         med_history=ctx.med_history,
     )
+    data_limitations = _build_data_limitations(
+        readings=readings,
+        monitoring_active=patient.monitoring_active,
+        window_days=mini_window_days,
+        mini_briefing=True,
+        enrolled_at=patient.enrolled_at,
+    )
+
+    # ── Drug interaction check ─────────────────────────────────────────────────
+    drug_interactions = check_interactions(ctx)
+    if drug_interactions:
+        data_limitations = (
+            data_limitations
+            + " Drug interaction check covers hypertension-related interactions only"
+            " (NSAIDs, K-sparing diuretics, rate-limiting CCBs)."
+        )
+
     visit_agenda = _build_visit_agenda(
         urgent_flags=urgent_flags,
         readings=readings,
@@ -907,17 +973,18 @@ async def compose_mini_briefing(
         last_med_change=ctx.last_med_change,
         monitoring_active=patient.monitoring_active,
         alerts=alerts,
+        drug_interactions=drug_interactions,
     )
-    data_limitations = _build_data_limitations(
-        readings=readings,
-        monitoring_active=patient.monitoring_active,
-        window_days=mini_window_days,
-        mini_briefing=True,
-        enrolled_at=patient.enrolled_at,
+
+    mini_home_readings = [r for r in readings if r.source != "clinic"]
+    mini_trend_avg_systolic: float | None = (
+        round(statistics.mean(float(r.systolic_avg) for r in mini_home_readings), 1)
+        if mini_home_readings else None
     )
 
     payload: dict[str, Any] = {
         "trend_summary": trend_summary,
+        "trend_avg_systolic": mini_trend_avg_systolic,
         "medication_status": medication_status,
         "adherence_summary": "",
         "active_problems": _sort_problems(ctx.active_problems or [], ctx.problem_codes or []),
@@ -925,6 +992,7 @@ async def compose_mini_briefing(
             ctx.problem_assessments, ctx.active_problems, ctx.problem_codes
         ),
         "overdue_labs": ctx.overdue_labs or [],
+        "drug_interactions": drug_interactions,
         "visit_agenda": visit_agenda,
         "urgent_flags": urgent_flags,
         "risk_score": float(patient.risk_score) if patient.risk_score is not None else None,

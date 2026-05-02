@@ -93,6 +93,8 @@ def _make_clinical_context(
     last_clinic_diastolic: int | None = 72,
     historic_bp_systolic: list[int] | None = None,
     historic_bp_dates: list[str] | None = None,
+    med_history: list[dict] | None = None,
+    med_rxnorm_codes: list[str] | None = None,
 ) -> MagicMock:
     """Create a mock ClinicalContext ORM instance."""
     ctx = MagicMock()
@@ -107,6 +109,9 @@ def _make_clinical_context(
     ctx.historic_bp_systolic = historic_bp_systolic
     ctx.historic_bp_dates = historic_bp_dates
     ctx.social_context = "Lives alone, retired."
+    ctx.med_history = med_history  # explicit None avoids MagicMock iteration in get_titration_window
+    ctx.med_rxnorm_codes = med_rxnorm_codes or []
+    ctx.problem_assessments = None  # explicit None prevents MagicMock iteration in _build_problem_assessments
     return ctx
 
 
@@ -907,3 +912,167 @@ class TestComposeMinieBriefing:
         payload = result.llm_response
         assert "7-day" in payload["trend_summary"]
         assert "28-day" not in payload["trend_summary"]
+
+
+# ---------------------------------------------------------------------------
+# _build_visit_agenda — drug interactions priority
+# ---------------------------------------------------------------------------
+
+
+class TestBuildVisitAgendaDrugInteractions:
+    """Tests for drug_interactions parameter in _build_visit_agenda."""
+
+    def test_critical_interaction_at_position_zero(self) -> None:
+        """CRITICAL drug interaction must be inserted before urgent flags."""
+        interactions = [{
+            "rule": "triple_whammy",
+            "severity": "critical",
+            "drugs_involved": ["ibuprofen", "lisinopril", "furosemide"],
+            "description": "Triple whammy combination.",
+            "comorbidity_amplified": True,
+        }]
+        agenda = _build_visit_agenda(
+            urgent_flags=["Reading gap: 5 days (urgent threshold)."],
+            readings=[],
+            confirmations=[],
+            active_problems=[],
+            overdue_labs=[],
+            last_med_change=None,
+            monitoring_active=False,
+            drug_interactions=interactions,
+        )
+        assert agenda[0].startswith("CRITICAL:")
+        assert any("URGENT" in item for item in agenda)
+
+    def test_concern_interaction_after_urgent_flags(self) -> None:
+        """Concern-level interaction must appear directly after urgent flags."""
+        interactions = [{
+            "rule": "bb_non_dhp_ccb",
+            "severity": "concern",
+            "drugs_involved": ["bisoprolol", "verapamil"],
+            "description": "Beta-blocker + non-DHP CCB.",
+            "comorbidity_amplified": False,
+        }]
+        agenda = _build_visit_agenda(
+            urgent_flags=["Gap alert."],
+            readings=[],
+            confirmations=[],
+            active_problems=[],
+            overdue_labs=[],
+            last_med_change=None,
+            monitoring_active=False,
+            drug_interactions=interactions,
+        )
+        concern_items = [i for i in agenda if "Drug interaction" in i]
+        assert len(concern_items) == 1
+        # one urgent flag at index 0, concern item at index 1 (directly after)
+        assert agenda.index(concern_items[0]) == 1
+
+    def test_warning_interaction_before_variability(self) -> None:
+        """Warning interaction must appear before variability_agenda_item."""
+        interactions = [{
+            "rule": "nsaid_antihypertensive",
+            "severity": "warning",
+            "drugs_involved": ["ibuprofen", "lisinopril"],
+            "description": "NSAID + antihypertensive.",
+            "comorbidity_amplified": False,
+        }]
+        agenda = _build_visit_agenda(
+            urgent_flags=[],
+            readings=[],
+            confirmations=[],
+            active_problems=[],
+            overdue_labs=[],
+            last_med_change=None,
+            monitoring_active=False,
+            drug_interactions=interactions,
+            variability_agenda_item="High BP variability detected.",
+        )
+        warning_idx = next(i for i, item in enumerate(agenda) if "Medication review" in item)
+        variability_idx = next(i for i, item in enumerate(agenda) if "variability" in item.lower())
+        assert warning_idx < variability_idx
+
+    def test_no_drug_interactions_param_unchanged_agenda(self) -> None:
+        """Omitting drug_interactions must not change existing agenda behaviour."""
+        agenda = _build_visit_agenda(
+            urgent_flags=["Gap alert."],
+            readings=[],
+            confirmations=[],
+            active_problems=["Hypertension"],
+            overdue_labs=[],
+            last_med_change=None,
+            monitoring_active=False,
+        )
+        assert agenda[0] == "URGENT: Gap alert."
+        assert not any("Drug interaction" in item for item in agenda)
+        assert not any("Medication review" in item for item in agenda)
+
+
+# ---------------------------------------------------------------------------
+# compose_briefing — drug_interactions field present
+# ---------------------------------------------------------------------------
+
+
+class TestComposeBriefingDrugInteractions:
+    """Integration tests for drug_interactions in compose_briefing payload."""
+
+    def _make_session(
+        self,
+        patient: MagicMock,
+        ctx: MagicMock,
+        readings: list,
+        alerts: list,
+        confirmations: list,
+    ) -> AsyncMock:
+        session = AsyncMock()
+
+        def _scalar(val: MagicMock) -> MagicMock:
+            result = MagicMock()
+            result.scalar_one_or_none.return_value = val
+            return result
+
+        def _scalars(vals: list) -> MagicMock:
+            result = MagicMock()
+            scalars = MagicMock()
+            scalars.all.return_value = vals
+            result.scalars.return_value = scalars
+            return result
+
+        session.execute.side_effect = [
+            _scalar(patient),
+            _scalar(ctx),
+            _scalars(readings),
+            _scalars(alerts),
+            _scalars(confirmations),
+        ]
+        session.flush = AsyncMock()
+        session.commit = AsyncMock()
+        return session
+
+    @pytest.mark.asyncio
+    async def test_drug_interactions_field_always_present(self) -> None:
+        """compose_briefing must always include drug_interactions list in payload."""
+        patient = _make_patient()
+        ctx = _make_clinical_context()
+        session = self._make_session(patient, ctx, [], [], [])
+
+        briefing = await compose_briefing(session, "1091", date(2026, 4, 14))
+
+        assert "drug_interactions" in briefing.llm_response
+        assert isinstance(briefing.llm_response["drug_interactions"], list)
+
+    @pytest.mark.asyncio
+    async def test_drug_interactions_detected_for_nsaid_plus_ace(self) -> None:
+        """compose_briefing detects NSAID + ACE inhibitor interaction."""
+        patient = _make_patient()
+        ctx = _make_clinical_context(
+            medications=["ibuprofen 400mg", "lisinopril 10mg"],
+            problem_codes=["I10"],
+        )
+        session = self._make_session(patient, ctx, [], [], [])
+
+        briefing = await compose_briefing(session, "1091", date(2026, 4, 14))
+
+        interactions = briefing.llm_response["drug_interactions"]
+        assert len(interactions) >= 1
+        assert interactions[0]["rule"] == "nsaid_antihypertensive"

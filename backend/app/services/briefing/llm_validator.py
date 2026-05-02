@@ -523,6 +523,44 @@ def check_bp_plausibility(text: str, payload: dict[str, Any]) -> ValidationResul
     return ValidationResult(passed=True)
 
 
+def check_drug_interactions(text: str, payload: dict[str, Any]) -> ValidationResult:
+    """Validate concern/critical drug interactions are referenced in the LLM summary.
+
+    Only fires when the payload contains at least one interaction with severity
+    "concern" or "critical". Warning-only interactions do not require mention.
+    Accepts a broad set of keywords so the LLM can describe the interaction
+    naturally without being forced into a single phrase.
+
+    Args:
+        text: Raw LLM output string.
+        payload: Layer 1 briefing payload dict.
+
+    Returns:
+        Failed result if a concern/critical interaction is present but no
+        recognised interaction keyword appears in the summary text.
+    """
+    interactions = payload.get("drug_interactions") or []
+    has_significant = any(i["severity"] in ("concern", "critical") for i in interactions)
+    if not has_significant:
+        return ValidationResult(passed=True)
+    keywords = [
+        "drug interaction",
+        "medication safety",
+        "nsaid",
+        "triple whammy",
+        "bradycardia",
+        "hyperkalaemia",
+        "hyperkalemia",
+    ]
+    if not any(kw in text.lower() for kw in keywords):
+        return ValidationResult(
+            passed=False,
+            failed_check="drug_interaction_unsupported",
+            detail="concern/critical drug interaction present but not referenced in summary",
+        )
+    return ValidationResult(passed=True)
+
+
 def check_contradiction(text: str, payload: dict[str, Any]) -> ValidationResult:
     """Detect cases where LLM output is more alarming than the payload supports.
 
@@ -653,6 +691,7 @@ async def validate_llm_output(
         lambda: check_medication_hallucination(text, payload),
         lambda: check_bp_plausibility(text, payload),
         lambda: check_contradiction(text, payload),
+        lambda: check_drug_interactions(text, payload),
     ]
 
     for check in checks:

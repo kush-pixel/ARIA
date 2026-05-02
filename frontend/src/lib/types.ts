@@ -2,6 +2,7 @@ export type RiskTier = 'high' | 'medium' | 'low'
 
 export interface Patient {
   patient_id: string
+  name: string | null
   gender: 'M' | 'F' | 'U'
   age: number
   risk_tier: RiskTier
@@ -13,6 +14,7 @@ export interface Patient {
   enrolled_at: string
   enrolled_by: string
   has_briefing: boolean
+  trend_avg_systolic: number | null
 }
 
 export interface ClinicalContext {
@@ -48,12 +50,21 @@ export interface Reading {
   submitted_by: string
 }
 
+export interface DrugInteraction {
+  rule: 'nsaid_antihypertensive' | 'triple_whammy' | 'k_sparing_ace_arb' | 'bb_non_dhp_ccb'
+  severity: 'warning' | 'concern' | 'critical'
+  drugs_involved: string[]
+  description: string
+  comorbidity_amplified: boolean
+}
+
 export interface BriefingPayload {
   trend_summary: string
   medication_status: string
   adherence_summary: string
   active_problems: string[]
   overdue_labs: string[]
+  drug_interactions?: DrugInteraction[]
   visit_agenda: string[]
   urgent_flags: string[]
   risk_score: number | null

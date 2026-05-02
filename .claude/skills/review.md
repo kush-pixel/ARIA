@@ -40,11 +40,16 @@ Pattern engine:
 
 Briefing:
   [ ] Deterministic JSON complete before LLM layer
-  [ ] All 10 fields populated (includes problem_assessments)
+  [ ] All 13 fields populated (includes problem_assessments, trend_avg_systolic, drug_interactions, patient_context)
+  [ ] trend_avg_systolic computed from home readings only (excludes source="clinic")
+  [ ] drug_interactions from medication_safety.check_interactions() — not re-implemented inline
+  [ ] Triple whammy suppresses nsaid_antihypertensive (no duplicate flags)
+  [ ] Critical interactions first in visit_agenda; concern alongside urgent; warning after adherence
   [ ] visit_agenda in clinical priority order
   [ ] risk_score included in briefing JSON
   [ ] Inertia in agenda from inertia_result dict (not re-implemented inline)
   [ ] trend_summary uses adaptive window (not hardcoded "28-day")
+  [ ] GET /api/briefings only returns active briefings (appointment_date >= today OR IS NULL)
   [ ] llm_validator.py called after summarizer.py, before storing readable_summary
   [ ] Guardrails check: forbidden language, PHI leak, prompt injection
   [ ] Faithfulness check: sentence count=3, risk score, adherence, medications, BP, contradictions

@@ -9,9 +9,10 @@ GIT POLICY: Never push, commit, or add.
 
 Strict execution order:
 1. composer.py — deterministic JSON (no LLM, no AI)
-2. Verify all 10 fields correct:
-   trend_summary, medication_status, adherence_summary, active_problems,
-   problem_assessments, overdue_labs, visit_agenda, urgent_flags, risk_score, data_limitations
+2. Verify all 13 fields correct:
+   trend_summary, trend_avg_systolic, medication_status, adherence_summary, active_problems,
+   problem_assessments, overdue_labs, drug_interactions, visit_agenda, urgent_flags,
+   risk_score, data_limitations, patient_context
 3. summarizer.py — optional Layer 3 LLM on top
 4. llm_validator.py — validate LLM output BEFORE storing readable_summary
    Guardrails (absolute blocks): forbidden clinical language, PHI leak, prompt injection
