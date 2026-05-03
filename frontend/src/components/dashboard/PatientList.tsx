@@ -1,14 +1,14 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { useRouter, useSearchParams } from 'next/navigation'
+import { useEffect, useRef, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { getPatients, getReadings, getPatientBaseline } from '@/lib/api'
-import type { Patient, Reading, RiskTier } from '@/lib/types'
+import type { Patient, PaginatedPatients, Reading, RiskTier, TierCounts } from '@/lib/types'
 import RiskTierBadge from './RiskTierBadge'
 import RiskScoreBar from './RiskScoreBar'
-import { Clock, AlertTriangle, ChevronLeft, ChevronRight, Users } from 'lucide-react'
+import { Clock, AlertTriangle, ChevronLeft, ChevronRight, Users, Search } from 'lucide-react'
 
-const PAGE_SIZE = 10
+const PAGE_SIZE = 25
 
 const TIER_FILTERS: Array<{ value: RiskTier | 'all'; label: string }> = [
   { value: 'all',    label: 'All' },
@@ -130,99 +130,122 @@ const COLS = 'grid-cols-[1fr_110px_160px_150px_96px_140px]'
 
 export default function PatientList() {
   const router = useRouter()
-  const searchParams = useSearchParams()
-  const searchQuery = (searchParams.get('q') ?? '').toLowerCase().trim()
   const [patients, setPatients] = useState<Patient[]>([])
   const [loading, setLoading] = useState(true)
   const [tierFilter, setTierFilter] = useState<RiskTier | 'all'>('all')
   const [page, setPage] = useState(1)
+  const [totalPages, setTotalPages] = useState(1)
+  const [total, setTotal] = useState(0)
+  const [counts, setCounts] = useState<TierCounts>({ all: 0, high: 0, medium: 0, low: 0 })
+  const [searchInput, setSearchInput] = useState('')
+  const [search, setSearch] = useState('')
   const [bpTrends, setBpTrends] = useState<Record<string, BpTrend | null>>({})
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Debounce search input — fire server request 350ms after typing stops
+  function handleSearchChange(value: string) {
+    setSearchInput(value)
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => {
+      setSearch(value)
+      setPage(1)
+    }, 350)
+  }
+
+  useEffect(() => { setPage(1) }, [tierFilter])
 
   useEffect(() => {
-    getPatients().then((data) => {
-      setPatients(data)
-      setLoading(false)
-      Promise.all(
-        data.map((p) =>
-          getPatientBaseline(p.patient_id).then(({ baseline_systolic }) => {
-            // Prefer the briefing's authoritative average — same number the clinician sees
-            if (p.trend_avg_systolic != null) {
-              return [p.patient_id, buildTrendLabel(p.trend_avg_systolic, baseline_systolic)] as [string, BpTrend | null]
-            }
-            // No briefing yet — fall back to live computation from readings
-            return getReadings(p.patient_id)
-              .catch(() => [] as Reading[])
-              .then((readings) => [
-                p.patient_id,
-                computeBpTrend(readings, baseline_systolic, p.next_appointment),
-              ] as [string, BpTrend | null])
-          })
-        )
-      ).then((entries) => setBpTrends(Object.fromEntries(entries)))
-    })
-  }, [])
+    setLoading(true)
+    getPatients({ page, pageSize: PAGE_SIZE, search, tier: tierFilter })
+      .then((data: PaginatedPatients) => {
+        setPatients(data.patients)
+        setTotal(data.total)
+        setTotalPages(data.total_pages)
+        setCounts(data.counts)
+        setLoading(false)
 
-  useEffect(() => { setPage(1) }, [tierFilter, searchQuery])
+        // Compute BP trends for the current page only
+        Promise.all(
+          data.patients.map((p) =>
+            getPatientBaseline(p.patient_id).then(({ baseline_systolic }) => {
+              if (p.trend_avg_systolic != null) {
+                return [p.patient_id, buildTrendLabel(p.trend_avg_systolic, baseline_systolic)] as [string, BpTrend | null]
+              }
+              return getReadings(p.patient_id)
+                .catch(() => [] as Reading[])
+                .then((readings) => [
+                  p.patient_id,
+                  computeBpTrend(readings, baseline_systolic, p.next_appointment),
+                ] as [string, BpTrend | null])
+            })
+          )
+        ).then((entries) => setBpTrends(Object.fromEntries(entries)))
+      })
+      .catch(() => setLoading(false))
+  }, [page, search, tierFilter])
 
-  if (loading) {
+  // Full spinner on initial load only; subsequent page/search changes show inline opacity
+  if (loading && patients.length === 0) {
     return (
       <div className="flex items-center gap-3 text-gray-400 text-[15px] py-8">
         <div className="h-4 w-4 rounded-full border-2 border-blue-600 border-t-transparent animate-spin" />
-        Loading patients…
+        Loading patients&hellip;
       </div>
     )
   }
 
-  const counts: Record<RiskTier | 'all', number> = {
-    all:    patients.length,
-    high:   patients.filter((p) => p.risk_tier === 'high').length,
-    medium: patients.filter((p) => p.risk_tier === 'medium').length,
-    low:    patients.filter((p) => p.risk_tier === 'low').length,
-  }
-
-  const tierFiltered = tierFilter === 'all' ? patients : patients.filter((p) => p.risk_tier === tierFilter)
-  const filtered = searchQuery
-    ? tierFiltered.filter((p) =>
-        p.patient_id.toLowerCase().includes(searchQuery) ||
-        (p.name ?? '').toLowerCase().includes(searchQuery) ||
-        p.active_problems.some((prob) => prob.toLowerCase().includes(searchQuery))
-      )
-    : tierFiltered
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
   const safePage = Math.min(page, totalPages)
-  const pageSlice = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE)
+  const pageSlice = patients
 
   return (
     <div className="space-y-4">
-      {/* Tier filter tabs */}
-      <div className="flex items-center gap-1 p-1 bg-gray-100 dark:bg-[#1F2937] rounded-xl w-fit">
-        {TIER_FILTERS.map(({ value, label }) => {
-          const active = tierFilter === value
-          let activeStyle = 'bg-white dark:bg-[#111827] text-gray-900 dark:text-gray-100 shadow-sm'
-          if (active && value === 'high')   activeStyle = 'bg-red-600 text-white shadow-sm'
-          if (active && value === 'medium') activeStyle = 'bg-amber-500 text-white shadow-sm'
-          if (active && value === 'low')    activeStyle = 'bg-green-600 text-white shadow-sm'
+      {/* Search + tier filter row */}
+      <div className="flex items-center gap-3 flex-wrap">
+        {/* Search input */}
+        <div className="relative">
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+          <input
+            type="text"
+            value={searchInput}
+            onChange={(e) => handleSearchChange(e.target.value)}
+            placeholder="Search patients…"
+            className="pl-8 pr-3 py-2 text-[13px] rounded-lg border border-gray-200 dark:border-[#374151]
+                       bg-white dark:bg-[#111827] text-gray-900 dark:text-gray-100
+                       placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500
+                       w-52"
+          />
+        </div>
 
-          return (
-            <button
-              key={value}
-              onClick={() => setTierFilter(value)}
-              className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-[13px] font-semibold
-                          transition-all duration-150
-                          ${active ? activeStyle : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}`}
-            >
-              {label}
-              <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded-full
-                               ${active ? 'bg-white/20' : 'bg-gray-200 dark:bg-[#374151] text-gray-500 dark:text-gray-400'}`}>
-                {counts[value]}
-              </span>
-            </button>
-          )
-        })}
+        {/* Tier filter tabs */}
+        <div className="flex items-center gap-1 p-1 bg-gray-100 dark:bg-[#1F2937] rounded-xl w-fit">
+          {TIER_FILTERS.map(({ value, label }) => {
+            const active = tierFilter === value
+            let activeStyle = 'bg-white dark:bg-[#111827] text-gray-900 dark:text-gray-100 shadow-sm'
+            if (active && value === 'high')   activeStyle = 'bg-red-600 text-white shadow-sm'
+            if (active && value === 'medium') activeStyle = 'bg-amber-500 text-white shadow-sm'
+            if (active && value === 'low')    activeStyle = 'bg-green-600 text-white shadow-sm'
+
+            return (
+              <button
+                key={value}
+                onClick={() => setTierFilter(value)}
+                className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-[13px] font-semibold
+                            transition-all duration-150
+                            ${active ? activeStyle : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}`}
+              >
+                {label}
+                <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded-full
+                                 ${active ? 'bg-white/20' : 'bg-gray-200 dark:bg-[#374151] text-gray-500 dark:text-gray-400'}`}>
+                  {counts[value]}
+                </span>
+              </button>
+            )
+          })}
+        </div>
       </div>
 
       {/* Table */}
-      <div className="card overflow-hidden">
+      <div className={`card overflow-hidden transition-opacity duration-150 ${loading ? 'opacity-60' : ''}`}>
         {/* Header */}
         <div className={`grid ${COLS} gap-4 px-6 py-3
                         bg-gray-50 dark:bg-[#0B1220]
@@ -241,7 +264,7 @@ export default function PatientList() {
           <div className="flex flex-col items-center justify-center py-16 gap-3 text-gray-400">
             <Users size={32} strokeWidth={1.5} />
             <p className="text-[15px]">
-              {searchQuery ? `No patients match "${searchQuery}".` : 'No patients in this tier.'}
+              {search ? `No patients match "${search}".` : 'No patients in this tier.'}
             </p>
           </div>
         ) : (
@@ -337,7 +360,7 @@ export default function PatientList() {
       {totalPages > 1 && (
         <div className="flex items-center justify-between px-1">
           <p className="text-[13px] text-gray-400">
-            Showing {(safePage - 1) * PAGE_SIZE + 1}–{Math.min(safePage * PAGE_SIZE, filtered.length)} of {filtered.length} patients
+            Showing {(safePage - 1) * PAGE_SIZE + 1}–{Math.min(safePage * PAGE_SIZE, total)} of {total} patients
           </p>
           <div className="flex items-center gap-1">
             <button

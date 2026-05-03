@@ -31,7 +31,9 @@ Execution paths
 
 from __future__ import annotations
 
-from datetime import date
+import hashlib
+from datetime import UTC, date, datetime, timedelta
+from datetime import time as _time
 
 from sqlalchemy import cast, not_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -50,6 +52,22 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+
+def _recompute_offset_minutes(patient_id: str) -> int:
+    """Return a deterministic 0–119 minute offset for midnight-sweep staggering.
+
+    Spreads pattern_recompute jobs over a 2-hour window (midnight–02:00 UTC)
+    so 1 800 patients don't all hit the DB at the same instant.  The offset
+    is stable across nights — the same patient always gets the same slot.
+
+    Args:
+        patient_id: The patient's MED_REC_NO used as the hash seed.
+
+    Returns:
+        Integer in [0, 119].
+    """
+    return int(hashlib.md5(patient_id.encode(), usedforsecurity=False).hexdigest(), 16) % 120
 
 
 def _briefing_idempotency_key(patient_id: str, appointment_date: date) -> str:
@@ -215,6 +233,11 @@ async def enqueue_pattern_recompute_sweep(
     today = target_date or date.today()
     factory = session_factory if session_factory is not None else AsyncSessionLocal
 
+    # Spread jobs across a 2-hour window starting at midnight UTC.
+    # Each patient gets a deterministic slot so the same patient always runs
+    # at the same time — re-runs on the same date hit ON CONFLICT DO NOTHING.
+    midnight_utc = datetime.combine(today, _time.min, tzinfo=UTC)
+
     async with factory() as session:
         result = await session.execute(
             select(Patient).where(Patient.monitoring_active.is_(True))
@@ -228,6 +251,8 @@ async def enqueue_pattern_recompute_sweep(
         enqueued = 0
         for patient in patients:
             idempotency_key = _pattern_recompute_idempotency_key(patient.patient_id, today)
+            offset = _recompute_offset_minutes(patient.patient_id)
+            scheduled_for = midnight_utc + timedelta(minutes=offset)
 
             await session.execute(
                 pg_insert(ProcessingJob)
@@ -236,15 +261,17 @@ async def enqueue_pattern_recompute_sweep(
                     patient_id=patient.patient_id,
                     idempotency_key=idempotency_key,
                     status="queued",
+                    retry_after=scheduled_for,
                     created_by="scheduler",
                 )
                 .on_conflict_do_nothing(index_elements=["idempotency_key"])
             )
             enqueued += 1
             logger.info(
-                "Sweep: enqueued pattern_recompute for patient=%s date=%s",
+                "Sweep: enqueued pattern_recompute for patient=%s date=%s scheduled_at=%s",
                 patient.patient_id,
                 today,
+                scheduled_for.strftime("%H:%M UTC"),
             )
 
         await session.execute(text("SELECT pg_notify('aria_jobs', '')"))

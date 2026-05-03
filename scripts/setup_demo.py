@@ -34,10 +34,14 @@ from sqlalchemy import delete, func, select, update
 
 from app.db.base import AsyncSessionLocal
 from app.models.alert import Alert
+from app.models.alert_feedback import AlertFeedback
 from app.models.audit_event import AuditEvent
 from app.models.briefing import Briefing
+from app.models.calibration_rule import CalibrationRule
 from app.models.clinical_context import ClinicalContext
+from app.models.gap_explanation import GapExplanation
 from app.models.medication_confirmation import MedicationConfirmation
+from app.models.outcome_verification import OutcomeVerification
 from app.models.patient import Patient
 from app.models.processing_job import ProcessingJob
 from app.models.reading import Reading
@@ -232,7 +236,11 @@ async def _teardown(dry_run: bool) -> None:
     _cascade_models: list[type] = [
         AuditEvent,
         Briefing,
+        OutcomeVerification,   # references alert_feedback + alerts
+        AlertFeedback,         # references alerts
         Alert,
+        CalibrationRule,
+        GapExplanation,
         ProcessingJob,
         MedicationConfirmation,
         Reading,
@@ -262,7 +270,7 @@ async def _teardown(dry_run: bool) -> None:
                 print(f"  Deleted patient record: {pid}")
 
         # Clear transient tables for Patient A — readings + confirmations stay
-        for model in [AuditEvent, Briefing, Alert, ProcessingJob]:
+        for model in [AuditEvent, Briefing, OutcomeVerification, AlertFeedback, Alert, CalibrationRule, GapExplanation, ProcessingJob]:
             result = await session.execute(
                 delete(model).where(model.patient_id == _PATIENT_A)
             )
@@ -562,11 +570,11 @@ async def _seed_demo_adh(dry_run: bool) -> None:
             last_med_change=date(2025, 11, 5),
             allergies=[],
             allergy_reactions=[],
-            last_visit_date=date(2025, 11, 5),
+            last_visit_date=date(2026, 4, 5),
             last_clinic_systolic=148,
             last_clinic_diastolic=92,
             historic_bp_systolic=[148],
-            historic_bp_dates=["2025-11-05"],
+            historic_bp_dates=["2026-04-05"],
             overdue_labs=[],
             social_context=None,
         ))
