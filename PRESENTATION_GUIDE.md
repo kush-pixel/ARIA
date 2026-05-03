@@ -17,6 +17,7 @@ ARIA is a between-visit clinical intelligence platform for hypertension manageme
 - 12-table PostgreSQL schema (Supabase, asyncpg)
 - iEMR → FHIR R4 adapter + ingestion pipeline (65 clinic readings, 14 medications, 17 conditions for demo patient 1091)
 - Full-timeline synthetic BP generator (1,800+ home readings across 5 years) and medication confirmation generator (1,092 scheduled doses, ~91% adherence rate)
+- **4 demo patients** set up by `scripts/setup_demo.py` (idempotent): 1091 (Patient A — Therapeutic Inertia, time-shifted to Jan–May 2026, appointment May 5 2026), DEMO_GAP (Patient B — 9-day reading gap + mild rising trend, 82 days of readings Feb 1–Apr 23), DEMO_ADH (Patient C — Adherence concern Pattern A, 28 days ~152 mmHg avg, ~58% adherence on amlodipine + lisinopril), DEMO_EHR (Patient D — EHR-only, no home monitoring, triple whammy drug interaction)
 - 5 Layer 1 pattern detectors (gap, inertia, deterioration, adherence, variability)
 - **Deterministic drug interaction detector** (4 rules: nsaid_antihypertensive, triple_whammy, k_sparing_ace_arb, bb_non_dhp_ccb — comorbidity-escalated severity, no LLM)
 - Layer 2 risk scorer (5-signal weighted sum, 0–100)
@@ -280,6 +281,12 @@ A 3-sentence human-readable summary of the deterministic briefing JSON. Layer 3 
 - PHI check: patient ID verbatim in output
 - Prompt injection check: "[INST]", "system:", "ignore previous"
 - Faithfulness: exactly 3 sentences; risk_score within ±10; BP values 60–250 mmHg and within ±20 of trend; drug names must be in medication_status; urgency claims grounded in urgent_flags
+
+**Validator hardening (demo-day fixes):**
+- Short ICD-10 code false positives resolved: "tia" now matched as `\bTIA\b` to prevent substring matches in clinical words like "potential" or "initially"
+- Treatment-review language: allowed when `urgent_flags` contains "inertia" and adherence Pattern A is absent
+- Drug interactions injected into LLM prompt: concern/critical interactions are explicitly listed in the user message so the model cannot miss them
+- **Result: ALL CHECKS PASSED on first attempt for all 4 demo patients**
 
 **Audit:**
 Every validation attempt → `audit_events` row with `action="llm_validation"`, `outcome="success"|"failure"`, `details=failed_check_name`.
@@ -774,6 +781,7 @@ Risk Score Signal Chain:
 | "The drug interaction detector uses AI" | medication_safety.py is a deterministic rule engine — no LLM, no ML | "Four deterministic rules applied against the medication list and ICD-10 codes. Completely rule-based." |
 | "A clinician can override any risk tier" | System-override patients (CHF/Stroke/TIA) return 409 — immovable | "Clinician override works for score-driven tiers. System overrides from CHF/Stroke/TIA require updating the EHR and re-ingesting." |
 | "The dashboard BP average is recomputed from readings" | Since the trend_avg_systolic fix, the dashboard reads from the briefing payload | "The dashboard uses trend_avg_systolic from the active briefing — the same number the briefing page shows. Between visits it falls back to a live 28-day window." |
+| "The AI summary always generates successfully" | Layer 3 can return null if validator fails — the full deterministic briefing still displays | "Layer 3 passes on first attempt for all 4 demo patients after validator hardening. If it fails, readable_summary=null and the deterministic briefing is always shown." |
 
 ---
 
@@ -802,6 +810,10 @@ Risk Score Signal Chain:
 11. **Drug interactions are deterministic, not AI.** `medication_safety.py` applies 4 rules against `current_medications` and `problem_codes`. Triple whammy supersedes NSAID + antihypertensive (deduplication). Severity escalates when CHF or CKD is active. For patient 1091, the triple whammy fires at critical severity.
 
 12. **Test count is 601 (not 521).** The risk tier reclassification system added ~50 new tests across test_ingestion.py, test_api.py, and test_pattern_engine.py.
+
+13. **Layer 3 now passes on first attempt for all 4 demo patients.** The validator was hardened with word-boundary fixes (short ICD-10 codes like "tia" no longer match substrings in words like "potential" or "initially"), treatment-review inertia allowance (Pattern B language no longer blocked when `urgent_flags` contains "inertia"), and drug interaction injection into the LLM user message so the model cannot miss flagged interactions.
+
+14. **`setup_demo.py` is idempotent and must be run before demo day.** It tears down and rebuilds all 4 demo patients, time-shifts patient 1091's 2010 readings to Jan–May 2026, generates DEMO_GAP/ADH/EHR patients, runs pattern recompute and briefing generation for all patients. Run: `python scripts/setup_demo.py` from repo root with `aria` conda env active.
 
 ---
 
@@ -887,7 +899,7 @@ Risk Score Signal Chain:
 
 **[Switch to Alert Inbox or Shadow Mode]**
 
-"The alert inbox shows all clinical flags across the patient panel. The shadow mode page — our validation view — shows that ARIA agrees with historical physician concern labels at [X]% on patient 1091's 5-year clinic record."
+"The alert inbox shows all clinical flags across the patient panel — displayed by patient name, not raw patient IDs. With 4 demo patients set up (the therapeutic inertia case, the reading gap case, the adherence concern case, and the EHR-only case), the inbox gives the GP a realistic multi-patient view. The shadow mode page — our validation view — shows that ARIA agrees with historical physician concern labels at [X]% on patient 1091's 5-year clinic record."
 
 **[Close]**
 
