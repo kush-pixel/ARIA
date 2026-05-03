@@ -570,11 +570,11 @@ async def _seed_demo_adh(dry_run: bool) -> None:
             last_med_change=date(2025, 11, 5),
             allergies=[],
             allergy_reactions=[],
-            last_visit_date=date(2025, 11, 5),
+            last_visit_date=date(2026, 4, 5),
             last_clinic_systolic=148,
             last_clinic_diastolic=92,
             historic_bp_systolic=[148],
-            historic_bp_dates=["2025-11-05"],
+            historic_bp_dates=["2026-04-05"],
             overdue_labs=[],
             social_context=None,
         ))
