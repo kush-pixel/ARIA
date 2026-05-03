@@ -18,11 +18,17 @@ ARIA is a between-visit clinical intelligence platform for hypertension manageme
 - iEMR → FHIR R4 adapter + ingestion pipeline (65 clinic readings, 14 medications, 17 conditions for demo patient 1091)
 - Full-timeline synthetic BP generator (1,800+ home readings across 5 years) and medication confirmation generator (1,092 scheduled doses, ~91% adherence rate)
 - 5 Layer 1 pattern detectors (gap, inertia, deterioration, adherence, variability)
+- **Deterministic drug interaction detector** (4 rules: nsaid_antihypertensive, triple_whammy, k_sparing_ace_arb, bb_non_dhp_ccb — comorbidity-escalated severity, no LLM)
 - Layer 2 risk scorer (5-signal weighted sum, 0–100)
 - Layer 3 LLM briefing summarizer (claude-sonnet-4-20250514; currently gpt-4o-mini override — see Limitation 1)
-- Next.js 14 + FastAPI dashboard with dark mode, tier filtering, BP sparklines, alert inbox
+- **Risk tier reclassification system** — nightly hysteresis-based tier promotion/demotion, clinician override endpoint (`PATCH /tier`), 28-day suppression window (NICE NG136), I61 haemorrhagic stroke added to system overrides
+- **BP Trend single source of truth** — `trend_avg_systolic` in briefing payload; dashboard and briefing always show the same number
+- **Active briefing filter** — post-visit briefings excluded; mini-briefings always shown
+- **Alert calibration suppression** — approved `calibration_rules` rows now actually suppress alert inbox writes
+- Next.js 14 + FastAPI dashboard with dark mode, tier filtering, interactive tour, alert inbox
+- Patient PWA (CuffLink) — BP submit, medication confirm, .ics reminders (port 3001)
 - Shadow mode validation framework: 78.4% agreement on 37 labelled evaluation points (target ≥80%; not yet achieved — see Limitation 2)
-- 521 unit tests passing; ruff clean
+- 601 unit tests passing; ruff clean
 
 ---
 
@@ -47,26 +53,35 @@ Colored pill badge: "High Risk" (red), "Medium Risk" (amber), "Low Risk" (green)
 A clinician-facing urgency classification that controls the default sort order of the patient list. High = patients most needing pre-visit review.
 
 **Logic:**
-Three-tier system set at ingestion. Auto-overrides apply immediately when problem codes contain:
-- CHF (I50.*) → `risk_tier = "high"`, `tier_override = "CHF in problem list"`
-- Stroke (I63/I64) → `risk_tier = "high"`, `tier_override = "Stroke history"`
-- TIA (G45.*) → `risk_tier = "high"`, `tier_override = "TIA history"`
+Three-tier system with three independent mechanisms: ingestion-time system overrides (immovable), nightly algorithmic reclassification (hysteresis), and clinician manual override (28-day suppression window).
 
-These are hard-coded overrides — the tier cannot be "medium" if CHF is in the problem list. Manual override possible via `tier_override` field.
+**Ingestion-time auto-overrides (immovable floors):**
+- CHF (I50.*) → `risk_tier = "high"`, `tier_override_source = "system"`
+- Haemorrhagic Stroke (I61.*) → `risk_tier = "high"`, `tier_override_source = "system"` *(added v4.3)*
+- Ischaemic Stroke (I63/I64) → `risk_tier = "high"`, `tier_override_source = "system"`
+- TIA (G45.*) → `risk_tier = "high"`, `tier_override_source = "system"`
+
+These cannot be demoted by the nightly job or by `PATCH /api/patients/{id}/tier`. The endpoint returns 409. Requires updating the EHR and re-ingesting.
+
+**Nightly reclassification (hysteresis):**
+Runs after every `pattern_recompute` job. Transitions: medium→high at score ≥75, high→medium at score <40 (system_score only), medium→low at score <25 with enrollment and comorbidity gates, low→medium at score ≥40. Break-glass: clinician demotion override is bypassed if score ≥85.
+
+**Clinician manual override:**
+`PATCH /api/patients/{id}/tier` with required reason string. Demotion sets `tier_override_suppressed_until = now + 28 days` (NICE NG136 §1.6.3). Nightly job will not reverse the decision for 28 days unless break-glass fires.
 
 **Why we show it:**
 High-risk patients need pre-visit review within the 8-minute consultation budget. The tier instantly signals which patients cannot be skimmed.
 
 **Presentation talking point:**
-"The risk tier is set by clinical rules at ingestion, not by AI. A patient with CHF is automatically High Risk — that is a deterministic override, not a probability estimate."
+"The risk tier has three layers: a hard clinical floor from the EHR (CHF = always High, immovable), a nightly algorithm that promotes or demotes based on score bands, and a clinician override with a 28-day protection window aligned to NICE guidance. They operate independently and never conflict."
 
 **Professor follow-up questions:**
-- Q: "Who sets the risk tier?" A: Deterministic rules at ingestion. CHF/Stroke/TIA → always High. Otherwise set during enrollment.
-- Q: "Can a clinician override it?" A: Yes, via `tier_override` field. The DB stores both `risk_tier` (operational) and `tier_override` (reason text).
-- Q: "What if the patient has CHF but their BP is well controlled?" A: The tier reflects care priority, not BP control. The risk score within the tier captures relative urgency.
+- Q: "Who sets the risk tier?" A: Three mechanisms. System overrides at ingestion for CHF/Stroke/TIA — immovable. Nightly algorithm for score-driven transitions with hysteresis to prevent oscillation. Clinician can override with a reason and 28-day suppression.
+- Q: "Can a clinician demote a CHF patient?" A: No. `PATCH /tier` returns 409 for system-override patients. To change it, the clinician updates the EHR problem list and re-ingests. This is intentional — missing CHF on a risk tier has patient safety implications.
+- Q: "What prevents the algorithm from reversing a clinician decision the next day?" A: `tier_override_suppressed_until` is set to 28 days out on demotion. The nightly job checks this field and skips reclassification until it expires.
 
 **Weak answer to avoid:**
-"The tier is computed by our AI." — It is NOT. It is a deterministic rule.
+"The tier is computed by our AI." — It is NOT. It is three layers of deterministic rules with no AI involvement.
 
 ---
 
@@ -451,6 +466,55 @@ Urgent flags come from ACTIVE UNACKNOWLEDGED alerts. If an alert is acknowledged
 
 ---
 
+#### B11. Drug Interactions Section
+
+**What the user sees:**
+Severity-coded cards (critical = red border, concern = amber, warning = gray). Each card shows: the interaction rule name, drugs involved as pill badges, plain-English description, and a "Comorbidity escalated" notice when present. The section only appears when at least one interaction is detected.
+
+**Where it comes from:**
+- Frontend: `BriefingCard.tsx` → `payload?.drug_interactions`
+- Table: `briefings.llm_response.drug_interactions` (JSONB array)
+- Generated by: `backend/app/services/briefing/medication_safety.py` → `check_interactions(ctx)`
+- Called from: `composer.py` at briefing generation time — zero additional DB queries
+
+**What it means:**
+Four deterministic interaction rules applied against the patient's `current_medications` and `problem_codes`. No LLM involvement. No AI.
+
+| Rule | Combination | Base Severity | Escalation |
+|---|---|---|---|
+| `nsaid_antihypertensive` | NSAID + any antihypertensive | warning | → concern (CHF or CKD) |
+| `triple_whammy` | NSAID + ACE/ARB + any diuretic | concern | → critical (both CHF AND CKD) |
+| `k_sparing_ace_arb` | K-sparing diuretic + ACE/ARB | warning | → concern (CKD) |
+| `bb_non_dhp_ccb` | Beta-blocker + verapamil or diltiazem | concern | No escalation |
+
+**Deduplication:** Triple whammy is evaluated first. When it fires, the simpler NSAID + antihypertensive rule is suppressed — one finding, not two overlapping ones.
+
+**For demo patient 1091:**
+Voltaren (diclofenac, NSAID) + ramipril (ACE inhibitor) + furosemide (loop diuretic) → triple whammy → concern. With active CHF (I50.9) AND CKD: escalates to **critical**. `comorbidity_amplified: true`.
+
+**Visit Agenda priority order (updated with interactions):**
+1. Critical interactions (before all other items)
+2. Urgent alerts
+3. Concern-level interactions (alongside urgent alerts)
+4. Therapeutic inertia
+5. Adherence concern
+6. Warning-level interactions
+7. Variability
+8. Overdue labs
+9. Active problems review
+
+**Presentation talking point:**
+"The drug interaction detector is completely deterministic — four evidence-based rules checked against the medication list. Patient 1091 has a triple whammy: Voltaren with an ACE inhibitor and a diuretic. With active CHF and CKD, severity escalates to critical and appears as the first item in the visit agenda. No AI, no probability — a rule fired."
+
+**Professor follow-up questions:**
+- Q: "Couldn't the GP see this in the EHR?" A: The EHR holds the medication list. ARIA cross-references it against comorbidity codes and classifies severity at the point of the pre-visit briefing — when the GP is actively reviewing. It surfaces the interaction proactively, before the consultation.
+- Q: "What if a patient's NSAID is prescribed for a valid reason?" A: ARIA flags the combination, not the prescription decision. The GP sees the interaction and its severity, then decides how to approach it in the consultation. ARIA is decision support — it does not recommend stopping medications.
+
+**Weak answer to avoid:**
+"The AI detected the drug interaction." — `medication_safety.py` is a deterministic rule engine. No LLM is involved.
+
+---
+
 ### C. ALERT INBOX
 
 ---
@@ -673,8 +737,23 @@ Risk Score Signal Chain:
 
 ---
 
-### Q10: "What is the variability detector?"
+### Q10: "Can a clinician change the risk tier and why can't they change it for CHF patients?"
+**Strong answer:** "Yes, via `PATCH /api/patients/{id}/tier` with a required reason string. A demotion — say, high to medium — sets a 28-day suppression window aligned to the NICE NG136 4-week review standard. The nightly algorithm won't reverse the clinician's decision for 28 days unless the score hits 85 or above, which triggers a break-glass promotion. But for patients whose High Risk is driven by CHF, stroke, or TIA, the API returns 409. Those are system-level overrides at ingestion. Bypassing them via API would mean ARIA could have a CHF patient in Medium Risk, which is a safety floor we won't cross. The clinician needs to update the EHR problem list and re-ingest."
+
+---
+
+### Q11: "How does the drug interaction detector work?"
+**Strong answer:** "Completely deterministic — four evidence-based rules applied against the patient's medication list and problem codes. No LLM. No additional database queries. The four rules cover: NSAID + antihypertensive (BP attenuation risk), the triple whammy — NSAID + ACE/ARB + diuretic (acute kidney injury risk), K-sparing diuretic + ACE/ARB (hyperkalaemia risk), and beta-blocker + non-DHP CCB (bradycardia/AV block risk). Severity is warning by default and escalates to concern or critical when relevant comorbidities — CHF or CKD — are also active. For demo patient 1091, Voltaren plus ramipril plus furosemide fires the triple whammy at critical severity because both CHF and CKD are active."
+
+---
+
+### Q12: "What is the variability detector?"
 **Strong answer:** "The variability detector computes the coefficient of variation (CV = population SD / mean × 100) of systolic readings over the adaptive window. CV ≥ 15% triggers a 'consider ABPM referral' agenda item; CV 12–14% triggers 'monitor trend.' High BP variability is an independent cardiovascular risk factor — a patient whose average is 135 mmHg but whose readings swing 115–165 mmHg is at higher risk than a patient whose average is 142 mmHg with little variability. This is not captured by the mean alone."
+
+---
+
+### Q13: "The dashboard and briefing BP numbers — are they consistent?"
+**Strong answer:** "Yes, as of the latest fix. The briefing composer now stores `trend_avg_systolic` — the home-readings-only average — directly in the briefing JSON payload. The dashboard reads this field from the active briefing instead of recomputing independently. Before this fix, the two computation paths diverged by up to 14 mmHg in edge cases, which would have undermined clinician trust. Between visits when no active briefing exists, the dashboard falls back to a live 28-day window from the readings table."
 
 ---
 
@@ -691,7 +770,10 @@ Risk Score Signal Chain:
 | "ARIA works for any patient" | Only patient 1091 has been tested end-to-end | "ARIA is a research prototype validated on a single patient's historical data" |
 | "The weights are optimized" | Weights are expert-informed, not ML-tuned | "Weights are expert-informed clinical judgment; production would recalibrate via clinician feedback" |
 | "Zero false negatives" | 6 false negatives exist in current shadow mode results | "Six false negatives, all attributable to cold-start, active treatment response, or same-day medication changes — none from system bugs" |
-| "We have 521 tests so the system is production-ready" | Tests verify code correctness, not clinical validity | "521 unit tests verify functional correctness; clinical validity requires prospective patient data and regulatory review" |
+| "We have 601 tests so the system is production-ready" | Tests verify code correctness, not clinical validity | "601 unit tests verify functional correctness; clinical validity requires prospective patient data and regulatory review" |
+| "The drug interaction detector uses AI" | medication_safety.py is a deterministic rule engine — no LLM, no ML | "Four deterministic rules applied against the medication list and ICD-10 codes. Completely rule-based." |
+| "A clinician can override any risk tier" | System-override patients (CHF/Stroke/TIA) return 409 — immovable | "Clinician override works for score-driven tiers. System overrides from CHF/Stroke/TIA require updating the EHR and re-ingesting." |
+| "The dashboard BP average is recomputed from readings" | Since the trend_avg_systolic fix, the dashboard reads from the briefing payload | "The dashboard uses trend_avg_systolic from the active briefing — the same number the briefing page shows. Between visits it falls back to a live 28-day window." |
 
 ---
 
@@ -714,6 +796,12 @@ Risk Score Signal Chain:
 8. **has_briefing means any briefing exists, not today's briefing.** The icon is based on the existence of any row in the briefings table. A briefing from 6 months ago would still show the blue icon.
 
 9. **The patient_threshold is patient-adaptive, not hardcoded.** It derives from `max(130, min(145, mean + 1.5×SD))` of the patient's own clinic history. For patient 1091 with mean ~134 and SD ~16, this gives ~158 mmHg. After CHF comorbidity adjustment (-7 mmHg), the threshold is ~151 mmHg.
+
+10. **The risk tier system now has three independent layers.** Ingestion-time system overrides (immovable — CHF/Stroke/TIA/I61), nightly hysteresis reclassification (score bands with comorbidity gates), and clinician manual override (28-day suppression window, NICE NG136). A patient can only reach Low Risk if enrolled ≥90 days, score <25, no severe/moderate comorbidity, and no active urgent alerts.
+
+11. **Drug interactions are deterministic, not AI.** `medication_safety.py` applies 4 rules against `current_medications` and `problem_codes`. Triple whammy supersedes NSAID + antihypertensive (deduplication). Severity escalates when CHF or CKD is active. For patient 1091, the triple whammy fires at critical severity.
+
+12. **Test count is 601 (not 521).** The risk tier reclassification system added ~50 new tests across test_ingestion.py, test_api.py, and test_pattern_engine.py.
 
 ---
 
@@ -740,6 +828,14 @@ Risk Score Signal Chain:
 ### Limitation 5: No outcome validation
 **What:** We cannot say that acting on ARIA's briefings improves BP control or patient outcomes. Shadow mode measures agreement with physician concern labels, not patient outcomes.
 **What to say:** "Shadow mode validates internal consistency — does ARIA agree with physician concern levels? It does not validate clinical outcomes. A prospective study would be required for outcome validation."
+
+### Limitation 6: Drug interaction ruleset is narrow (4 rules)
+**What:** `medication_safety.py` implements 4 interaction rules. The full STOPP/START criteria lists 80+ relevant combinations. The current 4 rules cover the highest-clinical-impact hypertension interactions but do not approach comprehensive polypharmacy review.
+**What to say:** "We cover four high-priority interactions: the triple whammy, NSAID + antihypertensive, K-sparing diuretic + ACE/ARB, and beta-blocker + non-DHP CCB. These were chosen for their prevalence and direct relevance to hypertension management. A production system would expand to the full STOPP/START criteria."
+
+### Limitation 7: Clinician tier demotion suppression window is a fixed 28 days
+**What:** `_CLINICIAN_SUPPRESSION_DAYS = 28` is a constant. NICE NG136 specifies a 4-week review standard; ARIA uses this as the suppression period. A production system would let the clinician set a custom review date.
+**What to say:** "28 days is aligned to NICE NG136's 4-week review standard. It's a reasonable default — but in production we'd allow the clinician to specify a custom review date rather than a fixed window."
 
 ---
 
@@ -772,6 +868,10 @@ Risk Score Signal Chain:
 **[Point to BP Trend]**
 
 "Layer 1: the 28-day home average is [X]/[X] mmHg — Stage 2 hypertension range — based on [N] reading sessions. There's an upward trend. The 3-month clinic trajectory shows the same worsening pattern from the EHR."
+
+**[Point to Drug Interactions section]**
+
+"This is new. The drug interaction detector is entirely deterministic — no AI. Patient 1091 has Voltaren on the medication list alongside ramipril and furosemide. NSAID plus ACE inhibitor plus diuretic — that's a triple whammy, a significantly elevated acute kidney injury risk. With active CHF and CKD, severity escalates to critical. It sits at the top of the visit agenda."
 
 **[Point to Medication Status]**
 
