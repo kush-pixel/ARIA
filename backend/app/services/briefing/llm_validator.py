@@ -95,6 +95,15 @@ _CONDITION_SYNONYMS: dict[str, frozenset[str]] = {
 # Ordered so longer phrases are checked before substrings ("atrial fibrillation" before "atrial")
 _CONDITION_NAMES: tuple[str, ...] = tuple(sorted(_CONDITION_SYNONYMS, key=len, reverse=True))
 
+# Short condition codes (≤5 chars) must use word-boundary regex to avoid false positives:
+# "tia" matches inside "potential", "initial", "partial"; "cad" inside "decade", etc.
+# Only needed for codes that could plausibly appear as substrings in normal clinical prose.
+_CONDITION_WORD_BOUNDARY_RE: dict[str, re.Pattern[str]] = {
+    name: re.compile(r"\b" + re.escape(name) + r"\b", re.IGNORECASE)
+    for name in _CONDITION_NAMES
+    if len(name) <= 5
+}
+
 # ── Drug name detection ───────────────────────────────────────────────────────
 
 # Searches for common drug class suffixes anywhere within a lowercase word.
@@ -293,7 +302,13 @@ def check_adherence_language(text: str, payload: dict[str, Any]) -> ValidationRe
             )
 
     if "treatment review" in text_lower and not _is_negated(text, "treatment review"):
-        if "treatment" not in summary_lower:
+        # "treatment review" is grounded by Pattern B adherence_summary OR by a therapeutic
+        # inertia alert — but NOT when Pattern A (adherence concern) is explicitly present,
+        # because Pattern A patients should use adherence concern language, not treatment review.
+        pattern_b_grounds = "treatment" in summary_lower
+        inertia_grounds = "inertia" in " ".join(payload.get("urgent_flags") or []).lower()
+        pattern_a_present = "adherence concern" in summary_lower
+        if not (pattern_b_grounds or inertia_grounds) or pattern_a_present:
             return ValidationResult(
                 passed=False,
                 failed_check="treatment_review_unsupported",
@@ -399,8 +414,13 @@ def check_problem_assessments(text: str, payload: dict[str, Any]) -> ValidationR
 
     text_lower = text.lower()
     for condition in _CONDITION_NAMES:
-        if condition not in text_lower:
-            continue
+        pat = _CONDITION_WORD_BOUNDARY_RE.get(condition)
+        if pat:
+            if not pat.search(text):
+                continue
+        else:
+            if condition not in text_lower:
+                continue
         synonyms = _CONDITION_SYNONYMS[condition]
         if not any(syn in known_terms for syn in synonyms):
             return ValidationResult(

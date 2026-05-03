@@ -1,5 +1,6 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-05-02 by Kush (patient panel + briefing lifecycle fixes — BP Trend single source of truth via trend_avg_systolic, briefing API post-visit filter, 5 hardcoded value fixes, ruff clean)
+Last updated: 2026-05-02 by Kush (demo day prep — Layer 3 LLM validation hardened, setup_demo.py ALL CHECKS PASSED, alert inbox patient names, confirmation timeshift fix)
+Previous: 2026-05-02 by Kush (patient panel + briefing lifecycle fixes — BP Trend single source of truth via trend_avg_systolic, briefing API post-visit filter, 5 hardcoded value fixes, ruff clean)
 Previous: 2026-05-01 by Kush (chatbot — guardrail audit + 3 structural fixes (emergency narrowed, tool schema disambiguation, context fallback enriched); medication indication answers enabled; 4 validator/formatter bugs fixed; pre-existing test failures cleaned; 583 tests passing, ruff clean)
 Previous: 2026-05-01 by Krishna (frontend clinical UI — dashboard column redesign, BP chart single-source average, chatbot guardrail fix, interactive tour, patient panel de-coloring, adherence card layout, SparklineChart data consistency)
 Previous: 2026-04-30 by Sahil (chatbot — three-layer guardrails, social phrase handling, blue theme, 10 UX features, OpenAI gpt-4o-mini override merged from Kush)
@@ -13,6 +14,52 @@ Previous: 2026-04-27 by Kush (Phase 1 + Phase 8 — AUDIT.md Fixes 6,7,8,9,12,16
 Previous: 2026-04-27 by Nesh (Phase 4 complete — Fixes 10, 21, 40, 46, 47, 60 implemented; 428 unit tests passing, ruff clean)
 Previous: 2026-04-27 by Sahil (Phase 5 complete + Phase 7 complete except Fix 43; 426 unit tests passing, ruff clean)
 Previous: 2026-04-26 by Yash (AUDIT.md Fixes 25, 58, 61 — severity-weighted comorbidity, adaptive gap/inertia normalization, risk_score_computed_at staleness indicator)
+
+---
+
+## Demo Day Prep — Layer 3 Hardening + setup_demo + Alert Names — 2026-05-02
+
+**Author:** Kush Patel
+**Files changed:** `prompts/briefing_summary_prompt.md`, `backend/app/services/briefing/summarizer.py`, `backend/app/services/briefing/llm_validator.py`, `backend/app/api/alerts.py`, `frontend/src/lib/types.ts`, `frontend/src/components/dashboard/AlertInbox.tsx`, `scripts/setup_demo.py`, `CLAUDE.md`
+
+### Problem — Layer 3 (gpt-4o-mini) producing invalid summaries for all 4 demo patients
+
+Multiple `readable_summary = None` failures due to:
+1. **`check_problem_assessments` false positive** — substring match found "tia" inside "potential", "initial", "partially" etc. — common clinical English words. Fix: added `_CONDITION_WORD_BOUNDARY_RE` dict using `re.compile(r"\b" + name + r"\b")` for all condition codes ≤5 chars. `check_problem_assessments` now uses word-boundary regex for short codes, substring for longer ones.
+2. **`treatment_review_unsupported` for inertia patients** — gpt-4o-mini correctly wrote "treatment review" for patients with inertia in `urgent_flags`, but validator rejected it because `adherence_summary` didn't contain Pattern B keywords. Fix: validator now allows "treatment review" when `urgent_flags` contains "inertia" AND Pattern A (`adherence concern`) is not present.
+3. **`adherence_unsupported` for DEMO_EHR** — EHR-only patient has no confirmation data; gpt-4o-mini still wrote "adherence concern" despite prompt rules. Fix: `_build_user_message()` in `summarizer.py` now includes an explicit `Adherence instruction:` field mirroring the exact validator check. Three branches: `possible adherence concern` / `treatment review warranted` / `do NOT write adherence concern or treatment review`.
+4. **`drug_interaction_unsupported`** — LLM didn't know interactions were flagged because `drug_interactions` was absent from the user message. Fix: added `Drug interactions: FLAGGED — must mention in sentence 2: {rule} ({severity})` to user message when concern/critical interactions present.
+
+**Result:** ALL CHECKS PASSED ✓ for all 4 demo patients. Layer 3 passes on first attempt for all patients in normal runs.
+
+### Problem — setup_demo.py timeshift destroying readings on re-runs
+
+On the second run, the script detected shifted readings in 2026, deleted them, then found zero 2010 originals to re-shift (they had already been moved). Result: 613 readings silently deleted.
+
+**Fix:** Changed re-run logic from "delete 2026 rows" to "un-shift 2026 rows back to 2010" using `UPDATE ... SET effective_datetime = effective_datetime - 5654 days`. Same un-shift applied to medication_confirmations. Recovery required `python scripts/run_generator.py --patient 1091 --mode full-timeline`.
+
+### Problem — Jul 15–Nov 11, 2010 confirmation gap (zero confirmations in shift window)
+
+The confirmation generator generates per inter-visit interval. The Jul 14 → Nov 12, 2010 interval was never filled — confirmations ended Jul 14 and restarted Nov 12. The timeshift source window (Jul 15–Nov 11) therefore had zero confirmations, so patient 1091 had no adherence data in the 2026 monitoring window.
+
+**Fix:** `setup_demo.py` now calls `generate_full_timeline_confirmations('1091', session)` inside `_timeshift_patient_a()` before the forward shift. Generator uses `ON CONFLICT DO NOTHING` — safe on repeat runs. Filled ~2,100 rows; forward shift then moves them to 2026.
+
+### Problem — DEMO_GAP gap only 6 days by demo-run date
+
+Last reading was Apr 26; May 2 − Apr 26 = 6 days, below the ≥9 day verification threshold.
+
+**Fix:** `end_date` changed from `date(2026, 4, 26)` to `date(2026, 4, 23)` → gap is 9 days by May 2 and 12 days by May 5 (demo day).
+
+### Problem — Alert inbox showed "Patient DEMO_GAP", "Patient 1091" instead of names
+
+`GET /api/alerts` and `GET /api/alerts/acknowledged` serialised only `patient_id`; `_serialise()` had no patient name. `AlertInbox.tsx` rendered `Patient {alert.patient_id}` literally.
+
+**Fix:**
+- `alerts.py`: both queries now `OUTERJOIN patients ON alert.patient_id = patient.patient_id`. `_serialise(a, patient_name)` accepts and returns `patient_name`.
+- `types.ts`: `patient_name: string | null` added to `Alert` interface.
+- `AlertInbox.tsx`: both active and acknowledged cards render `alert.patient_name ?? \`Patient ${alert.patient_id}\`` — graceful fallback for any patient without a name.
+
+**ruff check app/:** all checks passed.
 
 ---
 

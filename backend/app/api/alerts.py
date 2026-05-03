@@ -20,6 +20,7 @@ from app.limiter import limiter
 from app.models.alert import Alert
 from app.models.alert_feedback import AlertFeedback
 from app.models.audit_event import AuditEvent
+from app.models.patient import Patient
 from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -64,12 +65,15 @@ async def list_alerts(
         patient_id: Optional filter — when provided, restricts results to a single
             patient. Omit to receive all unacknowledged alerts (inbox behaviour).
     """
-    stmt = select(Alert).where(Alert.acknowledged_at.is_(None))
+    stmt = (
+        select(Alert, Patient.name)
+        .outerjoin(Patient, Alert.patient_id == Patient.patient_id)
+        .where(Alert.acknowledged_at.is_(None))
+    )
     if patient_id is not None:
         stmt = stmt.where(Alert.patient_id == patient_id)
     result = await session.execute(stmt.order_by(Alert.triggered_at.desc()))
-    alerts = result.scalars().all()
-    return [_serialise(a) for a in alerts]
+    return [_serialise(a, name) for a, name in result.all()]
 
 
 _ACKNOWLEDGED_HISTORY_DAYS = 7
@@ -89,15 +93,15 @@ async def list_acknowledged_alerts(
         patient_id: Optional filter to scope results to one patient.
     """
     cutoff = datetime.now(UTC) - timedelta(days=_ACKNOWLEDGED_HISTORY_DAYS)
-    stmt = select(Alert).where(
-        Alert.acknowledged_at.is_not(None),
-        Alert.acknowledged_at >= cutoff,
+    stmt = (
+        select(Alert, Patient.name)
+        .outerjoin(Patient, Alert.patient_id == Patient.patient_id)
+        .where(Alert.acknowledged_at.is_not(None), Alert.acknowledged_at >= cutoff)
     )
     if patient_id is not None:
         stmt = stmt.where(Alert.patient_id == patient_id)
     result = await session.execute(stmt.order_by(Alert.acknowledged_at.desc()))
-    alerts = result.scalars().all()
-    return [_serialise(a) for a in alerts]
+    return [_serialise(a, name) for a, name in result.all()]
 
 
 @router.post("/alerts/{alert_id}/unacknowledge")
@@ -215,10 +219,11 @@ async def acknowledge_alert(
     }
 
 
-def _serialise(a: Alert) -> dict:
+def _serialise(a: Alert, patient_name: str | None = None) -> dict:
     return {
         "alert_id": a.alert_id,
         "patient_id": a.patient_id,
+        "patient_name": patient_name,
         "alert_type": a.alert_type,
         "gap_days": a.gap_days,
         "systolic_avg": float(a.systolic_avg) if a.systolic_avg is not None else None,

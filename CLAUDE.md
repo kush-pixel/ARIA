@@ -149,7 +149,7 @@ frontend/src/
   lib/: api.ts, types.ts, auth.ts
 
 scripts/: run_adapter, run_ingestion, run_generator, run_worker, run_scheduler,
-          run_shadow_mode, setup_db
+          run_shadow_mode, setup_db, setup_demo
 prompts/: briefing_summary_prompt.md
 patient-app/: Next.js 14 PWA (port 3001) — login, BP submit, medication confirm pages
   src/app/: page.tsx (login), submit/page.tsx, confirm/page.tsx
@@ -463,15 +463,28 @@ active briefing (same appointment_date filter) and include it as Patient.trend_a
 
 ## DEMO PATIENTS
 
+Run `python scripts/setup_demo.py` from the ARIA root to seed all four patients.
+Re-run safe — idempotent teardown + timeshift un-shift guard. ALL CHECKS PASSED ✓ is the success signal.
+`--verify-only` flag skips seeding and re-runs checks only (use on demo day).
+
 Patient A — Therapeutic Inertia (1091, monitoring_active=TRUE)
   Risk tier: High (CHF auto-override I50.9)
   65 clinic BP anchors (2008-01-21 to 2013-09-26), parametric baseline ~134 mmHg
-  Demo window elevated ~158 mmHg avg | 14 active medications | Adherence ~91% Beta-distributed
+  Demo window (2026-01-06 to 2026-05-05) — readings + confirmations shifted +5654 days from 2010-07-15–2010-11-12.
+  Adherence ~91% Beta-distributed (confirmation data now present in 2026 window after full-timeline generator fills Jul-Nov 2010 gap).
   Expected: sustained elevated 28-day avg, no med change since 2013 → treatment review warranted
 
-Patient B — iEMR Only (1091, monitoring_active=FALSE)
+Patient B — iEMR Only (DEMO_EHR, monitoring_active=FALSE)
   No home readings | Briefing from EHR only
   Expected: overdue lab flag, NSAID+antihypertensive interaction flag
+
+Patient C — Reading Gap (DEMO_GAP / David Patel, monitoring_active=TRUE)
+  82 days of readings Feb 1–Apr 23, 2026; gap Apr 24–May 5 (≥9 days by May 2, ≥12 by May 5)
+  Expected: urgent gap alert (9d), inertia alert (no med change within window)
+
+Patient D — Adherence Concern (DEMO_ADH, monitoring_active=TRUE)
+  28 days morning readings Apr 7–May 4, ~152 mmHg avg; 2 medications, ~58% adherence
+  Expected: adherence alert (Pattern A), inertia alert
 
 ---
 

@@ -85,6 +85,7 @@ export interface Briefing {
 export interface Alert {
   alert_id: string
   patient_id: string
+  patient_name: string | null
   alert_type: 'gap_urgent' | 'gap_briefing' | 'inertia' | 'deterioration' | 'adherence'
   gap_days: number | null
   systolic_avg: number | null

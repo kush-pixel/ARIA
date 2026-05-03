@@ -109,7 +109,7 @@ export default function AlertInbox() {
                     <div>
                       <div className="flex items-center gap-2 flex-wrap mb-1">
                         <p className="text-[15px] font-bold text-gray-900 dark:text-gray-100">
-                          Patient {alert.patient_id}
+                          {alert.patient_name ?? `Patient ${alert.patient_id}`}
                         </p>
                         {alert.escalated && (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold
@@ -191,7 +191,7 @@ export default function AlertInbox() {
                         <div>
                           <div className="flex items-center gap-2 flex-wrap mb-0.5">
                             <p className="text-[14px] font-semibold text-gray-700 dark:text-gray-300">
-                              Patient {alert.patient_id}
+                              {alert.patient_name ?? `Patient ${alert.patient_id}`}
                             </p>
                             <span className="text-[12px] text-gray-400">
                               Acknowledged {alert.acknowledged_at ? formatAcknowledgedAt(alert.acknowledged_at) : '—'}

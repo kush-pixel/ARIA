@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -318,7 +319,9 @@ async def _handle_pattern_recompute(job: ProcessingJob, session: AsyncSession) -
     # Alerts suppressed by calibration rules write an audit event instead
     if gap["status"] in ("flag", "urgent"):
         alert_type = "gap_urgent" if gap["status"] == "urgent" else "gap_briefing"
-        await _maybe_upsert_alert(session, pid, alert_type, suppressed_detectors, "gap", gap_days=int(gap["gap_days"]))
+        raw_days = gap["gap_days"]
+        gap_days_int = min(int(raw_days), 32767) if math.isfinite(raw_days) else None
+        await _maybe_upsert_alert(session, pid, alert_type, suppressed_detectors, "gap", gap_days=gap_days_int)
     if inertia["inertia_detected"]:
         await _maybe_upsert_alert(session, pid, "inertia", suppressed_detectors, "inertia")
     if adherence["pattern"] == "A":
