@@ -58,6 +58,7 @@ class InertiaResult(TypedDict):
     avg_systolic: float | None
     elevated_count: int
     duration_days: float
+    triggered_at: datetime | None  # effective_datetime of first reading >= patient_threshold
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +77,7 @@ def _false_result(
         "avg_systolic": avg_systolic,
         "elevated_count": elevated_count,
         "duration_days": duration_days,
+        "triggered_at": None,
     }
 
 
@@ -269,4 +271,5 @@ async def run_inertia_detector(
         "avg_systolic": avg_systolic,
         "elevated_count": elevated_count,
         "duration_days": duration_days,
+        "triggered_at": first_elevated_dt,
     }

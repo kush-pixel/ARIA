@@ -84,6 +84,7 @@ async def _upsert_alert(
     patient_id: str,
     alert_type: str,
     gap_days: int | None = None,
+    pattern_triggered_at: datetime | None = None,
 ) -> None:
     """Insert an alert row for today if one does not already exist.
 
@@ -95,6 +96,9 @@ async def _upsert_alert(
         patient_id: Patient to alert on.
         alert_type: gap_urgent | gap_briefing | inertia | deterioration
         gap_days: Only set for gap_urgent and gap_briefing alert types.
+        pattern_triggered_at: Datetime of the reading that first made the pattern
+            detectable. Used to evaluate off_hours so the flag reflects when the
+            clinical event occurred, not when the nightly job ran.
     """
     today = datetime.now(UTC).date()
     existing = await session.execute(
@@ -108,6 +112,7 @@ async def _upsert_alert(
     )
     if existing.scalar_one_or_none() is None:
         now = datetime.now(UTC)
+        off_hours_ref = pattern_triggered_at if pattern_triggered_at is not None else now
         session.add(
             Alert(
                 patient_id=patient_id,
@@ -115,7 +120,7 @@ async def _upsert_alert(
                 gap_days=gap_days,
                 triggered_at=now,
                 delivered_at=now,
-                off_hours=is_off_hours(now),
+                off_hours=is_off_hours(off_hours_ref),
             )
         )
 
@@ -128,6 +133,7 @@ async def _maybe_upsert_alert(
     detector_type: str,
     *,
     gap_days: int | None = None,
+    pattern_triggered_at: datetime | None = None,
 ) -> None:
     """Write an alert row unless an active calibration rule suppresses it.
 
@@ -142,6 +148,7 @@ async def _maybe_upsert_alert(
         suppressed_detectors: Detector types with active calibration rules for this patient.
         detector_type: Logical detector name (gap | inertia | deterioration | adherence).
         gap_days: Only set for gap alert types.
+        pattern_triggered_at: Passed through to _upsert_alert for off_hours evaluation.
     """
     if detector_type in suppressed_detectors:
         session.add(AuditEvent(
@@ -158,7 +165,7 @@ async def _maybe_upsert_alert(
             detector_type,
         )
         return
-    await _upsert_alert(session, patient_id, alert_type, gap_days=gap_days)
+    await _upsert_alert(session, patient_id, alert_type, gap_days=gap_days, pattern_triggered_at=pattern_triggered_at)
 
 
 # ---------------------------------------------------------------------------
@@ -321,13 +328,13 @@ async def _handle_pattern_recompute(job: ProcessingJob, session: AsyncSession) -
         alert_type = "gap_urgent" if gap["status"] == "urgent" else "gap_briefing"
         raw_days = gap["gap_days"]
         gap_days_int = min(int(raw_days), 32767) if math.isfinite(raw_days) else None
-        await _maybe_upsert_alert(session, pid, alert_type, suppressed_detectors, "gap", gap_days=gap_days_int)
+        await _maybe_upsert_alert(session, pid, alert_type, suppressed_detectors, "gap", gap_days=gap_days_int, pattern_triggered_at=gap["triggered_at"])
     if inertia["inertia_detected"]:
-        await _maybe_upsert_alert(session, pid, "inertia", suppressed_detectors, "inertia")
+        await _maybe_upsert_alert(session, pid, "inertia", suppressed_detectors, "inertia", pattern_triggered_at=inertia["triggered_at"])
     if adherence["pattern"] == "A":
-        await _maybe_upsert_alert(session, pid, "adherence", suppressed_detectors, "adherence")
+        await _maybe_upsert_alert(session, pid, "adherence", suppressed_detectors, "adherence", pattern_triggered_at=adherence["triggered_at"])
     if deterioration["deterioration"]:
-        await _maybe_upsert_alert(session, pid, "deterioration", suppressed_detectors, "deterioration")
+        await _maybe_upsert_alert(session, pid, "deterioration", suppressed_detectors, "deterioration", pattern_triggered_at=deterioration["triggered_at"])
     await session.flush()
     logger.info("Alert rows written for patient=%s", pid)
 
