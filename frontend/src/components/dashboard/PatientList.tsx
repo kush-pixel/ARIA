@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { getPatients, getReadings, getPatientBaseline } from '@/lib/api'
 import type { Patient, Reading, RiskTier } from '@/lib/types'
 import RiskTierBadge from './RiskTierBadge'
@@ -19,6 +19,11 @@ const TIER_FILTERS: Array<{ value: RiskTier | 'all'; label: string }> = [
 
 // ── BP Trend ──────────────────────────────────────────────────────────────────
 
+// Matches backend adaptive-window fallback (28 days)
+const TREND_WINDOW_DAYS = 28
+// Standard NICE/ESC clinic target for hypertension management
+const DISPLAY_THRESHOLD_SYSTOLIC = 140
+
 type BpTrendLabel = 'Low' | 'Stable' | 'High'
 
 interface BpTrend {
@@ -28,41 +33,50 @@ interface BpTrend {
   dot: string
 }
 
-function computeBpTrend(readings: Reading[], baseline: number): BpTrend | null {
-  const home = readings
-    .filter((r) => r.source !== 'clinic')
-    .sort((a, b) => new Date(a.effective_datetime).getTime() - new Date(b.effective_datetime).getTime())
-  if (home.length < 3) return null
-
-  const recent = home.slice(-7)
-  const avg = Math.round(recent.reduce((s, r) => s + r.systolic_avg, 0) / recent.length)
+function buildTrendLabel(avg: number, baseline: number): BpTrend {
+  const a = Math.round(avg)
   const b = Math.round(baseline)
-
-  // Low  = more than 15 mmHg below personal baseline
-  // Stable = within ±15 of baseline
-  // High = more than 15 mmHg above baseline
-  if (avg < b - 15) {
+  if (a < b - 15) {
     return {
       label: 'Low',
-      threshold: `${avg} mmHg · baseline ${b}`,
+      threshold: `${a} mmHg · baseline ${b}`,
       className: 'bg-blue-50 text-blue-600 dark:bg-blue-900/20 dark:text-blue-400 border border-blue-200 dark:border-blue-800',
       dot: 'bg-blue-500',
     }
   }
-  if (avg <= b + 15) {
+  if (a < DISPLAY_THRESHOLD_SYSTOLIC) {
     return {
       label: 'Stable',
-      threshold: `${avg} mmHg · baseline ${b}`,
+      threshold: `${a} mmHg · baseline ${b}`,
       className: 'bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400 border border-green-200 dark:border-green-800',
       dot: 'bg-green-500',
     }
   }
   return {
     label: 'High',
-    threshold: `${avg} mmHg · baseline ${b}`,
+    threshold: `${a} mmHg · target <${DISPLAY_THRESHOLD_SYSTOLIC}`,
     className: 'bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400 border border-red-200 dark:border-red-800',
     dot: 'bg-red-500',
   }
+}
+
+function computeBpTrend(readings: Reading[], baseline: number, nextAppointment: string | null): BpTrend | null {
+  const cutoff = Date.now() - TREND_WINDOW_DAYS * 24 * 60 * 60 * 1000
+  // Mirror backend white-coat exclusion: drop readings in the 5-day pre-appointment dip window.
+  // Only applies when the appointment is still upcoming — past appointments have no dip to exclude.
+  const apptTime = nextAppointment ? new Date(nextAppointment).getTime() : null
+  const whiteCoatCutoff = apptTime && apptTime > Date.now()
+    ? apptTime - 5 * 24 * 60 * 60 * 1000
+    : Infinity
+  const home = readings
+    .filter((r) => {
+      if (r.source === 'clinic') return false
+      const t = new Date(r.effective_datetime).getTime()
+      return t >= cutoff && t < whiteCoatCutoff
+    })
+  if (home.length < 3) return null
+  const avg = home.reduce((s, r) => s + r.systolic_avg, 0) / home.length
+  return buildTrendLabel(avg, baseline)
 }
 
 // ── Chief Concern ─────────────────────────────────────────────────────────────
@@ -80,9 +94,8 @@ const CONDITION_MAP: Array<{ match: RegExp; label: string }> = [
   { match: /copd|j44/i,                   label: 'COPD' },
 ]
 
-function deriveChiefConcern(patient: Patient): string | null {
+function deriveChiefConcern(patient: Patient): string {
   const source = patient.tier_override ?? ''
-  if (!source) return null
   const found: string[] = []
   for (const { match, label } of CONDITION_MAP) {
     if (match.test(source) && !found.includes(label)) found.push(label)
@@ -117,6 +130,8 @@ const COLS = 'grid-cols-[1fr_110px_160px_150px_96px_140px]'
 
 export default function PatientList() {
   const router = useRouter()
+  const searchParams = useSearchParams()
+  const searchQuery = (searchParams.get('q') ?? '').toLowerCase().trim()
   const [patients, setPatients] = useState<Patient[]>([])
   const [loading, setLoading] = useState(true)
   const [tierFilter, setTierFilter] = useState<RiskTier | 'all'>('all')
@@ -129,19 +144,25 @@ export default function PatientList() {
       setLoading(false)
       Promise.all(
         data.map((p) =>
-          Promise.all([
-            getReadings(p.patient_id).catch(() => [] as Reading[]),
-            getPatientBaseline(p.patient_id),
-          ]).then(([readings, { baseline_systolic }]) => [
-            p.patient_id,
-            computeBpTrend(readings, baseline_systolic),
-          ] as [string, BpTrend | null])
+          getPatientBaseline(p.patient_id).then(({ baseline_systolic }) => {
+            // Prefer the briefing's authoritative average — same number the clinician sees
+            if (p.trend_avg_systolic != null) {
+              return [p.patient_id, buildTrendLabel(p.trend_avg_systolic, baseline_systolic)] as [string, BpTrend | null]
+            }
+            // No briefing yet — fall back to live computation from readings
+            return getReadings(p.patient_id)
+              .catch(() => [] as Reading[])
+              .then((readings) => [
+                p.patient_id,
+                computeBpTrend(readings, baseline_systolic, p.next_appointment),
+              ] as [string, BpTrend | null])
+          })
         )
       ).then((entries) => setBpTrends(Object.fromEntries(entries)))
     })
   }, [])
 
-  useEffect(() => { setPage(1) }, [tierFilter])
+  useEffect(() => { setPage(1) }, [tierFilter, searchQuery])
 
   if (loading) {
     return (
@@ -159,7 +180,14 @@ export default function PatientList() {
     low:    patients.filter((p) => p.risk_tier === 'low').length,
   }
 
-  const filtered = tierFilter === 'all' ? patients : patients.filter((p) => p.risk_tier === tierFilter)
+  const tierFiltered = tierFilter === 'all' ? patients : patients.filter((p) => p.risk_tier === tierFilter)
+  const filtered = searchQuery
+    ? tierFiltered.filter((p) =>
+        p.patient_id.toLowerCase().includes(searchQuery) ||
+        (p.name ?? '').toLowerCase().includes(searchQuery) ||
+        p.active_problems.some((prob) => prob.toLowerCase().includes(searchQuery))
+      )
+    : tierFiltered
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
   const safePage = Math.min(page, totalPages)
   const pageSlice = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE)
@@ -212,7 +240,9 @@ export default function PatientList() {
         {pageSlice.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16 gap-3 text-gray-400">
             <Users size={32} strokeWidth={1.5} />
-            <p className="text-[15px]">No patients in this tier.</p>
+            <p className="text-[15px]">
+              {searchQuery ? `No patients match "${searchQuery}".` : 'No patients in this tier.'}
+            </p>
           </div>
         ) : (
           pageSlice.map((patient, idx) => {
@@ -234,7 +264,7 @@ export default function PatientList() {
                   className="text-left"
                 >
                   <p className="text-[15px] font-semibold text-gray-900 dark:text-gray-100">
-                    Patient {patient.patient_id}
+                    {patient.name ?? `Patient ${patient.patient_id}`}
                   </p>
                   <p className="text-[13px] text-gray-400 dark:text-gray-500 mt-0.5">
                     {patient.gender === 'M' ? 'Male' : patient.gender === 'F' ? 'Female' : 'Unknown'}, {patient.age} yrs
@@ -248,17 +278,13 @@ export default function PatientList() {
 
                 {/* Chief Concern */}
                 <button onClick={() => router.push(`/patients/${patient.patient_id}`)} className="flex justify-center">
-                  {chiefConcern ? (
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg
-                                     bg-indigo-50 dark:bg-indigo-900/20
-                                     border border-indigo-200 dark:border-indigo-800
-                                     text-[12px] font-semibold
-                                     text-indigo-700 dark:text-indigo-300 whitespace-nowrap">
-                      {chiefConcern}
-                    </span>
-                  ) : (
-                    <span className="text-[13px] text-gray-300 dark:text-gray-700">—</span>
-                  )}
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg
+                                   bg-indigo-50 dark:bg-indigo-900/20
+                                   border border-indigo-200 dark:border-indigo-800
+                                   text-[12px] font-semibold
+                                   text-indigo-700 dark:text-indigo-300 whitespace-nowrap">
+                    {chiefConcern}
+                  </span>
                 </button>
 
                 {/* Priority Score */}

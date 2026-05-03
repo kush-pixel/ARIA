@@ -21,6 +21,7 @@ class Patient(Base):
     __tablename__ = "patients"
 
     patient_id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str | None] = mapped_column(String, nullable=True)
     gender: Mapped[str | None] = mapped_column(String(1), nullable=True)
     age: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     risk_tier: Mapped[str] = mapped_column(String, nullable=False)

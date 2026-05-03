@@ -12,7 +12,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session
@@ -51,11 +51,49 @@ async def list_patients(session: AsyncSession = Depends(get_session)) -> list[di
     result = await session.execute(select(Patient))
     patients = result.scalars().all()
 
-    # Fix 23: determine which patients have at least one briefing row
-    briefing_result = await session.execute(
-        select(Briefing.patient_id).distinct()
+    # Fetch most recent *active* briefing per patient to surface trend_avg_systolic.
+    # Mirrors the briefings API filter: appointment_date IS NULL (mini-briefing) or
+    # appointment_date >= today. Past appointment briefings are excluded so that
+    # trend_avg_systolic is null between visits, triggering the live-computation fallback
+    # in the frontend rather than showing a stale appointment-day snapshot.
+    today = datetime.now(UTC).date()
+    latest_sq = (
+        select(
+            Briefing.patient_id.label("pid"),
+            func.max(Briefing.generated_at).label("latest_at"),
+        )
+        .where(
+            or_(
+                Briefing.appointment_date.is_(None),
+                Briefing.appointment_date >= today,
+            )
+        )
+        .group_by(Briefing.patient_id)
+        .subquery()
     )
-    patients_with_briefing: set[str] = {row[0] for row in briefing_result}
+    briefing_result = await session.execute(
+        select(Briefing.patient_id, Briefing.llm_response)
+        .join(
+            latest_sq,
+            and_(
+                Briefing.patient_id == latest_sq.c.pid,
+                Briefing.generated_at == latest_sq.c.latest_at,
+            ),
+        )
+    )
+    briefing_map: dict[str, float | None] = {}
+    for row in briefing_result:
+        pid, llm = row[0], row[1] or {}
+        briefing_map[pid] = llm.get("trend_avg_systolic")
+    patients_with_briefing = set(briefing_map.keys())
+
+    # Fetch active_problems for all patients in one query for search support
+    cc_result = await session.execute(
+        select(ClinicalContext.patient_id, ClinicalContext.active_problems)
+    )
+    problems_map: dict[str, list[str]] = {
+        row[0]: row[1] or [] for row in cc_result
+    }
 
     def sort_key(p: Patient) -> tuple[int, float]:
         tier = _TIER_ORDER.get(p.risk_tier, 9)
@@ -63,7 +101,15 @@ async def list_patients(session: AsyncSession = Depends(get_session)) -> list[di
         return (tier, -score)
 
     sorted_patients = sorted(patients, key=sort_key)
-    return [_serialise(p, has_briefing=p.patient_id in patients_with_briefing) for p in sorted_patients]
+    return [
+        _serialise(
+            p,
+            has_briefing=p.patient_id in patients_with_briefing,
+            trend_avg_systolic=briefing_map.get(p.patient_id),
+            active_problems=problems_map.get(p.patient_id, []),
+        )
+        for p in sorted_patients
+    ]
 
 
 @router.get("/patients/{patient_id}")
@@ -78,11 +124,25 @@ async def get_patient(
     patient = result.scalar_one_or_none()
     if patient is None:
         raise HTTPException(status_code=404, detail="Patient not found")
+    today_get = datetime.now(UTC).date()
     briefing_check = await session.execute(
-        select(Briefing.patient_id).where(Briefing.patient_id == patient_id).limit(1)
+        select(Briefing.llm_response)
+        .where(
+            Briefing.patient_id == patient_id,
+            or_(
+                Briefing.appointment_date.is_(None),
+                Briefing.appointment_date >= today_get,
+            ),
+        )
+        .order_by(Briefing.generated_at.desc())
+        .limit(1)
     )
-    has_briefing = briefing_check.scalar_one_or_none() is not None
-    return _serialise(patient, has_briefing=has_briefing)
+    llm_response = briefing_check.scalar_one_or_none()
+    return _serialise(
+        patient,
+        has_briefing=llm_response is not None,
+        trend_avg_systolic=llm_response.get("trend_avg_systolic") if llm_response else None,
+    )
 
 
 @router.patch("/patients/{patient_id}/appointment")
@@ -121,10 +181,25 @@ async def update_appointment(
         patient_id,
         body.next_appointment.isoformat(),
     )
+    today_appt = datetime.now(UTC).date()
     briefing_check2 = await session.execute(
-        select(Briefing.patient_id).where(Briefing.patient_id == patient_id).limit(1)
+        select(Briefing.llm_response)
+        .where(
+            Briefing.patient_id == patient_id,
+            or_(
+                Briefing.appointment_date.is_(None),
+                Briefing.appointment_date >= today_appt,
+            ),
+        )
+        .order_by(Briefing.generated_at.desc())
+        .limit(1)
     )
-    return _serialise(patient, has_briefing=briefing_check2.scalar_one_or_none() is not None)
+    llm2 = briefing_check2.scalar_one_or_none()
+    return _serialise(
+        patient,
+        has_briefing=llm2 is not None,
+        trend_avg_systolic=llm2.get("trend_avg_systolic") if llm2 else None,
+    )
 
 
 @router.patch("/patients/{patient_id}/tier")
@@ -141,9 +216,10 @@ async def override_tier(
     haemorrhagic stroke) — those require updating the EHR problem list and
     re-ingesting.
 
-    Demotion (e.g. high → medium, medium → low) sets a 14-day suppression
+    Demotion (e.g. high → medium, medium → low) sets a 28-day suppression
     window during which the nightly reclassification job will not promote the
     patient back, unless the risk score exceeds 85 (break-glass).
+    28 days aligns with NICE NG136 §1.6.3 (4-week review standard).
 
     Args:
         patient_id: Patient's MED_REC_NO.
@@ -207,10 +283,25 @@ async def override_tier(
         else "none",
     )
 
+    today_tier = datetime.now(UTC).date()
     briefing_check = await session.execute(
-        select(Briefing.patient_id).where(Briefing.patient_id == patient_id).limit(1)
+        select(Briefing.llm_response)
+        .where(
+            Briefing.patient_id == patient_id,
+            or_(
+                Briefing.appointment_date.is_(None),
+                Briefing.appointment_date >= today_tier,
+            ),
+        )
+        .order_by(Briefing.generated_at.desc())
+        .limit(1)
     )
-    return _serialise(patient, has_briefing=briefing_check.scalar_one_or_none() is not None)
+    llm_tier = briefing_check.scalar_one_or_none()
+    return _serialise(
+        patient,
+        has_briefing=llm_tier is not None,
+        trend_avg_systolic=llm_tier.get("trend_avg_systolic") if llm_tier else None,
+    )
 
 
 @router.get("/patients/{patient_id}/baseline")
@@ -241,9 +332,15 @@ async def get_patient_baseline(
     return {"baseline_systolic": float(median), "reading_count": n}
 
 
-def _serialise(p: Patient, has_briefing: bool = False) -> dict:
+def _serialise(
+    p: Patient,
+    has_briefing: bool = False,
+    trend_avg_systolic: float | None = None,
+    active_problems: list[str] | None = None,
+) -> dict:
     return {
         "patient_id": p.patient_id,
+        "name": p.name,
         "gender": p.gender,
         "age": p.age,
         "risk_tier": p.risk_tier,
@@ -261,4 +358,6 @@ def _serialise(p: Patient, has_briefing: bool = False) -> dict:
         "enrolled_at": p.enrolled_at.isoformat() if p.enrolled_at else None,
         "enrolled_by": p.enrolled_by,
         "has_briefing": has_briefing,
+        "trend_avg_systolic": trend_avg_systolic,
+        "active_problems": active_problems or [],
     }

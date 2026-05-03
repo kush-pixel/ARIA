@@ -10,7 +10,7 @@ const inter = Inter({
 })
 
 export const metadata: Metadata = {
-  title: 'ARIA — Clinical Intelligence Platform',
+  title: 'ARIA | Clinical Intelligence Platform',
   description: 'Adaptive Real-time Intelligence Architecture for hypertension management',
 }
 

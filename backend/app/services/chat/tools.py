@@ -313,6 +313,7 @@ async def get_briefing(
         "urgent_flags": payload.get("urgent_flags", []),
         "risk_score": payload.get("risk_score"),
         "data_limitations": payload.get("data_limitations"),
+        "drug_interactions": payload.get("drug_interactions", []),
     }
 
 

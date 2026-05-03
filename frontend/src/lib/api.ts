@@ -70,8 +70,26 @@ export async function getAdherence(patientId: string): Promise<AdherenceData[]> 
 }
 
 // POST /api/alerts/:id/acknowledge
-export async function acknowledgeAlert(alertId: string): Promise<void> {
-  await apiFetch<unknown>(`/api/alerts/${alertId}/acknowledge`, { method: 'POST' })
+export type AlertDisposition = 'agree_acting' | 'agree_monitoring' | 'disagree'
+
+export async function overrideTier(
+  patientId: string,
+  risk_tier: 'high' | 'medium' | 'low',
+  reason: string,
+): Promise<Patient> {
+  return apiFetch<Patient>(`/api/patients/${patientId}/tier`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ risk_tier, reason }),
+  })
+}
+
+export async function acknowledgeAlert(alertId: string, disposition: AlertDisposition): Promise<void> {
+  await apiFetch<unknown>(`/api/alerts/${alertId}/acknowledge`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ disposition }),
+  })
 }
 
 // GET /api/alerts/acknowledged

@@ -2,10 +2,13 @@ export type RiskTier = 'high' | 'medium' | 'low'
 
 export interface Patient {
   patient_id: string
+  name: string | null
   gender: 'M' | 'F' | 'U'
   age: number
   risk_tier: RiskTier
   tier_override: string | null
+  tier_override_source: 'system' | 'system_score' | 'clinician' | null
+  tier_override_suppressed_until: string | null
   risk_score: number | null
   risk_score_computed_at: string | null
   monitoring_active: boolean
@@ -13,6 +16,8 @@ export interface Patient {
   enrolled_at: string
   enrolled_by: string
   has_briefing: boolean
+  trend_avg_systolic: number | null
+  active_problems: string[]
 }
 
 export interface ClinicalContext {
@@ -48,12 +53,21 @@ export interface Reading {
   submitted_by: string
 }
 
+export interface DrugInteraction {
+  rule: 'nsaid_antihypertensive' | 'triple_whammy' | 'k_sparing_ace_arb' | 'bb_non_dhp_ccb'
+  severity: 'warning' | 'concern' | 'critical'
+  drugs_involved: string[]
+  description: string
+  comorbidity_amplified: boolean
+}
+
 export interface BriefingPayload {
   trend_summary: string
   medication_status: string
   adherence_summary: string
   active_problems: string[]
   overdue_labs: string[]
+  drug_interactions?: DrugInteraction[]
   visit_agenda: string[]
   urgent_flags: string[]
   risk_score: number | null
@@ -74,6 +88,7 @@ export interface Briefing {
 export interface Alert {
   alert_id: string
   patient_id: string
+  patient_name: string | null
   alert_type: 'gap_urgent' | 'gap_briefing' | 'inertia' | 'deterioration' | 'adherence'
   gap_days: number | null
   systolic_avg: number | null

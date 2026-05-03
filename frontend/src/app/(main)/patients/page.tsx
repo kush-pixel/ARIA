@@ -1,7 +1,8 @@
+import { Suspense } from 'react'
 import PatientList from '@/components/dashboard/PatientList'
 import { Users } from 'lucide-react'
 
-export const metadata = { title: 'Patients — ARIA' }
+export const metadata = { title: 'Patients | ARIA' }
 
 export default function PatientsPage() {
   return (
@@ -15,7 +16,7 @@ export default function PatientsPage() {
             </h1>
           </div>
           <p className="text-[14px] text-gray-500 dark:text-gray-400">
-            Sorted by clinical priority — high-risk patients first.
+            Sorted by clinical priority. High-risk patients first.
           </p>
         </div>
         <div className="text-right">
@@ -25,7 +26,9 @@ export default function PatientsPage() {
           </p>
         </div>
       </div>
-      <PatientList />
+      <Suspense fallback={null}>
+        <PatientList />
+      </Suspense>
     </div>
   )
 }

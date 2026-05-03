@@ -265,6 +265,18 @@ async def ingest_fhir_bundle(
         gender = _GENDER_MAP.get(fhir_gender, "U")
         age: int | None = pat_resource.get(_PATIENT_AGE_EXT)
 
+        fhir_names = pat_resource.get("name", [])
+        _official = next(
+            (n for n in fhir_names if n.get("use") == "official"),
+            fhir_names[0] if fhir_names else None,
+        )
+        if _official:
+            _given = (_official.get("given") or [""])[0]
+            _family = _official.get("family") or ""
+            patient_name: str = f"{_given} {_family}".strip() or "John Doe"
+        else:
+            patient_name = "John Doe"
+
         conditions = groups.get("Condition", [])
         problem_codes: list[str] = []
         for cond in conditions:
@@ -304,6 +316,7 @@ async def ingest_fhir_bundle(
             pg_insert(Patient)
             .values(
                 patient_id=patient_id,
+                name=patient_name,
                 gender=gender,
                 age=age,
                 risk_tier=risk_tier,
@@ -313,7 +326,7 @@ async def ingest_fhir_bundle(
             )
             .on_conflict_do_update(
                 index_elements=["patient_id"],
-                set_={"gender": gender, "age": age},
+                set_={"name": patient_name, "gender": gender, "age": age},
             )
         )
 

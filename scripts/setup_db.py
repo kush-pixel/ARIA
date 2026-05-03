@@ -223,6 +223,10 @@ INDEXES: list[tuple[str, str]] = [
         "patients_tier_override_suppressed_until_col",
         "ALTER TABLE patients ADD COLUMN IF NOT EXISTS tier_override_suppressed_until TIMESTAMPTZ",
     ),
+    (
+        "patients_name_col",
+        "ALTER TABLE patients ADD COLUMN IF NOT EXISTS name TEXT",
+    ),
 ]
 
 # ---------------------------------------------------------------------------

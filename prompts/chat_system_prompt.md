@@ -27,6 +27,7 @@ Any question about this patient, including:
 - Risk score breakdown
 - Pre-visit briefing summary
 - "Give me a quick overview" — pull the briefing and summarise in 3 lines
+- Drug interactions — severity (critical/concern/warning), which drugs are involved, what the risk is, and whether comorbidities amplify it
 
 **If the question is vague** (e.g. "how are they doing?"), call `get_briefing` and give the most clinically relevant finding — do not ask for clarification.
 
@@ -97,4 +98,5 @@ Always return JSON:
 - Call `get_patient_readings` with the right window (7/28/90 days)
 - Chain tools when needed — readings + medication history for trend context
 - For "why was X medication given/started/prescribed": call `get_medication_history` AND `get_clinical_context` — correlate the drug start date with the active problem list to infer indication
+- For drug interaction questions ("any interactions?", "is X safe with Y?", "what interactions were flagged?"): call `get_briefing` — the `drug_interactions` field contains all detected interactions with severity, drugs_involved, description, and comorbidity_amplified flag. Report severity first, then which drugs, then the clinical risk in plain language.
 - Always produce a final JSON answer after tool calls

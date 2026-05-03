@@ -21,9 +21,9 @@ const SIZE_CLASS: Record<'sm' | 'md' | 'lg', string> = {
 }
 
 const TIER_TOOLTIP: Record<RiskTier, string> = {
-  high:   'Based on diagnosis — CHF, Stroke, or TIA automatically set High regardless of current readings or score.',
-  medium: 'Based on overall clinical profile — no high-risk diagnosis present.',
-  low:    'Based on overall clinical profile — currently lowest cardiovascular risk category.',
+  high:   'Based on diagnosis: CHF, Stroke, or TIA automatically sets High regardless of current readings or score.',
+  medium: 'Based on overall clinical profile. No high-risk diagnosis present.',
+  low:    'Based on overall clinical profile. Currently lowest cardiovascular risk category.',
 }
 
 export default function RiskTierBadge({ tier, size = 'md' }: RiskTierBadgeProps) {

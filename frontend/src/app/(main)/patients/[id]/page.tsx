@@ -72,6 +72,7 @@ export default function PatientPage() {
             briefing={briefing}
             readings={readings}
             adherence={adherence}
+            onPatientUpdate={(updated) => setPatient(updated)}
           />
         </div>
 

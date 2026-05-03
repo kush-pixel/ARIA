@@ -89,7 +89,7 @@ function ResultBadge({ result }: { result: ShadowModeVisit['result'] }) {
     )
   return (
     <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[13px] font-semibold bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-400">
-      NO FLAG —
+      NO FLAG
     </span>
   )
 }
@@ -181,7 +181,7 @@ function ExpandedCard({ visit }: { visit: ShadowModeVisit }) {
                   {visit.without_aria.other_active_problems.map((prob, i) => (
                     <li key={i} className="text-[13px] text-slate-600 dark:text-slate-400 break-words">
                       <span className="font-medium">{prob.name}</span>
-                      {prob.status ? ` — ${prob.status}` : ''}
+                      {prob.status ? `: ${prob.status}` : ''}
                     </li>
                   ))}
                 </ul>
@@ -324,7 +324,7 @@ function ExpandedCard({ visit }: { visit: ShadowModeVisit }) {
         {/* Column 3: Sparkline */}
         <div className="rounded-lg p-4 border border-slate-100 dark:border-slate-700">
           <p className="text-[13px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-3">
-            Home BP — 28 Days Before Visit
+            Home BP: 28 Days Before Visit
           </p>
           {sparkData.length > 0 ? (
             <ResponsiveContainer width="100%" height={200}>
@@ -472,7 +472,7 @@ export default function ShadowModePage() {
       {/* Section 1: Header + stat cards */}
       <div>
         <h1 className="text-[24px] font-bold text-slate-900 dark:text-slate-100">
-          Shadow Mode — Historical Validation
+          Shadow Mode: Historical Validation
         </h1>
         <p className="text-[15px] text-slate-500 dark:text-slate-400 mt-1">
           Replaying patient 1091&apos;s {data.total_eval_points} evaluation points ({data.clinic_bp_points} clinic BP · {data.no_vitals_points} no-vitals HTN assessments). ARIA receives only data available before each visit.
@@ -657,7 +657,7 @@ export default function ShadowModePage() {
                       <p className="text-[14px] text-slate-500 dark:text-slate-400 mt-0.5 tabular-nums">
                         {visit.systolic != null && visit.diastolic != null
                           ? `${visit.systolic.toFixed(0)}/${visit.diastolic.toFixed(0)} mmHg`
-                          : "— no vitals"}
+                          : "No vitals"}
                       </p>
                     </div>
 

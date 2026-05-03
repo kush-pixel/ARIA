@@ -85,10 +85,42 @@ def _build_user_message(payload: dict[str, Any]) -> str:
     risk_score = payload.get("risk_score")
     risk_str = f"{risk_score:.1f}/100" if risk_score is not None else "not calculated"
 
+    interactions = payload.get("drug_interactions") or []
+    significant = [i for i in interactions if i.get("severity") in ("concern", "critical")]
+    if significant:
+        ix_parts = "; ".join(
+            f"{i.get('rule', 'unknown').replace('_', ' ')} ({i.get('severity', '')})"
+            for i in significant
+        )
+        drug_str = f"FLAGGED — must mention in sentence 2: {ix_parts}"
+    else:
+        drug_str = "None"
+
+    # Explicit sentence-2 adherence instruction — mirrors the validator's
+    # check_adherence_language rules so the LLM can't guess wrong.
+    adh_lower = (payload.get("adherence_summary") or "").lower()
+    if "adherence concern" in adh_lower:
+        adh_instruction = (
+            "INSTRUCTION: write 'possible adherence concern' in sentence 2. "
+            "Do NOT write 'treatment review'."
+        )
+    elif "treatment review" in adh_lower or "treatment-review" in adh_lower:
+        adh_instruction = (
+            "INSTRUCTION: write 'treatment review warranted' in sentence 2. "
+            "Do NOT write 'adherence concern'."
+        )
+    else:
+        adh_instruction = (
+            "INSTRUCTION: no adherence pattern data available — "
+            "do NOT write 'adherence concern' or 'treatment review' anywhere in your output."
+        )
+
     return (
         f"Trend: {payload.get('trend_summary', 'N/A')}\n"
         f"Medication status: {payload.get('medication_status', 'N/A')}\n"
         f"Adherence: {payload.get('adherence_summary', 'N/A')}\n"
+        f"Adherence instruction: {adh_instruction}\n"
+        f"Drug interactions: {drug_str}\n"
         f"Active problems: {active_problems}\n"
         f"Overdue labs: {overdue_labs}\n"
         f"Urgent flags: {urgent_flags}\n"

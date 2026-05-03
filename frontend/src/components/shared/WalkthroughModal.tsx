@@ -22,8 +22,8 @@ const STEPS: Step[] = [
   {
     icon: <BarChart2 size={22} strokeWidth={1.75} className="text-blue-600 dark:text-blue-400" />,
     title: 'Chronic Risk vs Priority Score',
-    description: 'These two columns measure different things — they are not expected to match.',
-    detail: 'Chronic Risk is set by diagnosis: CHF, Stroke, or TIA permanently sets a patient to High regardless of current readings. Priority Score (0–100) is today\'s urgency — how much attention the patient needs right now based on BP trends, adherence, medication history, and monitoring gaps. A High Risk patient with a low score is stable and well-managed.',
+    description: 'These two columns measure different things and are not expected to match.',
+    detail: 'Chronic Risk is set by diagnosis: CHF, Stroke, or TIA permanently sets a patient to High regardless of current readings. Priority Score (0–100) is today\'s urgency score: how much attention the patient needs right now based on BP trends, adherence, medication history, and monitoring gaps. A High Risk patient with a low score is stable and well-managed.',
   },
   {
     icon: <FileText size={22} strokeWidth={1.75} className="text-blue-600 dark:text-blue-400" />,
@@ -35,7 +35,7 @@ const STEPS: Step[] = [
     icon: <MessageSquare size={22} strokeWidth={1.75} className="text-blue-600 dark:text-blue-400" />,
     title: 'Ask ARIA (Chatbot)',
     description: 'Ask clinical questions about the patient in plain language.',
-    detail: 'Inside a patient\'s briefing, use the chat panel on the right. Ask things like "Why was this patient flagged?", "What changed in the last 14 days?", or "Which medication had the most missed doses?" ARIA answers using real patient data. It will not recommend medications or make diagnostic decisions — that is your role.',
+    detail: 'Inside a patient\'s briefing, use the chat panel on the right. Ask things like "Why was this patient flagged?", "What changed in the last 14 days?", or "Which medication had the most missed doses?" ARIA answers using real patient data. It will not recommend medications or make diagnostic decisions. That is your role.',
   },
   {
     icon: <BellRing size={22} strokeWidth={1.75} className="text-blue-600 dark:text-blue-400" />,
@@ -47,7 +47,7 @@ const STEPS: Step[] = [
     icon: <GitBranch size={22} strokeWidth={1.75} className="text-blue-600 dark:text-blue-400" />,
     title: 'Shadow Mode',
     description: 'See how ARIA performs against historical clinic decisions.',
-    detail: 'Shadow Mode replays past visits and shows what ARIA would have flagged versus what the physician recorded. Use it to understand ARIA\'s detection logic and validate its accuracy against your own clinical judgement. This is a validation tool — it does not affect live patient data.',
+    detail: 'Shadow Mode replays past visits and shows what ARIA would have flagged versus what the physician recorded. Use it to understand ARIA\'s detection logic and validate its accuracy against your own clinical judgement. This is a validation tool. It does not affect live patient data.',
   },
 ]
 

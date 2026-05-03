@@ -1,18 +1,32 @@
 'use client'
 
 import { useTheme } from 'next-themes'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams, usePathname } from 'next/navigation'
 import { Sun, Moon, Search, Bell, HelpCircle } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useTour } from './Tour'
 
 export default function Topbar() {
   const { theme, setTheme } = useTheme()
   const router = useRouter()
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
   const { start } = useTour()
   const [mounted, setMounted] = useState(false)
+  const [searchValue, setSearchValue] = useState(searchParams.get('q') ?? '')
 
   useEffect(() => setMounted(true), [])
+
+  const handleSearch = useCallback((value: string) => {
+    setSearchValue(value)
+    const params = new URLSearchParams(searchParams.toString())
+    if (value.trim()) {
+      params.set('q', value.trim())
+    } else {
+      params.delete('q')
+    }
+    router.replace(`${pathname}?${params.toString()}`)
+  }, [pathname, router, searchParams])
 
   const isDark = theme === 'dark'
 
@@ -31,6 +45,8 @@ export default function Topbar() {
         <input
           type="search"
           placeholder="Search patients by ID, name, or condition…"
+          value={searchValue}
+          onChange={(e) => handleSearch(e.target.value)}
           className="h-11 w-full pl-10 pr-4 text-[14px] rounded-xl
                      bg-white dark:bg-[#111827]
                      border border-slate-300 dark:border-[#374151]
