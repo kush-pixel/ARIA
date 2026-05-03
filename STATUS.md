@@ -1,6 +1,10 @@
 ﻿# ARIA v4.3 — Project Status
+<<<<<<< HEAD
 Last updated: 2026-05-03 by Krishna (Priority Score column first, 3-band color coding red/amber/green, null score shows No data, column reorder)
 Previous: 2026-05-03 by Krishna (search bar wired live, alert disposition dropdown, TierOverrideModal, drug interaction chatbot, active_problems in patient API, worker _start_listener crash fix)
+=======
+Last updated: 2026-05-03 by Kush (scalability fixes + briefing adaptive window — connection pool tuning, midnight recompute stagger, LLM session decoupling, server-side pagination + search, briefing window now matches Layer 1 adaptive window)
+>>>>>>> ad75928 (fixed the adaptive window)
 Previous: 2026-05-02 by Kush (demo day prep — Layer 3 LLM validation hardened, setup_demo.py ALL CHECKS PASSED, alert inbox patient names, confirmation timeshift fix)
 Previous: 2026-05-02 by Kush (patient panel + briefing lifecycle fixes — BP Trend single source of truth via trend_avg_systolic, briefing API post-visit filter, 5 hardcoded value fixes, ruff clean)
 Previous: 2026-05-01 by Kush (chatbot — guardrail audit + 3 structural fixes (emergency narrowed, tool schema disambiguation, context fallback enriched); medication indication answers enabled; 4 validator/formatter bugs fixed; pre-existing test failures cleaned; 583 tests passing, ruff clean)
@@ -19,73 +23,48 @@ Previous: 2026-04-26 by Yash (AUDIT.md Fixes 25, 58, 61 — severity-weighted co
 
 ---
 
-## Priority Score Column Redesign — 2026-05-03
+## Scalability Fixes — Pool Tuning, Midnight Stagger, LLM Decoupling, Server-side Pagination — 2026-05-03
 
-**Author:** Krishna Patel
-**Files changed:** `frontend/src/components/dashboard/RiskScoreBar.tsx`, `frontend/src/components/dashboard/PatientList.tsx`
+**Author:** Kush Patel
+**Files changed:** `backend/app/db/base.py`, `backend/app/services/worker/scheduler.py`, `backend/app/services/briefing/summarizer.py`, `backend/app/services/worker/processor.py`, `backend/app/services/briefing/composer.py`, `backend/app/api/patients.py`, `frontend/src/lib/types.ts`, `frontend/src/lib/api.ts`, `frontend/src/components/dashboard/PatientList.tsx`
 
-### Column reorder — Priority Score moved first
+Four structural scalability improvements plus one briefing consistency fix identified from architecture review. Existing tests and demo flow unaffected.
 
-Priority Score is the most actionable signal for a clinician scanning the list. Moved from column 4 to column 2 (immediately after Patient name).
+### Fix 1 — LLM session decoupling (processor.py + summarizer.py)
 
-New order: **Patient | Priority Score | Chronic Risk | Chief Concern | BP Trend | Appointment**
+**Problem:** `_handle_briefing_generation` held a DB session open for the entire duration of the Layer 3 LLM call (3–8 seconds). Under concurrent briefings (e.g. 10–20 patients at 7:30 AM) this serialised what should be parallel work and risked pool exhaustion.
 
-`COLS` updated to `grid-cols-[1fr_160px_110px_160px_96px_140px]`. Header and row cell order updated to match.
+**Fix:**
+- `summarizer.py`: Added `call_llm_only(payload)` — a session-free async function that calls the LLM via `asyncio.to_thread` (non-blocking) and returns `(candidate_text, model_version, prompt_hash)`. Also patched the existing `generate_llm_summary` loop to use `asyncio.to_thread` for its own call.
+- `processor.py`: Refactored `_handle_briefing_generation` into three phases: (1) Layer 1 `compose_briefing` using the provided session — committed immediately after; (2) `call_llm_only` with no session held; (3) validation audit write + briefing patch each in their own short-lived `AsyncSessionLocal` session. The DB connection is returned to the pool before the LLM call begins.
 
-### Priority Score — 3-band color coding
+### Fix 2 — Midnight recompute stagger (scheduler.py)
 
-`RiskScoreBar.tsx` redesigned:
+**Problem:** `enqueue_pattern_recompute_sweep` enqueued all monitoring-active patients simultaneously at midnight UTC, causing a thundering herd on the DB and worker pool for 10–30 minutes.
 
-- **Score number** (`15px font-bold`) beside a color-coded badge label — reads instantly without parsing a bar
-- **Three bands:** High ≥60 (red) | Medium 30–59 (amber) | Low <30 (green)
-- **`score === null` → "No data"** in muted gray — no badge, no bar. Previously `null` defaulted to `0` which falsely rendered as "Stable/Low". Patients with no computed score (e.g. EHR-only, not yet processed) now show "No data" correctly.
-- Thin progress bar retained beneath the number for relative scale.
-- Tooltip unchanged.
+**Fix:** Added `_recompute_offset_minutes(patient_id)` — deterministic MD5 hash of patient_id modulo 120, giving a stable 0–119 minute offset per patient. Each job's `retry_after` is set to `midnight + offset`, spreading the sweep over a 2-hour window (00:00–02:00 UTC). The worker already filters by `retry_after <= now()` so no worker changes were needed. Re-runs on the same date hit `ON CONFLICT DO NOTHING` as before.
 
----
+### Fix 3 — Connection pool tuning (db/base.py)
 
-## Search, Alert Dispositions, Tier Override, Chatbot + Worker Fix — 2026-05-03
+**Problem:** `create_async_engine` used SQLAlchemy defaults (~5 connections). Under concurrent jobs the pool exhausted silently.
 
-**Author:** Krishna Patel
-**Files changed (commit 10f46ae):** `backend/app/api/patients.py`, `backend/app/services/chat/agent.py`, `backend/app/services/chat/tools.py`, `frontend/src/app/(main)/alerts/page.tsx`, `frontend/src/app/(main)/layout.tsx`, `frontend/src/app/(main)/patients/[id]/page.tsx`, `frontend/src/app/(main)/patients/page.tsx`, `frontend/src/app/(main)/shadow-mode/page.tsx`, `frontend/src/app/layout.tsx`, `frontend/src/components/briefing/AdherenceSummary.tsx`, `frontend/src/components/briefing/BriefingCard.tsx`, `frontend/src/components/briefing/ChatPanel.tsx`, `frontend/src/components/dashboard/AlertInbox.tsx`, `frontend/src/components/dashboard/PatientList.tsx`, `frontend/src/components/dashboard/RiskScoreBar.tsx`, `frontend/src/components/dashboard/RiskTierBadge.tsx`, `frontend/src/components/shared/Topbar.tsx`, `frontend/src/components/shared/WalkthroughModal.tsx`, `frontend/src/lib/api.ts`, `frontend/src/lib/mockData.ts`, `frontend/src/lib/types.ts`, `prompts/chat_system_prompt.md`
-**Files changed (worker fix):** `scripts/run_worker.py`
+**Fix:** Set `pool_size=10, max_overflow=5, pool_timeout=30`. Max 15 connections — conservative against Supabase free tier's 60-connection cap, leaving headroom for Supabase Studio and migrations.
 
-### Search bar — live filtering wired to patient list
+### Fix 4 — Server-side pagination + search (api/patients.py + frontend)
 
-Previously the search bar in `Topbar.tsx` rendered an input with no handler — typing had no effect.
+**Problem:** `GET /api/patients` loaded every patient row plus all briefings and clinical contexts into memory on every dashboard request. Client-side filtering and pagination meant the browser received the full dataset on every load — O(n) per request.
 
-- `Topbar.tsx`: added `useSearchParams`, `usePathname`, `useCallback`. `handleSearch()` writes `?q=` to the URL via `router.replace()` on every keystroke. Input value is controlled and initialised from the current URL param so it survives navigation.
-- `PatientList.tsx`: reads `searchParams.get('q')` via `useSearchParams`. Filters `tierFiltered` by matching `patient_id`, `patient.name`, and `patient.active_problems` (any element) against the lowercase query. Empty query shows all patients. `setPage(1)` resets to page 1 on query change. Empty state message updated: "No patients match `{query}`." vs the existing "No patients in this tier."
-- `patients.py` (`GET /api/patients`): added a second query to fetch `ClinicalContext.active_problems` for all patients in one round-trip. Result mapped into `problems_map` and passed to `_serialise()` as `active_problems`. `_serialise()` signature extended with `active_problems: list[str] | None`.
-- `types.ts`: `active_problems: string[]` added to `Patient` interface.
+**Fix:**
+- `api/patients.py`: Added `page`, `page_size` (default 25), `search`, and `tier` query params. Search filters by patient_id, name, and active_problems (ILIKE via `array_to_string`). Tier counts are computed from the search-filtered set (not tier-filtered) so tab badges stay accurate while a tier is active. `active_problems` fetched for the page slice only.
+- `types.ts`: Added `TierCounts` and `PaginatedPatients` interfaces.
+- `api.ts`: `getPatients()` now accepts `GetPatientsParams` and returns `PaginatedPatients`.
+- `PatientList.tsx`: Replaced URL-param search read with a local debounced search input (350ms). Tier filter and page state trigger server refetch. BP trends computed for the current page only (not all patients). Full spinner on initial load; opacity fade on page/search transitions. `PAGE_SIZE` updated from 10 → 25.
 
-### Alert inbox — disposition dropdown on acknowledge
+### Fix 5 — Briefing adaptive window (composer.py)
 
-Previously "Acknowledge" was a plain button with no disposition — `acknowledgeAlert()` was called with no disposition argument, which was incorrect since the API required one.
+**Problem:** `compose_briefing` fetched readings and confirmations using a hardcoded 28-day lookback (`timedelta(days=28)`), while Layer 1 detectors computed an adaptive window (14–90 days) from `next_appointment` and `last_visit_date`. For patients with long inter-visit intervals the briefing summarised a shorter window than the detectors that flagged them, producing inconsistent numbers in the visit agenda (e.g. adherence % cited as "past 28 days" when the alert was computed over 70 days).
 
-- `AlertInbox.tsx`: "Acknowledge" button now opens an inline dropdown with three labelled options: **Agree: acting on this** (will change treatment or refer), **Agree: monitoring** (watching closely), **Disagree** (not clinically relevant). Each option calls `acknowledgeAlert(alert_id, disposition)` with the correct `AlertDisposition` value. Dropdown closes on outside click (via `useRef` + `mousedown` listener). `ChevronRight` icon rotates 90° when dropdown is open. Alert label punctuation changed from em dash to colon for clarity.
-- `api.ts`: `acknowledgeAlert` signature already accepted `disposition` — no change needed.
-
-### Briefing — clinician risk tier override (`TierOverrideModal`)
-
-- `BriefingCard.tsx`: `TierOverrideModal` component added inline. Pencil icon button in patient header opens the modal. `onPatientUpdate?: (updated: Patient) => void` prop added to `BriefingCardProps` — called after a successful save to refresh parent state without a full page reload.
-- Modal shows current tier, three tier buttons (High / Medium / Low), a mandatory reason textarea (max 500 chars), and inline error handling. If `tier_override_source === "system"` (CHF / Stroke / TIA), the modal shows a read-only explanation and no selector — the tier cannot be changed manually.
-- 409 errors from the API are caught and surfaced as a user-readable message explaining that EHR re-ingestion is required.
-- `patients.py`: `PATCH /api/patients/{id}/tier` — demotion suppression window corrected from 14 to **28 days** to align with NICE NG136 §1.6.3 (4-week review standard). Docstring updated.
-- `api.ts`: `overrideTier(patientId, risk_tier, reason)` → `PATCH /api/patients/{id}/tier` already present.
-- `types.ts`: `tier_override_source: 'system' | 'system_score' | 'clinician' | null` and `tier_override_suppressed_until: string | null` added to `Patient` interface so `BriefingCard` can read the lock state.
-
-### Chatbot — drug interaction follow-up questions and tool fix
-
-- `agent.py`: three drug-interaction follow-up questions added to `_FOLLOWUP_POOL["get_briefing"]`: "Are there any drug interactions flagged?", "What is the severity of the flagged interactions?", "Which medications are involved?" — these now appear as suggestion chips after any overview/briefing tool call.
-- `tools.py`: `get_briefing` tool response previously omitted `drug_interactions` from the returned dict. Added `"drug_interactions": payload.get("drug_interactions", [])` — the chatbot can now answer drug interaction questions with real data from the briefing payload.
-- `chat_system_prompt.md`: drug interaction answering instructions added to "What You Answer" section and tool-use guidance.
-
-### Worker — `_start_listener` crash fix
-
-`run_worker.py` passed `listen_url=raw_db_url` to `WorkerProcessor`, which triggered `self._start_listener()` — a method that was never implemented. Worker crashed immediately on every startup, meaning no `briefing_generation` or `pattern_recompute` jobs ever executed.
-
-**Fix:** Removed `listen_url` argument. Worker now uses the existing 30-second poll loop. Layer 3 (`gpt-4o-mini` via `summarizer.py`) now runs after each briefing composition and populates `readable_summary` — the AI Summary section in `BriefingCard.tsx` renders correctly.
+**Fix:** `compose_briefing` now calls `compute_window_days(patient.next_appointment, ctx.last_visit_date)` (imported from `threshold_utils`, same function used by all four Layer 1 detectors). `window_days` is passed through to `_build_visit_agenda` (adherence text now reads "past N days" rather than always "past 28 days") and `_build_data_limitations`. Reading and confirmation queries use `timedelta(days=window_days)`. The fallback to 28 days is unchanged — `compute_window_days` returns 28 when both date fields are None.
 
 ---
 

@@ -1,16 +1,17 @@
 """Patient API routes for ARIA.
 
-GET  /api/patients                          — list all enrolled patients, sorted by tier then risk_score DESC
+GET  /api/patients                          — paginated patient list, server-side search/filter
 GET  /api/patients/{id}                     — single patient record
 PATCH /api/patients/{id}/appointment        — update next_appointment datetime
 """
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,17 +47,34 @@ _CLINICIAN_SUPPRESSION_DAYS: int = 28
 
 
 @router.get("/patients")
-async def list_patients(session: AsyncSession = Depends(get_session)) -> list[dict]:
-    """Return all enrolled patients sorted by risk tier then risk_score DESC."""
-    result = await session.execute(select(Patient))
-    patients = result.scalars().all()
+async def list_patients(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    search: str = Query(default=""),
+    tier: Literal["all", "high", "medium", "low"] = Query(default="all"),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Return enrolled patients with server-side pagination, search, and tier filter.
 
-    # Fetch most recent *active* briefing per patient to surface trend_avg_systolic.
-    # Mirrors the briefings API filter: appointment_date IS NULL (mini-briefing) or
-    # appointment_date >= today. Past appointment briefings are excluded so that
-    # trend_avg_systolic is null between visits, triggering the live-computation fallback
-    # in the frontend rather than showing a stale appointment-day snapshot.
+    Search matches against patient_id, name, and active_problems (case-insensitive).
+    Tier filter is applied after search. Results are sorted: risk_tier first
+    (high > medium > low), then risk_score DESC within tier.
+
+    Args:
+        page: 1-based page number.
+        page_size: Rows per page (1–100, default 25).
+        search: Substring match against patient_id, name, active_problems.
+        tier: Restrict to a single risk tier, or "all" for no filter.
+        session: Async database session.
+
+    Returns:
+        Dict with keys: patients, total, page, page_size, total_pages, counts.
+        counts reflects search-filtered totals per tier (ignores the tier param)
+        so the tab badges stay accurate while a tier filter is active.
+    """
     today = datetime.now(UTC).date()
+
+    # ── Active-briefing subquery (reused for trend_avg_systolic) ─────────────
     latest_sq = (
         select(
             Briefing.patient_id.label("pid"),
@@ -85,31 +103,99 @@ async def list_patients(session: AsyncSession = Depends(get_session)) -> list[di
     for row in briefing_result:
         pid, llm = row[0], row[1] or {}
         briefing_map[pid] = llm.get("trend_avg_systolic")
-    patients_with_briefing = set(briefing_map.keys())
 
-    # Fetch active_problems for all patients in one query for search support
-    cc_result = await session.execute(
-        select(ClinicalContext.patient_id, ClinicalContext.active_problems)
+    # ── Base search query (search filter only, no tier) ───────────────────────
+    base_stmt = (
+        select(Patient)
+        .outerjoin(ClinicalContext, Patient.patient_id == ClinicalContext.patient_id)
     )
-    problems_map: dict[str, list[str]] = {
-        row[0]: row[1] or [] for row in cc_result
+    if search:
+        q = f"%{search.lower()}%"
+        base_stmt = base_stmt.where(
+            or_(
+                func.lower(Patient.patient_id).like(q),
+                func.lower(Patient.name).like(q),
+                func.lower(
+                    func.array_to_string(ClinicalContext.active_problems, " ")
+                ).like(q),
+            )
+        )
+
+    # ── Per-tier counts (search-filtered, tier-agnostic) ─────────────────────
+    counts_stmt = (
+        select(Patient.risk_tier, func.count(Patient.patient_id))
+        .outerjoin(ClinicalContext, Patient.patient_id == ClinicalContext.patient_id)
+    )
+    if search:
+        counts_stmt = counts_stmt.where(
+            or_(
+                func.lower(Patient.patient_id).like(q),
+                func.lower(Patient.name).like(q),
+                func.lower(
+                    func.array_to_string(ClinicalContext.active_problems, " ")
+                ).like(q),
+            )
+        )
+    counts_stmt = counts_stmt.group_by(Patient.risk_tier)
+    counts_result = await session.execute(counts_stmt)
+    tier_counts: dict[str, int] = {row[0]: row[1] for row in counts_result}
+    total_all = sum(tier_counts.values())
+    counts = {
+        "all": total_all,
+        "high": tier_counts.get("high", 0),
+        "medium": tier_counts.get("medium", 0),
+        "low": tier_counts.get("low", 0),
     }
 
-    def sort_key(p: Patient) -> tuple[int, float]:
-        tier = _TIER_ORDER.get(p.risk_tier, 9)
-        score = float(p.risk_score) if p.risk_score is not None else 0.0
-        return (tier, -score)
+    # ── Apply tier filter, sort, paginate ────────────────────────────────────
+    filtered_stmt = base_stmt
+    if tier != "all":
+        filtered_stmt = filtered_stmt.where(Patient.risk_tier == tier)
 
-    sorted_patients = sorted(patients, key=sort_key)
-    return [
-        _serialise(
-            p,
-            has_briefing=p.patient_id in patients_with_briefing,
-            trend_avg_systolic=briefing_map.get(p.patient_id),
-            active_problems=problems_map.get(p.patient_id, []),
+    total = counts.get(tier, total_all) if tier != "all" else total_all
+    total_pages = max(1, math.ceil(total / page_size))
+    safe_page = min(page, total_pages)
+    offset = (safe_page - 1) * page_size
+
+    # Sort: tier order then risk_score DESC — done in Python to reuse _TIER_ORDER
+    all_filtered_result = await session.execute(filtered_stmt)
+    all_filtered = list(all_filtered_result.scalars().all())
+
+    def _sort_key(p: Patient) -> tuple[int, float]:
+        return (_TIER_ORDER.get(p.risk_tier, 9), -(float(p.risk_score) if p.risk_score is not None else 0.0))
+
+    sorted_patients = sorted(all_filtered, key=_sort_key)
+    page_slice = sorted_patients[offset: offset + page_size]
+
+    # ── Fetch active_problems for the page slice only ─────────────────────────
+    if page_slice:
+        page_ids = [p.patient_id for p in page_slice]
+        cc_result = await session.execute(
+            select(ClinicalContext.patient_id, ClinicalContext.active_problems)
+            .where(ClinicalContext.patient_id.in_(page_ids))
         )
-        for p in sorted_patients
-    ]
+        problems_map: dict[str, list[str]] = {row[0]: row[1] or [] for row in cc_result}
+    else:
+        problems_map = {}
+
+    patients_with_briefing = set(briefing_map.keys())
+
+    return {
+        "patients": [
+            _serialise(
+                p,
+                has_briefing=p.patient_id in patients_with_briefing,
+                trend_avg_systolic=briefing_map.get(p.patient_id),
+                active_problems=problems_map.get(p.patient_id, []),
+            )
+            for p in page_slice
+        ],
+        "total": total,
+        "page": safe_page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "counts": counts,
+    }
 
 
 @router.get("/patients/{patient_id}")
