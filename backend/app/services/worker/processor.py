@@ -601,8 +601,9 @@ async def _apply_tier_reclassification(
             )
             ctx = cc_row.scalar_one_or_none()
             codes: list[str] = (ctx.problem_codes or []) if ctx is not None else []
+            norm_codes = [c.upper().replace(".", "").replace("-", "") for c in codes]
             has_blocking_comorbidity = any(
-                code.startswith(_COMORBIDITY_BLOCK_PREFIXES) for code in codes
+                code.startswith(_COMORBIDITY_BLOCK_PREFIXES) for code in norm_codes
             )
             if has_blocking_comorbidity:
                 logger.info(
