@@ -125,8 +125,8 @@ function isToday(iso: string): boolean {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-// Column layout: Patient | Chronic Risk | Chief Concern | Priority Score | Appointment | BP Trend
-const COLS = 'grid-cols-[1fr_110px_160px_150px_96px_140px]'
+// Column layout: Patient | Priority Score | Chronic Risk | Chief Concern | BP Trend | Appointment
+const COLS = 'grid-cols-[1fr_160px_110px_160px_96px_140px]'
 
 export default function PatientList() {
   const router = useRouter()
@@ -229,9 +229,9 @@ export default function PatientList() {
                         border-b border-gray-100 dark:border-[#1F2937]
                         text-[11px] font-semibold uppercase tracking-widest text-gray-400 dark:text-gray-500`}>
           <span>Patient</span>
+          <span className="text-center" data-tour="patient-priority-score">Priority Score</span>
           <span className="text-center" data-tour="patient-chronic-risk">Chronic Risk</span>
           <span className="text-center" data-tour="patient-chief-concern">Chief Concern</span>
-          <span className="text-center" data-tour="patient-priority-score">Priority Score</span>
           <span className="text-center" data-tour="patient-bp-trend">BP Trend</span>
           <span className="text-center" data-tour="patient-appointment">Appointment</span>
         </div>
@@ -271,6 +271,17 @@ export default function PatientList() {
                   </p>
                 </button>
 
+                {/* Priority Score */}
+                <button onClick={() => router.push(`/patients/${patient.patient_id}`)} className="flex flex-col items-center gap-1">
+                  <RiskScoreBar score={patient.risk_score} tier={patient.risk_tier} />
+                  {isScoreStale(patient.risk_score_computed_at) && (
+                    <div className="flex items-center gap-1 text-[11px] text-amber-500">
+                      <AlertTriangle size={10} strokeWidth={2} />
+                      <span>Score outdated (&gt;26h)</span>
+                    </div>
+                  )}
+                </button>
+
                 {/* Chronic Risk */}
                 <button onClick={() => router.push(`/patients/${patient.patient_id}`)} className="flex justify-center">
                   <RiskTierBadge tier={patient.risk_tier} size="sm" />
@@ -285,17 +296,6 @@ export default function PatientList() {
                                    text-indigo-700 dark:text-indigo-300 whitespace-nowrap">
                     {chiefConcern}
                   </span>
-                </button>
-
-                {/* Priority Score */}
-                <button onClick={() => router.push(`/patients/${patient.patient_id}`)} className="flex flex-col items-center">
-                  <RiskScoreBar score={patient.risk_score} tier={patient.risk_tier} />
-                  {isScoreStale(patient.risk_score_computed_at) && (
-                    <div className="flex items-center gap-1 mt-1 text-[11px] text-amber-500">
-                      <AlertTriangle size={10} strokeWidth={2} />
-                      <span>Score outdated (&gt;26h)</span>
-                    </div>
-                  )}
                 </button>
 
                 {/* BP Trend + threshold */}

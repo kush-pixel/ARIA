@@ -7,38 +7,69 @@ interface RiskScoreBarProps {
   tier: string
 }
 
-function barColor(score: number): string {
-  if (score >= 70) return 'bg-red-500'
-  if (score >= 40) return 'bg-amber-400'
-  return 'bg-green-500'
+interface ScoreBand {
+  label: string
+  className: string
+  barColor: string
+}
+
+function scoreBand(score: number): ScoreBand {
+  if (score >= 60) return {
+    label: 'High',
+    className: 'text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-800',
+    barColor: 'bg-red-500',
+  }
+  if (score >= 30) return {
+    label: 'Medium',
+    className: 'text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800',
+    barColor: 'bg-amber-400',
+  }
+  return {
+    label: 'Low',
+    className: 'text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-900/10 border border-green-200 dark:border-green-800',
+    barColor: 'bg-green-500',
+  }
 }
 
 export default function RiskScoreBar({ score, tier: _tier }: RiskScoreBarProps) {
-  const safeScore = score ?? 0
-  const pct = Math.min(100, Math.max(0, safeScore))
-  const color = barColor(safeScore)
+  if (score === null) {
+    return (
+      <span className="text-[12px] text-gray-300 dark:text-gray-700">No data</span>
+    )
+  }
+
+  const pct = Math.min(100, Math.max(0, score))
+  const band = scoreBand(score)
 
   return (
     <Tooltip.Provider delayDuration={200}>
       <Tooltip.Root>
         <Tooltip.Trigger asChild>
-          <div className="flex items-center gap-2.5 cursor-default min-w-0">
-            <span
-              className="text-[15px] font-bold tabular-nums text-gray-900 dark:text-gray-100 w-9 flex-shrink-0"
-              aria-label={`Risk score ${safeScore.toFixed(1)}`}
-            >
-              {safeScore.toFixed(0)}
-            </span>
+          <div className="flex flex-col items-center gap-1.5 cursor-default w-full">
+            {/* Score number + label badge */}
+            <div className="flex items-center gap-2">
+              <span
+                className="text-[15px] font-bold tabular-nums text-gray-900 dark:text-gray-100"
+                aria-label={`Risk score ${score.toFixed(1)}`}
+              >
+                {score.toFixed(0)}
+              </span>
+              <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full whitespace-nowrap ${band.className}`}>
+                {band.label}
+              </span>
+            </div>
+
+            {/* Progress bar */}
             <div
-              className="flex-1 h-2 bg-gray-100 dark:bg-gray-700 rounded-full overflow-hidden min-w-[60px]"
+              className="w-full h-1.5 bg-gray-100 dark:bg-gray-700 rounded-full overflow-hidden"
               role="progressbar"
               aria-valuenow={pct}
               aria-valuemin={0}
               aria-valuemax={100}
-              aria-label={`Priority score ${safeScore.toFixed(1)} out of 100`}
+              aria-label={`Priority score ${score.toFixed(1)} out of 100`}
             >
               <div
-                className={`h-full rounded-full transition-all duration-300 ${color}`}
+                className={`h-full rounded-full transition-all duration-300 ${band.barColor}`}
                 style={{ width: `${pct}%` }}
               />
             </div>

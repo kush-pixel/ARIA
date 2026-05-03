@@ -1,5 +1,7 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-05-02 by Kush (demo day prep — Layer 3 LLM validation hardened, setup_demo.py ALL CHECKS PASSED, alert inbox patient names, confirmation timeshift fix)
+Last updated: 2026-05-03 by Krishna (Priority Score column first, 3-band color coding red/amber/green, null score shows No data, column reorder)
+Previous: 2026-05-03 by Krishna (search bar wired live, alert disposition dropdown, TierOverrideModal, drug interaction chatbot, active_problems in patient API, worker _start_listener crash fix)
+Previous: 2026-05-02 by Kush (demo day prep — Layer 3 LLM validation hardened, setup_demo.py ALL CHECKS PASSED, alert inbox patient names, confirmation timeshift fix)
 Previous: 2026-05-02 by Kush (patient panel + briefing lifecycle fixes — BP Trend single source of truth via trend_avg_systolic, briefing API post-visit filter, 5 hardcoded value fixes, ruff clean)
 Previous: 2026-05-01 by Kush (chatbot — guardrail audit + 3 structural fixes (emergency narrowed, tool schema disambiguation, context fallback enriched); medication indication answers enabled; 4 validator/formatter bugs fixed; pre-existing test failures cleaned; 583 tests passing, ruff clean)
 Previous: 2026-05-01 by Krishna (frontend clinical UI — dashboard column redesign, BP chart single-source average, chatbot guardrail fix, interactive tour, patient panel de-coloring, adherence card layout, SparklineChart data consistency)
@@ -14,6 +16,76 @@ Previous: 2026-04-27 by Kush (Phase 1 + Phase 8 — AUDIT.md Fixes 6,7,8,9,12,16
 Previous: 2026-04-27 by Nesh (Phase 4 complete — Fixes 10, 21, 40, 46, 47, 60 implemented; 428 unit tests passing, ruff clean)
 Previous: 2026-04-27 by Sahil (Phase 5 complete + Phase 7 complete except Fix 43; 426 unit tests passing, ruff clean)
 Previous: 2026-04-26 by Yash (AUDIT.md Fixes 25, 58, 61 — severity-weighted comorbidity, adaptive gap/inertia normalization, risk_score_computed_at staleness indicator)
+
+---
+
+## Priority Score Column Redesign — 2026-05-03
+
+**Author:** Krishna Patel
+**Files changed:** `frontend/src/components/dashboard/RiskScoreBar.tsx`, `frontend/src/components/dashboard/PatientList.tsx`
+
+### Column reorder — Priority Score moved first
+
+Priority Score is the most actionable signal for a clinician scanning the list. Moved from column 4 to column 2 (immediately after Patient name).
+
+New order: **Patient | Priority Score | Chronic Risk | Chief Concern | BP Trend | Appointment**
+
+`COLS` updated to `grid-cols-[1fr_160px_110px_160px_96px_140px]`. Header and row cell order updated to match.
+
+### Priority Score — 3-band color coding
+
+`RiskScoreBar.tsx` redesigned:
+
+- **Score number** (`15px font-bold`) beside a color-coded badge label — reads instantly without parsing a bar
+- **Three bands:** High ≥60 (red) | Medium 30–59 (amber) | Low <30 (green)
+- **`score === null` → "No data"** in muted gray — no badge, no bar. Previously `null` defaulted to `0` which falsely rendered as "Stable/Low". Patients with no computed score (e.g. EHR-only, not yet processed) now show "No data" correctly.
+- Thin progress bar retained beneath the number for relative scale.
+- Tooltip unchanged.
+
+---
+
+## Search, Alert Dispositions, Tier Override, Chatbot + Worker Fix — 2026-05-03
+
+**Author:** Krishna Patel
+**Files changed (commit 10f46ae):** `backend/app/api/patients.py`, `backend/app/services/chat/agent.py`, `backend/app/services/chat/tools.py`, `frontend/src/app/(main)/alerts/page.tsx`, `frontend/src/app/(main)/layout.tsx`, `frontend/src/app/(main)/patients/[id]/page.tsx`, `frontend/src/app/(main)/patients/page.tsx`, `frontend/src/app/(main)/shadow-mode/page.tsx`, `frontend/src/app/layout.tsx`, `frontend/src/components/briefing/AdherenceSummary.tsx`, `frontend/src/components/briefing/BriefingCard.tsx`, `frontend/src/components/briefing/ChatPanel.tsx`, `frontend/src/components/dashboard/AlertInbox.tsx`, `frontend/src/components/dashboard/PatientList.tsx`, `frontend/src/components/dashboard/RiskScoreBar.tsx`, `frontend/src/components/dashboard/RiskTierBadge.tsx`, `frontend/src/components/shared/Topbar.tsx`, `frontend/src/components/shared/WalkthroughModal.tsx`, `frontend/src/lib/api.ts`, `frontend/src/lib/mockData.ts`, `frontend/src/lib/types.ts`, `prompts/chat_system_prompt.md`
+**Files changed (worker fix):** `scripts/run_worker.py`
+
+### Search bar — live filtering wired to patient list
+
+Previously the search bar in `Topbar.tsx` rendered an input with no handler — typing had no effect.
+
+- `Topbar.tsx`: added `useSearchParams`, `usePathname`, `useCallback`. `handleSearch()` writes `?q=` to the URL via `router.replace()` on every keystroke. Input value is controlled and initialised from the current URL param so it survives navigation.
+- `PatientList.tsx`: reads `searchParams.get('q')` via `useSearchParams`. Filters `tierFiltered` by matching `patient_id`, `patient.name`, and `patient.active_problems` (any element) against the lowercase query. Empty query shows all patients. `setPage(1)` resets to page 1 on query change. Empty state message updated: "No patients match `{query}`." vs the existing "No patients in this tier."
+- `patients.py` (`GET /api/patients`): added a second query to fetch `ClinicalContext.active_problems` for all patients in one round-trip. Result mapped into `problems_map` and passed to `_serialise()` as `active_problems`. `_serialise()` signature extended with `active_problems: list[str] | None`.
+- `types.ts`: `active_problems: string[]` added to `Patient` interface.
+
+### Alert inbox — disposition dropdown on acknowledge
+
+Previously "Acknowledge" was a plain button with no disposition — `acknowledgeAlert()` was called with no disposition argument, which was incorrect since the API required one.
+
+- `AlertInbox.tsx`: "Acknowledge" button now opens an inline dropdown with three labelled options: **Agree: acting on this** (will change treatment or refer), **Agree: monitoring** (watching closely), **Disagree** (not clinically relevant). Each option calls `acknowledgeAlert(alert_id, disposition)` with the correct `AlertDisposition` value. Dropdown closes on outside click (via `useRef` + `mousedown` listener). `ChevronRight` icon rotates 90° when dropdown is open. Alert label punctuation changed from em dash to colon for clarity.
+- `api.ts`: `acknowledgeAlert` signature already accepted `disposition` — no change needed.
+
+### Briefing — clinician risk tier override (`TierOverrideModal`)
+
+- `BriefingCard.tsx`: `TierOverrideModal` component added inline. Pencil icon button in patient header opens the modal. `onPatientUpdate?: (updated: Patient) => void` prop added to `BriefingCardProps` — called after a successful save to refresh parent state without a full page reload.
+- Modal shows current tier, three tier buttons (High / Medium / Low), a mandatory reason textarea (max 500 chars), and inline error handling. If `tier_override_source === "system"` (CHF / Stroke / TIA), the modal shows a read-only explanation and no selector — the tier cannot be changed manually.
+- 409 errors from the API are caught and surfaced as a user-readable message explaining that EHR re-ingestion is required.
+- `patients.py`: `PATCH /api/patients/{id}/tier` — demotion suppression window corrected from 14 to **28 days** to align with NICE NG136 §1.6.3 (4-week review standard). Docstring updated.
+- `api.ts`: `overrideTier(patientId, risk_tier, reason)` → `PATCH /api/patients/{id}/tier` already present.
+- `types.ts`: `tier_override_source: 'system' | 'system_score' | 'clinician' | null` and `tier_override_suppressed_until: string | null` added to `Patient` interface so `BriefingCard` can read the lock state.
+
+### Chatbot — drug interaction follow-up questions and tool fix
+
+- `agent.py`: three drug-interaction follow-up questions added to `_FOLLOWUP_POOL["get_briefing"]`: "Are there any drug interactions flagged?", "What is the severity of the flagged interactions?", "Which medications are involved?" — these now appear as suggestion chips after any overview/briefing tool call.
+- `tools.py`: `get_briefing` tool response previously omitted `drug_interactions` from the returned dict. Added `"drug_interactions": payload.get("drug_interactions", [])` — the chatbot can now answer drug interaction questions with real data from the briefing payload.
+- `chat_system_prompt.md`: drug interaction answering instructions added to "What You Answer" section and tool-use guidance.
+
+### Worker — `_start_listener` crash fix
+
+`run_worker.py` passed `listen_url=raw_db_url` to `WorkerProcessor`, which triggered `self._start_listener()` — a method that was never implemented. Worker crashed immediately on every startup, meaning no `briefing_generation` or `pattern_recompute` jobs ever executed.
+
+**Fix:** Removed `listen_url` argument. Worker now uses the existing 30-second poll loop. Layer 3 (`gpt-4o-mini` via `summarizer.py`) now runs after each briefing composition and populates `readable_summary` — the AI Summary section in `BriefingCard.tsx` renders correctly.
 
 ---
 
