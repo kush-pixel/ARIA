@@ -13,6 +13,7 @@ briefings row for audit traceability.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
@@ -131,6 +132,43 @@ def _build_user_message(payload: dict[str, Any]) -> str:
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
+
+async def call_llm_only(
+    payload: dict[str, Any],
+) -> tuple[str, str, str]:
+    """Call the LLM and return the raw candidate text. No DB access.
+
+    This is the session-free half of Layer 3. Call it while holding no DB
+    connection, then open a fresh session to validate and persist the result.
+
+    Args:
+        payload: The deterministic Layer 1 briefing JSON from composer.py.
+
+    Returns:
+        Tuple of (candidate_text, model_version, prompt_hash).
+
+    Raises:
+        FileNotFoundError: If prompts/briefing_summary_prompt.md is missing.
+        openai.APIError: If the API call fails.
+    """
+    system_prompt = _load_prompt_template()
+    prompt_hash = _compute_prompt_hash(system_prompt)
+    user_message = _build_user_message(payload)
+    client = OpenAI(api_key=settings.openai_api_key)
+
+    message = await asyncio.to_thread(
+        client.chat.completions.create,
+        model=_MODEL_VERSION,
+        max_tokens=256,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
+    )
+    candidate = message.choices[0].message.content.strip()
+    return candidate, _MODEL_VERSION, prompt_hash
+
+
 async def generate_llm_summary(
     briefing: Briefing,
     session: AsyncSession,
@@ -176,7 +214,8 @@ async def generate_llm_summary(
     # Attempt up to 2 times — retry once on validation failure before storing None
     summary_text: str | None = None
     for attempt in range(2):
-        message = client.chat.completions.create(
+        message = await asyncio.to_thread(
+            client.chat.completions.create,
             model=_MODEL_VERSION,
             max_tokens=256,
             messages=[

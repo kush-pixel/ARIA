@@ -1,4 +1,4 @@
-import type { Patient, Briefing, Reading, Alert, AdherenceData, ShadowModeResults, ChatDoneEvent } from './types'
+import type { Patient, PaginatedPatients, Briefing, Reading, Alert, AdherenceData, ShadowModeResults, ChatDoneEvent } from './types'
 import { getToken } from './auth'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
@@ -21,8 +21,22 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 // GET /api/patients
-export async function getPatients(): Promise<Patient[]> {
-  return apiFetch<Patient[]>('/api/patients')
+export interface GetPatientsParams {
+  page?: number
+  pageSize?: number
+  search?: string
+  tier?: 'all' | 'high' | 'medium' | 'low'
+}
+
+export async function getPatients(params: GetPatientsParams = {}): Promise<PaginatedPatients> {
+  const { page = 1, pageSize = 25, search = '', tier = 'all' } = params
+  const qs = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+    search,
+    tier,
+  })
+  return apiFetch<PaginatedPatients>(`/api/patients?${qs}`)
 }
 
 // GET /api/patients/:id
