@@ -86,7 +86,7 @@ export const MOCK_CLINICAL_CONTEXTS: Record<string, ClinicalContext> = {
     last_clinic_systolic: 152,
     last_clinic_diastolic: 94,
     overdue_labs: ['Renal function panel (due 2026-03-10)', 'Fasting lipid panel (due 2026-04-01)'],
-    social_context: 'NSAID use noted — potential interaction with antihypertensive regimen.',
+    social_context: 'NSAID use noted. Potential interaction with antihypertensive regimen.',
   },
   '1093': {
     patient_id: '1093',
@@ -244,13 +244,13 @@ export const MOCK_BRIEFINGS: Record<string, Briefing> = {
       trend_summary:
         'Home monitoring shows sustained systolic elevation averaging 163 mmHg over the past 21 active monitoring days (excluding 4 absent days due to device outage). A brief pre-appointment dip to 148–153 mmHg was observed days 19–21, with readings returning to the 160–166 mmHg range in the most recent week. This pattern is consistent with a white-coat dip rather than genuine improvement.',
       medication_status:
-        'Current regimen: Metoprolol Succinate 50mg, Lisinopril 10mg, Furosemide (Lasix) 40mg. Last medication change: 14 October 2025 — 186 days ago. No dose adjustments recorded since last clinic visit.',
+        'Current regimen: Metoprolol Succinate 50mg, Lisinopril 10mg, Furosemide (Lasix) 40mg. Last medication change: 14 October 2025 (186 days ago). No dose adjustments recorded since last clinic visit.',
       adherence_summary:
         'Synthetic confirmation signal indicates approximately 91% adherence across all three medications (977 of 1,092 scheduled doses confirmed). Adherence is highest for morning doses; weekend evening doses show a possible pattern of reduced confirmation. Given high adherence with sustained elevated readings, this pattern may warrant a treatment review rather than an adherence intervention.',
       active_problems: ['Congestive Heart Failure', 'Hypertension', 'Type 2 Diabetes Mellitus', 'Coronary Artery Disease'],
       overdue_labs: ['HbA1c (due 2026-01-14)', 'Basic Metabolic Panel (due 2026-02-21)', 'BNP (due 2026-03-01)'],
       visit_agenda: [
-        'Review sustained elevated home BP (avg 163/99 mmHg) in context of high adherence signal — possible treatment review warranted',
+        'Review sustained elevated home BP (avg 163/99 mmHg) in context of high adherence signal: possible treatment review warranted',
         'Address 3 overdue laboratory investigations, including BNP given CHF history',
         'Assess current diuretic dosing in context of CHF and persistent elevation',
         'Review weekend medication pattern (possible reduced adherence on Saturday evenings)',
@@ -262,7 +262,7 @@ export const MOCK_BRIEFINGS: Record<string, Briefing> = {
       ],
       risk_score: 74.5,
       data_limitations:
-        'Home monitoring active. 28-day dataset includes 4 absent days (device outage days 16–17, weekend gaps days 25–26). Readings are synthetic — generated for demonstration purposes only.',
+        'Home monitoring active. 28-day dataset includes 4 absent days (device outage days 16–17, weekend gaps days 25–26). Readings are synthetic, generated for demonstration purposes only.',
     },
     generated_at: '2026-04-18T07:30:00Z',
     delivered_at: '2026-04-18T07:30:05Z',
@@ -276,7 +276,7 @@ export const MOCK_BRIEFINGS: Record<string, Briefing> = {
       trend_summary:
         'Recent home readings show systolic values in the 133–139 mmHg range, near the Stage 1 threshold. Trend is stable over the past 7 days of available data.',
       medication_status:
-        'Current regimen: Ramipril 5mg. Last medication change: 1 February 2026 — 76 days ago.',
+        'Current regimen: Ramipril 5mg. Last medication change: 1 February 2026 (76 days ago).',
       adherence_summary:
         'Home monitoring active. Confirmation data not yet sufficient for pattern analysis (7 days of readings available).',
       active_problems: ['Hypertension'],
@@ -289,7 +289,7 @@ export const MOCK_BRIEFINGS: Record<string, Briefing> = {
       urgent_flags: [],
       risk_score: 18.7,
       data_limitations:
-        'Home monitoring active. Only 7 days of readings available — insufficient for full 28-day trend analysis.',
+        'Home monitoring active. Only 7 days of readings available; insufficient for full 28-day trend analysis.',
     },
     generated_at: '2026-04-18T07:30:00Z',
     delivered_at: '2026-04-18T07:30:05Z',
@@ -313,7 +313,7 @@ export const MOCK_BRIEFING_1092: Briefing = {
     overdue_labs: ['Renal function panel (due 2026-03-10)', 'Fasting lipid panel (due 2026-04-01)'],
     visit_agenda: [
       'Address 2 overdue laboratory investigations (renal function and lipids)',
-      'Review NSAID use (Ibuprofen PRN) — possible interaction with antihypertensive regimen in CKD context',
+      'Review NSAID use (Ibuprofen PRN): possible interaction with antihypertensive regimen in CKD context',
       'Discuss home monitoring enrolment for future visits',
       'Assess clinic BP at appointment and compare to February reading',
     ],

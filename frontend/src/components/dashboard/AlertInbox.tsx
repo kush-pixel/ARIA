@@ -1,16 +1,23 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { getAlerts, getAcknowledgedAlerts, acknowledgeAlert, unacknowledgeAlert } from '@/lib/api'
+import type { AlertDisposition } from '@/lib/api'
 import type { Alert } from '@/lib/types'
-import { CheckCircle, AlertTriangle, Clock, TrendingUp, ShieldAlert, RotateCcw, ChevronDown, ChevronUp } from 'lucide-react'
+import { CheckCircle, AlertTriangle, Clock, TrendingUp, ShieldAlert, RotateCcw, ChevronDown, ChevronUp, ChevronRight } from 'lucide-react'
+
+const DISPOSITIONS: { value: AlertDisposition; label: string; description: string; color: string }[] = [
+  { value: 'agree_acting',    label: 'Agree: acting on this',  description: 'I will change treatment or refer', color: 'text-blue-600 dark:text-blue-400' },
+  { value: 'agree_monitoring', label: 'Agree: monitoring',     description: 'I will watch closely', color: 'text-amber-600 dark:text-amber-400' },
+  { value: 'disagree',        label: 'Disagree',                description: 'Not clinically relevant', color: 'text-gray-500 dark:text-gray-400' },
+]
 
 const UNDO_WINDOW_MS = 24 * 60 * 60 * 1000 // 24 hours
 
 const ALERT_LABELS: Record<Alert['alert_type'], string> = {
-  gap_urgent:   'Urgent reading gap — no home BP received',
-  gap_briefing: 'Reading gap — review at next appointment',
-  inertia:      'Possible therapeutic inertia — elevated BP with no medication change',
+  gap_urgent:   'Urgent reading gap: no home BP received',
+  gap_briefing: 'Reading gap: review at next appointment',
+  inertia:      'Possible therapeutic inertia: elevated BP with no medication change',
   deterioration:'Possible sustained BP worsening trend',
   adherence:    'Possible adherence concern flagged',
 }
@@ -49,6 +56,8 @@ export default function AlertInbox() {
   const [acknowledged, setAcknowledged] = useState<Alert[]>([])
   const [loading, setLoading] = useState(true)
   const [showAcknowledged, setShowAcknowledged] = useState(true)
+  const [openDropdown, setOpenDropdown] = useState<string | null>(null)
+  const dropdownRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     Promise.all([getAlerts(), getAcknowledgedAlerts()]).then(([activeData, ackData]) => {
@@ -58,11 +67,23 @@ export default function AlertInbox() {
     })
   }, [])
 
-  function handleAcknowledge(alert: Alert) {
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setOpenDropdown(null)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  function handleAcknowledge(alert: Alert, disposition: AlertDisposition) {
     const now = new Date().toISOString()
-    acknowledgeAlert(alert.alert_id).catch(() => {})
+    acknowledgeAlert(alert.alert_id, disposition).catch(() => {})
     setActive((prev) => prev.filter((a) => a.alert_id !== alert.alert_id))
     setAcknowledged((prev) => [{ ...alert, acknowledged_at: now }, ...prev])
+    setOpenDropdown(null)
   }
 
   function handleUndo(alertId: string) {
@@ -142,18 +163,43 @@ export default function AlertInbox() {
                         )}
                       </div>
                     </div>
-                    <button
-                      onClick={() => handleAcknowledge(alert)}
-                      aria-label={`Acknowledge alert for patient ${alert.patient_id}`}
-                      className="flex-shrink-0 px-4 py-2 rounded-lg text-[13px] font-semibold
-                                 bg-white dark:bg-[#1F2937]
-                                 border border-gray-200 dark:border-[#374151]
-                                 text-gray-700 dark:text-gray-300
-                                 hover:bg-gray-50 dark:hover:bg-[#374151]
-                                 transition-colors duration-150"
-                    >
-                      Acknowledge
-                    </button>
+                    <div className="relative flex-shrink-0" ref={openDropdown === alert.alert_id ? dropdownRef : undefined}>
+                      <button
+                        onClick={() => setOpenDropdown(openDropdown === alert.alert_id ? null : alert.alert_id)}
+                        aria-label={`Acknowledge alert for patient ${alert.patient_id}`}
+                        className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-[13px] font-semibold
+                                   bg-white dark:bg-[#1F2937]
+                                   border border-gray-200 dark:border-[#374151]
+                                   text-gray-700 dark:text-gray-300
+                                   hover:bg-gray-50 dark:hover:bg-[#374151]
+                                   transition-colors duration-150"
+                      >
+                        Acknowledge
+                        <ChevronRight size={13} strokeWidth={2}
+                          className={`transition-transform duration-150 ${openDropdown === alert.alert_id ? 'rotate-90' : ''}`}
+                        />
+                      </button>
+                      {openDropdown === alert.alert_id && (
+                        <div className="absolute right-0 top-full mt-1.5 w-64 z-50
+                                        bg-white dark:bg-[#1F2937]
+                                        border border-gray-200 dark:border-[#374151]
+                                        rounded-xl shadow-lg overflow-hidden">
+                          {DISPOSITIONS.map((d) => (
+                            <button
+                              key={d.value}
+                              onClick={() => handleAcknowledge(alert, d.value)}
+                              className="w-full text-left px-4 py-3 flex flex-col gap-0.5
+                                         hover:bg-gray-50 dark:hover:bg-[#374151]
+                                         transition-colors duration-100
+                                         border-b border-gray-100 dark:border-[#374151] last:border-0"
+                            >
+                              <span className={`text-[13px] font-semibold ${d.color}`}>{d.label}</span>
+                              <span className="text-[12px] text-gray-400 dark:text-gray-500">{d.description}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>

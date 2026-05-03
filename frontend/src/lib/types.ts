@@ -7,6 +7,8 @@ export interface Patient {
   age: number
   risk_tier: RiskTier
   tier_override: string | null
+  tier_override_source: 'system' | 'system_score' | 'clinician' | null
+  tier_override_suppressed_until: string | null
   risk_score: number | null
   risk_score_computed_at: string | null
   monitoring_active: boolean
@@ -15,6 +17,7 @@ export interface Patient {
   enrolled_by: string
   has_briefing: boolean
   trend_avg_systolic: number | null
+  active_problems: string[]
 }
 
 export interface ClinicalContext {

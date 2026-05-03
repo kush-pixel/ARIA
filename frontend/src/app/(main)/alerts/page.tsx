@@ -1,7 +1,7 @@
 import AlertInbox from '@/components/dashboard/AlertInbox'
 import { BellRing } from 'lucide-react'
 
-export const metadata = { title: 'Alerts — ARIA' }
+export const metadata = { title: 'Alerts | ARIA' }
 
 export default function AlertsPage() {
   return (

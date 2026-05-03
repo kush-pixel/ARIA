@@ -16,14 +16,14 @@ function patternInterpretation(adherence: AdherenceData[]): string {
   const avg = adherence.reduce((s, a) => s + a.adherence_pct, 0) / adherence.length
   if (avg >= 80) return 'Overall adherence signal is high. If BP remains elevated, a possible treatment review may be warranted rather than an adherence intervention.'
   if (avg >= 60) return 'Adherence signal is moderate. A contextual review at the visit may clarify whether dose timing or patient factors are contributing.'
-  return 'Adherence signal is low across one or more medications. A possible adherence concern — contextual discussion recommended at the visit.'
+  return 'Adherence signal is low across one or more medications. A possible adherence concern; contextual discussion recommended at the visit.'
 }
 
 export default function AdherenceSummary({ adherence, patternText }: AdherenceSummaryProps) {
   if (adherence.length === 0) {
     return (
       <p className="text-[13px] text-gray-400 italic">
-        No adherence data available — home monitoring not active or insufficient data.
+        No adherence data available. Home monitoring not active or insufficient data.
       </p>
     )
   }

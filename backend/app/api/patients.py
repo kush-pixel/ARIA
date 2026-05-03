@@ -87,6 +87,14 @@ async def list_patients(session: AsyncSession = Depends(get_session)) -> list[di
         briefing_map[pid] = llm.get("trend_avg_systolic")
     patients_with_briefing = set(briefing_map.keys())
 
+    # Fetch active_problems for all patients in one query for search support
+    cc_result = await session.execute(
+        select(ClinicalContext.patient_id, ClinicalContext.active_problems)
+    )
+    problems_map: dict[str, list[str]] = {
+        row[0]: row[1] or [] for row in cc_result
+    }
+
     def sort_key(p: Patient) -> tuple[int, float]:
         tier = _TIER_ORDER.get(p.risk_tier, 9)
         score = float(p.risk_score) if p.risk_score is not None else 0.0
@@ -98,6 +106,7 @@ async def list_patients(session: AsyncSession = Depends(get_session)) -> list[di
             p,
             has_briefing=p.patient_id in patients_with_briefing,
             trend_avg_systolic=briefing_map.get(p.patient_id),
+            active_problems=problems_map.get(p.patient_id, []),
         )
         for p in sorted_patients
     ]
@@ -207,9 +216,10 @@ async def override_tier(
     haemorrhagic stroke) — those require updating the EHR problem list and
     re-ingesting.
 
-    Demotion (e.g. high → medium, medium → low) sets a 14-day suppression
+    Demotion (e.g. high → medium, medium → low) sets a 28-day suppression
     window during which the nightly reclassification job will not promote the
     patient back, unless the risk score exceeds 85 (break-glass).
+    28 days aligns with NICE NG136 §1.6.3 (4-week review standard).
 
     Args:
         patient_id: Patient's MED_REC_NO.
@@ -326,6 +336,7 @@ def _serialise(
     p: Patient,
     has_briefing: bool = False,
     trend_avg_systolic: float | None = None,
+    active_problems: list[str] | None = None,
 ) -> dict:
     return {
         "patient_id": p.patient_id,
@@ -348,4 +359,5 @@ def _serialise(
         "enrolled_by": p.enrolled_by,
         "has_briefing": has_briefing,
         "trend_avg_systolic": trend_avg_systolic,
+        "active_problems": active_problems or [],
     }

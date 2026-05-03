@@ -244,6 +244,9 @@ _FOLLOWUP_POOL: dict[str, list[str]] = {
         "Which alerts are currently active and unacknowledged?",
         "What is on the visit agenda for today?",
         "What does the trend summary say about the last 28 days?",
+        "Are there any drug interactions flagged for this patient?",
+        "What is the severity of the flagged drug interactions?",
+        "Which medications are involved in the flagged interactions?",
     ],
     "get_clinical_context": [
         "When was the last clinic visit?",

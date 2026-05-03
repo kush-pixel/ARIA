@@ -365,7 +365,7 @@ export default function ChatPanel({ patientId, patient, readings }: ChatPanelPro
                         border-b border-amber-100 dark:border-amber-800 flex-shrink-0">
           <AlertTriangle size={12} className="text-amber-500 flex-shrink-0" strokeWidth={2} />
           <p className="text-[11px] text-amber-600 dark:text-amber-400">
-            Last reading was {daysSinceReading} days ago — data may not reflect current status
+            Last reading was {daysSinceReading} days ago. Data may not reflect current status.
           </p>
         </div>
       )}
@@ -386,7 +386,7 @@ export default function ChatPanel({ patientId, patient, readings }: ChatPanelPro
                 <div className="max-w-[85%] px-3.5 py-2.5 rounded-2xl rounded-tl-sm shadow-sm
                                 bg-white dark:bg-[#1a2235] border border-gray-100 dark:border-[#2a3548]">
                   <p className="text-[13px] text-gray-600 dark:text-gray-300 leading-relaxed">
-                    Hi! I can answer questions about this patient — BP trends, medications, adherence, alerts, and clinical history.
+                    Hi! I can answer questions about BP trends, medications, adherence, alerts, and clinical history.
                   </p>
                 </div>
               </div>

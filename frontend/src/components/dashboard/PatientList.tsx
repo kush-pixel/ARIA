@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { getPatients, getReadings, getPatientBaseline } from '@/lib/api'
 import type { Patient, Reading, RiskTier } from '@/lib/types'
 import RiskTierBadge from './RiskTierBadge'
@@ -130,6 +130,8 @@ const COLS = 'grid-cols-[1fr_110px_160px_150px_96px_140px]'
 
 export default function PatientList() {
   const router = useRouter()
+  const searchParams = useSearchParams()
+  const searchQuery = (searchParams.get('q') ?? '').toLowerCase().trim()
   const [patients, setPatients] = useState<Patient[]>([])
   const [loading, setLoading] = useState(true)
   const [tierFilter, setTierFilter] = useState<RiskTier | 'all'>('all')
@@ -160,7 +162,7 @@ export default function PatientList() {
     })
   }, [])
 
-  useEffect(() => { setPage(1) }, [tierFilter])
+  useEffect(() => { setPage(1) }, [tierFilter, searchQuery])
 
   if (loading) {
     return (
@@ -178,7 +180,14 @@ export default function PatientList() {
     low:    patients.filter((p) => p.risk_tier === 'low').length,
   }
 
-  const filtered = tierFilter === 'all' ? patients : patients.filter((p) => p.risk_tier === tierFilter)
+  const tierFiltered = tierFilter === 'all' ? patients : patients.filter((p) => p.risk_tier === tierFilter)
+  const filtered = searchQuery
+    ? tierFiltered.filter((p) =>
+        p.patient_id.toLowerCase().includes(searchQuery) ||
+        (p.name ?? '').toLowerCase().includes(searchQuery) ||
+        p.active_problems.some((prob) => prob.toLowerCase().includes(searchQuery))
+      )
+    : tierFiltered
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
   const safePage = Math.min(page, totalPages)
   const pageSlice = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE)
@@ -231,7 +240,9 @@ export default function PatientList() {
         {pageSlice.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16 gap-3 text-gray-400">
             <Users size={32} strokeWidth={1.5} />
-            <p className="text-[15px]">No patients in this tier.</p>
+            <p className="text-[15px]">
+              {searchQuery ? `No patients match "${searchQuery}".` : 'No patients in this tier.'}
+            </p>
           </div>
         ) : (
           pageSlice.map((patient, idx) => {
