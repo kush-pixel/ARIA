@@ -1,5 +1,6 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-05-03 by Kush (scalability fixes + briefing adaptive window — connection pool tuning, midnight recompute stagger, LLM session decoupling, server-side pagination + search, briefing window now matches Layer 1 adaptive window)
+Last updated: 2026-05-03 by Kush (logic fixes — variability agenda item always None, ICD-10 code normalization, Pattern B suppression explicit guard; ruff clean)
+Previous: 2026-05-03 by Kush (scalability fixes + briefing adaptive window — connection pool tuning, midnight recompute stagger, LLM session decoupling, server-side pagination + search, briefing window now matches Layer 1 adaptive window)
 Previous: 2026-05-02 by Kush (demo day prep — Layer 3 LLM validation hardened, setup_demo.py ALL CHECKS PASSED, alert inbox patient names, confirmation timeshift fix)
 Previous: 2026-05-02 by Kush (patient panel + briefing lifecycle fixes — BP Trend single source of truth via trend_avg_systolic, briefing API post-visit filter, 5 hardcoded value fixes, ruff clean)
 Previous: 2026-05-01 by Kush (chatbot — guardrail audit + 3 structural fixes (emergency narrowed, tool schema disambiguation, context fallback enriched); medication indication answers enabled; 4 validator/formatter bugs fixed; pre-existing test failures cleaned; 583 tests passing, ruff clean)
@@ -15,6 +16,45 @@ Previous: 2026-04-27 by Kush (Phase 1 + Phase 8 — AUDIT.md Fixes 6,7,8,9,12,16
 Previous: 2026-04-27 by Nesh (Phase 4 complete — Fixes 10, 21, 40, 46, 47, 60 implemented; 428 unit tests passing, ruff clean)
 Previous: 2026-04-27 by Sahil (Phase 5 complete + Phase 7 complete except Fix 43; 426 unit tests passing, ruff clean)
 Previous: 2026-04-26 by Yash (AUDIT.md Fixes 25, 58, 61 — severity-weighted comorbidity, adaptive gap/inertia normalization, risk_score_computed_at staleness indicator)
+
+---
+
+## Logic Fixes — Variability Agenda, ICD-10 Normalisation, Pattern B Guard — 2026-05-03
+
+**Author:** Kush Patel
+**Files changed:** `backend/app/services/briefing/composer.py`, `backend/app/services/worker/processor.py`, `backend/app/services/fhir/ingestion.py`, `backend/app/services/pattern_engine/adherence_analyzer.py`
+
+Three logic correctness fixes identified from architecture audit. ruff check passes.
+
+### Fix 1 — Variability agenda item always None (composer.py)
+
+**Problem:** `compose_briefing` tried to source the variability visit-agenda string by scanning the `alerts` list for `alert_type == "variability"`. Two compounding bugs: (a) variability never creates an alert row — `alert_type` in the schema only covers `gap_urgent|gap_briefing|inertia|deterioration|adherence`; (b) even if a row existed, `a.alert_type` would return the literal string `"variability"`, not the human-readable agenda text (e.g. *"High BP variability detected (CV 18%) — consider ABPM referral."*). Result: `variability_agenda_item` was always `None` for every patient, silently suppressing the variability finding from every briefing visit agenda.
+
+**Fix:** Added `from app.services.pattern_engine.variability_detector import run_variability_detector` to composer imports. Replaced the broken alert-scan with a direct `await run_variability_detector(session, patient_id)` call inside `compose_briefing`. The detector is deterministic Layer 1 logic and reuses the same session already open for the briefing queries. `variability_result["visit_agenda_item"]` is the authoritative agenda string.
+
+### Fix 2 — ICD-10 code normalization missing in comorbidity checks (processor.py + ingestion.py)
+
+**Problem:** Two functions matched ICD-10 codes against uppercase prefix constants (`"I50"`, `"G45"`, etc.) using raw `code.startswith()` with no normalization:
+- `processor.py._apply_tier_reclassification`: checks `_COMORBIDITY_BLOCK_PREFIXES` to block demotion to low tier. If a code arrives as `"i50.9"` (lowercase) or `"I50.9"` (dot present is fine, but lowercase isn't), the block silently fails → patient could be incorrectly demoted to low.
+- `ingestion.py._determine_risk_tier`: applies CHF/stroke/TIA auto-override at ingestion time with the same raw `.startswith()`. Same failure mode.
+
+Demo patients are unaffected (FHIR bundles produce uppercase codes), but a non-standard bundle would bypass both safety floors.
+
+**Fix:**
+- `processor.py`: added `norm_codes = [c.upper().replace(".", "").replace("-", "") for c in codes]` before the `any(startswith)` check.
+- `ingestion.py`: normalized each code inline as `code = raw.upper().replace(".", "").replace("-", "")` at the top of the loop. Both functions now match the same normalization pattern used by `threshold_utils._norm()`.
+
+### Fix 3 — Pattern B suppression relies on implicit `float("inf")` guard (adherence_analyzer.py)
+
+**Problem:** CLAUDE.md mandates: *"Suppression must NOT apply when no recent med change."* This was enforced only because `_days_since(None, now)` returns `float("inf")`, making `inf <= titration_window` evaluate to `False`. Correct today, but a fragile implicit invariant — any refactor of `_days_since` that returns a large integer instead of `inf` would silently allow suppression to fire for patients with no medication history, misclassifying Pattern B as "none".
+
+**Fix:** Added an explicit early-return guard in `_check_pattern_b_suppression` immediately after `get_last_med_change_date`:
+```python
+if last_med_date is None:
+    logger.debug("patient=%s pattern_b_suppression: no med change — suppression skipped", patient_id)
+    return ("B", _INTERPRETATIONS["B"])
+```
+The invariant is now self-documenting and refactor-safe. `_days_since` and `titration_window` are only called when a real med change date exists.
 
 ---
 

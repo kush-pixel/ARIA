@@ -31,6 +31,7 @@ from app.services.pattern_engine.threshold_utils import (
     compute_window_days,
     get_titration_window,
 )
+from app.services.pattern_engine.variability_detector import run_variability_detector
 from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -754,11 +755,10 @@ async def compose_briefing(
     )
     urgent_flags = _build_urgent_flags(alerts)
 
-    # Fix 59: pull variability agenda item from detector result stored on last alert, if available
-    variability_agenda_item: str | None = next(
-        (a.alert_type for a in alerts if a.alert_type == "variability"),
-        None,
-    )
+    # Variability detector is called directly — no alert row is written for variability,
+    # so the agenda item cannot be sourced from the alerts table.
+    variability_result = await run_variability_detector(session, patient_id)
+    variability_agenda_item: str | None = variability_result["visit_agenda_item"]
 
     data_limitations = _build_data_limitations(
         readings=readings,

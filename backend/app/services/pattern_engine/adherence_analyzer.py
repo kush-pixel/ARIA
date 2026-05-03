@@ -271,6 +271,13 @@ async def _check_pattern_b_suppression(
     )
 
     last_med_date = get_last_med_change_date(med_history, last_med_change_field, as_of=now.date())  # type: ignore[arg-type]
+    # Explicit guard: suppression MUST NOT apply when no medication change exists.
+    # _days_since() returns float("inf") for None which also prevents suppression,
+    # but this explicit check documents the invariant from CLAUDE.md.
+    if last_med_date is None:
+        logger.debug("patient=%s pattern_b_suppression: no med change — suppression skipped", patient_id)
+        return ("B", _INTERPRETATIONS["B"])
+
     days_since = _days_since(last_med_date, now)
     titration_window = get_titration_window(med_history, as_of=now.date())
 
