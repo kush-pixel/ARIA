@@ -1,5 +1,6 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-05-03 by Kush (logic fixes — variability agenda item always None, ICD-10 code normalization, Pattern B suppression explicit guard; ruff clean)
+Last updated: 2026-05-03 by Kush (off_hours fix — all four detectors now return triggered_at from the reading datetime; off_hours stamped from pattern onset not job execution time; ruff clean)
+Previous: 2026-05-03 by Kush (logic fixes — variability agenda item always None, ICD-10 code normalization, Pattern B suppression explicit guard; ruff clean)
 Previous: 2026-05-03 by Kush (scalability fixes + briefing adaptive window — connection pool tuning, midnight recompute stagger, LLM session decoupling, server-side pagination + search, briefing window now matches Layer 1 adaptive window)
 Previous: 2026-05-02 by Kush (demo day prep — Layer 3 LLM validation hardened, setup_demo.py ALL CHECKS PASSED, alert inbox patient names, confirmation timeshift fix)
 Previous: 2026-05-02 by Kush (patient panel + briefing lifecycle fixes — BP Trend single source of truth via trend_avg_systolic, briefing API post-visit filter, 5 hardcoded value fixes, ruff clean)
@@ -16,6 +17,28 @@ Previous: 2026-04-27 by Kush (Phase 1 + Phase 8 — AUDIT.md Fixes 6,7,8,9,12,16
 Previous: 2026-04-27 by Nesh (Phase 4 complete — Fixes 10, 21, 40, 46, 47, 60 implemented; 428 unit tests passing, ruff clean)
 Previous: 2026-04-27 by Sahil (Phase 5 complete + Phase 7 complete except Fix 43; 426 unit tests passing, ruff clean)
 Previous: 2026-04-26 by Yash (AUDIT.md Fixes 25, 58, 61 — severity-weighted comorbidity, adaptive gap/inertia normalization, risk_score_computed_at staleness indicator)
+
+---
+
+## off_hours Fix — Stamp from Pattern Onset Not Job Execution — 2026-05-03
+
+**Author:** Kush Patel
+**Files changed:** `backend/app/services/pattern_engine/gap_detector.py`, `backend/app/services/pattern_engine/inertia_detector.py`, `backend/app/services/pattern_engine/deterioration_detector.py`, `backend/app/services/pattern_engine/adherence_analyzer.py`, `backend/app/services/worker/processor.py`
+
+**Problem:** Every alert row had `off_hours=True`. `_upsert_alert` evaluated `is_off_hours(datetime.now(UTC))` at write time. The nightly `pattern_recompute` sweep runs 00:00–02:00 UTC — both hours satisfy `hour < 8` — so every alert written by the sweep was unconditionally off-hours regardless of the patient's situation.
+
+**Fix (Option C):** Each detector now returns a `triggered_at: datetime | None` field identifying *when the pattern first became clinically detectable* from a reading, not when the job ran:
+
+| Detector | `triggered_at` semantics |
+|---|---|
+| Gap | `effective_datetime` of the last reading (when the gap began) |
+| Inertia | `effective_datetime` of the first reading ≥ `patient_threshold` in the window |
+| Deterioration | `effective_datetime` of the first reading in the detection window |
+| Adherence | `effective_datetime` of the first reading in the window (min query) |
+
+`_upsert_alert` and `_maybe_upsert_alert` gain a `pattern_triggered_at: datetime | None = None` keyword argument. When provided, `off_hours = is_off_hours(pattern_triggered_at)` — if `None` (e.g. no readings exist for a gap alert), falls back to `is_off_hours(now)`. All four processor call sites pass `pattern_triggered_at=<detector>["triggered_at"]`. `triggered_at` on the alert row (deduplication key) remains `now` so the same-day deduplication continues to work.
+
+**ruff check app/:** all checks passed.
 
 ---
 

@@ -68,6 +68,7 @@ class DeteriorationResult(TypedDict):
     slope: float | None         # mmHg/day; None if insufficient data
     recent_avg: float | None    # average systolic over last 3 days
     baseline_avg: float | None  # average systolic over days 4–10 ago
+    triggered_at: datetime | None  # effective_datetime of first reading in the window
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +166,7 @@ async def run_deterioration_detector(
         "slope": None,
         "recent_avg": None,
         "baseline_avg": None,
+        "triggered_at": None,
     }
 
     if len(readings) < _MIN_READINGS:
@@ -248,4 +250,5 @@ async def run_deterioration_detector(
         "slope": round(slope, 3),
         "recent_avg": recent_avg,
         "baseline_avg": baseline_avg,
+        "triggered_at": readings[0][0] if deterioration else None,
     }

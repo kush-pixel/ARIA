@@ -73,6 +73,7 @@ class AdherenceResult(TypedDict):
     adherence_pct: float | None
     pattern: Literal["A", "B", "C", "none"]
     interpretation: str
+    triggered_at: datetime | None  # effective_datetime of first reading in the window
 
 
 # ---------------------------------------------------------------------------
@@ -171,12 +172,13 @@ async def run_adherence_analyzer(
             "adherence_pct": None,
             "pattern": "none",
             "interpretation": _INTERPRETATIONS["none"],
+            "triggered_at": None,
         }
 
     adherence_pct = round((confirmed_doses / total_doses) * 100.0, 1)
     low_adherence = adherence_pct < _LOW_ADHERENCE_THRESHOLD
 
-    # --- Query 2: 28-day average systolic ---
+    # --- Query 2: window average systolic + first reading datetime ---
     bp_row = await session.execute(
         select(func.avg(Reading.systolic_avg)).where(
             Reading.patient_id == patient_id,
@@ -188,6 +190,15 @@ async def run_adherence_analyzer(
     avg_systolic: float | None = (
         float(avg_systolic_raw) if avg_systolic_raw is not None else None
     )
+
+    first_reading_row = await session.execute(
+        select(func.min(Reading.effective_datetime)).where(
+            Reading.patient_id == patient_id,
+            Reading.effective_datetime >= window_start,
+            Reading.effective_datetime <= now,
+        )
+    )
+    first_reading_dt: datetime | None = first_reading_row.scalar_one_or_none()
     high_bp = avg_systolic is not None and avg_systolic >= patient_threshold
 
     if high_bp and low_adherence:
@@ -219,6 +230,7 @@ async def run_adherence_analyzer(
         "adherence_pct": adherence_pct,
         "pattern": pattern,
         "interpretation": interpretation,
+        "triggered_at": first_reading_dt,
     }
 
 

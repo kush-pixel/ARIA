@@ -39,6 +39,7 @@ class GapResult(TypedDict):
     gap_days: float
     status: Literal["none", "flag", "urgent"]
     threshold_used: dict[str, int]
+    triggered_at: datetime | None  # effective_datetime of last reading (when gap began)
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +83,7 @@ async def run_gap_detector(
 
     if last_reading is None:
         logger.warning("patient=%s no readings found — classifying as urgent gap", patient_id)
-        return {"gap_days": float("inf"), "status": "urgent", "threshold_used": thresholds}
+        return {"gap_days": float("inf"), "status": "urgent", "threshold_used": thresholds, "triggered_at": None}
 
     gap_days = round((now - last_reading).total_seconds() / 86400.0, 2)
 
@@ -97,4 +98,4 @@ async def run_gap_detector(
         "patient=%s tier=%s gap_days=%.2f status=%s",
         patient_id, risk_tier, gap_days, status,
     )
-    return {"gap_days": gap_days, "status": status, "threshold_used": thresholds}
+    return {"gap_days": gap_days, "status": status, "threshold_used": thresholds, "triggered_at": last_reading}
