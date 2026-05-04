@@ -55,8 +55,8 @@ from app.services.worker.processor import (
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-_DEMO_DATE = date(2026, 5, 5)
-_DEMO_APPT = datetime.combine(_DEMO_DATE, time(9, 30), tzinfo=UTC)
+_DEMO_APPT = datetime.now(UTC) + timedelta(hours=5)
+_DEMO_DATE = _DEMO_APPT.date()
 
 _PATIENT_A = "1091"
 _SHIFT_DAYS = 5654
