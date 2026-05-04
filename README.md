@@ -46,7 +46,7 @@ Most clinical dashboards are read-only EHR viewers. ARIA is an active intelligen
 
 ```
 ╔══════════════════════════════════════════════════════════════════════════╗
-║                        ARIA — Nightly Data Flow                          ║
+║                        ARIA: Nightly Data Flow                           ║
 ╠══════════════════════════════════════════════════════════════════════════╣
 ║                                                                          ║
 ║  Hospital EHR (iEMR)                  Patient PWA (port 3001)            ║
@@ -70,18 +70,18 @@ Most clinical dashboards are read-only EHR viewers. ARIA is an active intelligen
 ║              │   (Supabase)    │  patients · readings · confirmations     ║
 ║              │                 │  alerts · briefings · audit_events       ║
 ║              └────────┬────────┘                                         ║
-║                        │   midnight UTC — all monitoring_active patients  ║
+║                        │   midnight UTC, all monitoring_active patients   ║
 ║                        ▼                                                 ║
 ║  ┌───────────────────────────────────────────────────────────────────┐  ║
-║  │                       LAYER 1 — Rule Engine                        │  ║
+║  │                       LAYER 1: Rule Engine                          │  ║
 ║  │   Gap detector · Therapeutic inertia · Adherence-BP correlation    │  ║
 ║  │   Deterioration detector · Variability detector                    │  ║
-║  │   Pure SQL, no AI, no LLM — must pass before Layer 2 runs         │  ║
+║  │   Pure SQL, no AI, no LLM. Must pass before Layer 2 runs          │  ║
 ║  └───────────────────────────┬───────────────────────────────────────┘  ║
 ║                               │  verified Layer 1 output                 ║
 ║                               ▼                                          ║
 ║  ┌───────────────────────────────────────────────────────────────────┐  ║
-║  │                       LAYER 2 — Risk Scorer                        │  ║
+║  │                       LAYER 2: Risk Scorer                          │  ║
 ║  │   Weighted numeric score 0.0 to 100.0 per patient                  │  ║
 ║  │   Systolic vs baseline · Med change lag · Adherence rate           │  ║
 ║  │   Gap days · Comorbidity severity                                   │  ║
@@ -90,7 +90,7 @@ Most clinical dashboards are read-only EHR viewers. ARIA is an active intelligen
 ║                               │  score stored + confirmed                ║
 ║                               ▼                                          ║
 ║  ┌───────────────────────────────────────────────────────────────────┐  ║
-║  │                       LAYER 3 — LLM Briefing                       │  ║
+║  │                       LAYER 3: LLM Briefing                         │  ║
 ║  │   Anthropic claude-sonnet-4 converts Layer 1 output to             │  ║
 ║  │   3-sentence clinical narrative · Hard guardrails enforced         │  ║
 ║  │   Faithfulness validated before storage · Retry once on failure    │  ║
@@ -98,7 +98,7 @@ Most clinical dashboards are read-only EHR viewers. ARIA is an active intelligen
 ║                               │                                          ║
 ║                               ▼                                          ║
 ║  ┌────────────────────────────────────────────────────────────────┐     ║
-║  │   7:30 AM Scheduler — appointment-day briefing delivery         │     ║
+║  │   7:30 AM Scheduler: appointment-day briefing delivery          │     ║
 ║  │   Pre-visit briefing delivered to clinician dashboard           │     ║
 ║  └───────────────────────────┬────────────────────────────────────┘     ║
 ║                               │                                          ║
@@ -117,7 +117,7 @@ Everything runs via a **background worker polling processing_jobs every 30 secon
 
 ## Three-Layer AI Pipeline
 
-### Layer 1 — Deterministic Rule Engine
+### Layer 1: Deterministic Rule Engine
 
 No black boxes. Pure clinical logic. Runs first, always. Layer 2 and Layer 3 never run until Layer 1 is verified.
 
@@ -140,7 +140,7 @@ No black boxes. Pure clinical logic. Runs first, always. Layer 2 and Layer 3 nev
 - **Drug-class-aware titration windows** suppress inertia for diuretics/beta-blockers (14 days), ACE/ARBs (28 days), amlodipine (56 days)
 - **Cold-start suppression** holds detectors back for 21 days after a patient enrolls
 
-### Layer 2 — AI Risk Scoring
+### Layer 2: AI Risk Scoring
 
 After Layer 1, every patient receives a numeric priority score (0.0 to 100.0).
 
@@ -162,7 +162,7 @@ After Layer 1, every patient receives a numeric priority score (0.0 to 100.0).
 
 Score and `risk_score_computed_at` are stored directly on the `patients` table. The dashboard sorts by `risk_tier` first (High, then Medium, then Low), then by `risk_score DESC` within each tier. A staleness badge appears when the score is older than 26 hours.
 
-### Layer 3 — LLM Clinical Briefing
+### Layer 3: LLM Clinical Briefing
 
 A large language model converts the deterministic Layer 1 payload into a readable 3-sentence clinical briefing. It only runs after Layer 1 is verified.
 
@@ -258,21 +258,21 @@ No download required. Opens in any mobile browser.
 
 ---
 
-## Database Schema — 12 Tables
+## Database Schema (12 Tables)
 
 ```
-patients              — demographics, risk tier, risk score, next appointment
-clinical_context      — one row per patient: medications, problems, labs, vitals, history
-readings              — home BP readings (generated, manual, BLE, clinic)
-medication_confirmations — scheduled doses and tap-confirmation timestamps
-alerts                — gap, inertia, deterioration, adherence, symptom_urgent
-briefings             — Layer 1 payload, Layer 3 LLM summary, prompt hash
-processing_jobs       — background job queue with idempotency key enforced
-audit_events          — immutable log of every clinical action
-alert_feedback        — clinician disposition per alert (agree/disagree)
-gap_explanations      — clinician-logged reason for reading gaps
-calibration_rules     — per-patient detector sensitivity adjustments
-outcome_verifications — 30-day follow-up check after alert dismissal
+patients              : demographics, risk tier, risk score, next appointment
+clinical_context      : one row per patient with medications, problems, labs, vitals, history
+readings              : home BP readings (generated, manual, BLE, clinic)
+medication_confirmations : scheduled doses and tap-confirmation timestamps
+alerts                : gap, inertia, deterioration, adherence, symptom_urgent
+briefings             : Layer 1 payload, Layer 3 LLM summary, prompt hash
+processing_jobs       : background job queue with idempotency key enforced
+audit_events          : immutable log of every clinical action
+alert_feedback        : clinician disposition per alert (agree/disagree)
+gap_explanations      : clinician-logged reason for reading gaps
+calibration_rules     : per-patient detector sensitivity adjustments
+outcome_verifications : 30-day follow-up check after alert dismissal
 ```
 
 Critical indexes: `UNIQUE (patient_id, effective_datetime, source)` on readings prevents duplicate ingestion. `UNIQUE (patient_id, medication_name, scheduled_time)` on confirmations enforces idempotent generation. Dashboard sort uses a `(risk_tier, risk_score DESC)` composite index.
@@ -287,8 +287,8 @@ Critical indexes: `UNIQUE (patient_id, effective_datetime, source)` on readings 
 | **Database** | PostgreSQL (Supabase), asyncpg driver |
 | **Clinician Frontend** | Next.js 14, TypeScript strict, Tailwind CSS, Recharts |
 | **Patient PWA** | Next.js 14, @ducanh2912/next-pwa, standalone display mode |
-| **AI — Layer 3** | Anthropic claude-sonnet-4-20250514 |
-| **AI — Chatbot** | OpenAI gpt-4o-mini |
+| **AI (Layer 3)** | Anthropic claude-sonnet-4-20250514 |
+| **AI (Chatbot)** | OpenAI gpt-4o-mini |
 | **Auth** | JWT with separate clinician and patient secrets |
 | **EHR Integration** | Custom iEMR to FHIR R4 adapter |
 | **Background Jobs** | APScheduler and processing_jobs queue table with 30s poll worker |
@@ -350,7 +350,7 @@ ARIA/
 - Anthropic API key (Layer 3 briefings)
 - OpenAI API key (chatbot)
 
-### 1 — Backend
+### 1. Backend
 
 ```bash
 conda create -n aria python=3.11 && conda activate aria
@@ -366,7 +366,7 @@ python scripts/setup_db.py
 uvicorn app.main:app --reload --port 8000
 ```
 
-### 2 — Clinician Dashboard
+### 2. Clinician Dashboard
 
 ```bash
 cd frontend
@@ -374,7 +374,7 @@ npm install
 npm run dev        # http://localhost:3000
 ```
 
-### 3 — Patient PWA
+### 3. Patient PWA
 
 ```bash
 cd patient-app
@@ -382,7 +382,7 @@ npm install
 npm run dev        # http://localhost:3001
 ```
 
-### 4 — Seed Demo Data
+### 4. Seed Demo Data
 
 ```bash
 python scripts/setup_demo.py
@@ -391,7 +391,7 @@ python scripts/setup_demo.py --verify-only
 # Expected: ALL CHECKS PASSED
 ```
 
-### 5 — Start Background Worker
+### 5. Start Background Worker
 
 ```bash
 python scripts/run_worker.py
@@ -403,10 +403,10 @@ python scripts/run_worker.py
 
 | Patient ID | Name | Scenario |
 |---|---|---|
-| `1091` | John Doe | **Therapeutic inertia** — 65 clinic readings over 5 years, sustained elevated BP, no medication change since 2013 |
-| `DEMO_GAP` | David Patel | **Reading gap** — 82 days of consistent readings, then 12-day silence with urgent gap alert fired on day 9 |
-| `DEMO_ADH` | Sarah Mitchell | **Adherence concern** — 58% medication confirmation rate correlated with 152 mmHg average systolic (Pattern A) |
-| `DEMO_EHR` | Robert Clarke | **EHR-only** — no home monitoring, overdue labs, NSAID and antihypertensive drug interaction flagged |
+| `1091` | John Doe | **Therapeutic inertia:** 65 clinic readings over 5 years with sustained elevated BP and no medication change since 2013 |
+| `DEMO_GAP` | David Patel | **Reading gap:** 82 days of consistent readings followed by a 12-day silence with urgent gap alert fired on day 9 |
+| `DEMO_ADH` | Sarah Mitchell | **Adherence concern:** 58% medication confirmation rate correlated with 152 mmHg average systolic (Pattern A) |
+| `DEMO_EHR` | Robert Clarke | **EHR-only:** no home monitoring, overdue labs, NSAID and antihypertensive drug interaction flagged |
 
 ---
 
@@ -469,7 +469,7 @@ ARIA is built on a foundation designed to scale. The following directions repres
 The current iEMR adapter converts a structured JSON export into FHIR R4. The next step is live bidirectional integration with real EHR systems such as Epic, Cerner, or NHS EMIS using SMART on FHIR OAuth2. This would eliminate the export step entirely and allow ARIA to operate as a continuous passive layer on top of existing clinical infrastructure.
 
 ### Bluetooth Device Integration
-The patient app currently accepts manual BP submissions. Integrating Bluetooth Low Energy support for consumer-grade devices such as Omron and Withings cuffs would allow readings to flow automatically with no manual entry. The backend webhook infrastructure for BLE is already in place — the missing piece is the vendor SDK integration and device pairing flow in the PWA.
+The patient app currently accepts manual BP submissions. Integrating Bluetooth Low Energy support for consumer-grade devices such as Omron and Withings cuffs would allow readings to flow automatically with no manual entry. The backend webhook infrastructure for BLE is already in place. The missing piece is the vendor SDK integration and device pairing flow in the PWA.
 
 ### Expanding Beyond Hypertension
 The three-layer architecture is condition-agnostic. The detectors, risk scorer, and briefing composer could be extended to other chronic conditions such as Type 2 diabetes (HbA1c trending, insulin adherence), heart failure (weight monitoring, fluid retention signals), and COPD (peak flow tracking, exacerbation detection). Each condition would require its own Layer 1 ruleset but would share the same infrastructure.
@@ -494,7 +494,7 @@ Linking ARIA to pharmacy dispensing records would provide an objective signal fo
 
 ---
 
-## Team — Neura Care Nexus
+## Team: Neura Care Nexus
 
 | Name |
 |---|
