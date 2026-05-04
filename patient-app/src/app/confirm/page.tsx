@@ -2,9 +2,9 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
-import { getPendingConfirmations, confirmDoses, downloadIcs } from '@/lib/api'
+import { getPendingConfirmations, confirmDoses, downloadIcs, getPatientProfile } from '@/lib/api'
 import type { PendingConfirmation } from '@/lib/api'
-import { getPatientId, getPatientName, isTokenValid } from '@/lib/auth'
+import { getPatientId, isTokenValid } from '@/lib/auth'
 
 function formatTime(iso: string): string {
   const d = new Date(iso)
@@ -67,8 +67,10 @@ export default function ConfirmPage() {
     if (!isTokenValid()) { router.replace('/'); return }
     const pid = getPatientId()
     setPatientId(pid)
-    setPatientName(getPatientName())
-    if (pid) loadPending(pid)
+    if (pid) {
+      loadPending(pid)
+      getPatientProfile().then(p => setPatientName(p.patient_name)).catch(() => {})
+    }
   }, [router, loadPending])
 
   function toggleAll() {

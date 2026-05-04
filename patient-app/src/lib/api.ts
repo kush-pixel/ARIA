@@ -66,6 +66,15 @@ export interface PendingConfirmation {
   scheduled_time: string
 }
 
+export interface PatientProfile {
+  patient_id: string
+  patient_name: string | null
+}
+
+export async function getPatientProfile(): Promise<PatientProfile> {
+  return apiFetch<PatientProfile>('/api/confirmations/me')
+}
+
 export async function getPendingConfirmations(patientId: string): Promise<PendingConfirmation[]> {
   return apiFetch<PendingConfirmation[]>(`/api/confirmations/pending?patient_id=${patientId}`)
 }
