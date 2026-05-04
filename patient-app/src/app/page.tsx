@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
+import Image from 'next/image'
 import { useRouter } from 'next/navigation'
 import { login } from '@/lib/api'
 import { saveToken, isTokenValid } from '@/lib/auth'
@@ -20,8 +21,8 @@ export default function LoginPage() {
     setError('')
     setLoading(true)
     try {
-      const { access_token } = await login(researchId.trim())
-      saveToken(access_token, researchId.trim())
+      const { access_token, patient_name } = await login(researchId.trim())
+      saveToken(access_token, researchId.trim(), patient_name)
       router.replace('/confirm')
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Login failed'
@@ -35,7 +36,16 @@ export default function LoginPage() {
     <main className="min-h-screen flex items-center justify-center px-4">
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
-          <h1 className="text-2xl font-bold text-blue-700">ARIA</h1>
+          <div className="flex justify-center mb-3">
+            <Image
+              src="/aria-logo.jpg"
+              alt="ARIA"
+              width={120}
+              height={120}
+              className="rounded-2xl"
+              priority
+            />
+          </div>
           <p className="text-gray-500 text-sm mt-1">My Health</p>
         </div>
 
@@ -47,10 +57,9 @@ export default function LoginPage() {
             <input
               id="research-id"
               type="text"
-              inputMode="numeric"
               value={researchId}
               onChange={e => setResearchId(e.target.value)}
-              placeholder="e.g. 1091"
+              placeholder="e.g. DEMO_ADH"
               required
               className="w-full border border-gray-300 rounded-lg px-3 py-2 text-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             />

@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
-import { getPendingConfirmations, confirmDoses, downloadIcs } from '@/lib/api'
+import { getPendingConfirmations, confirmDoses, downloadIcs, getPatientProfile } from '@/lib/api'
 import type { PendingConfirmation } from '@/lib/api'
 import { getPatientId, isTokenValid } from '@/lib/auth'
 
@@ -16,9 +16,30 @@ function isIOS(): boolean {
   return /iPad|iPhone|iPod/.test(navigator.userAgent)
 }
 
+function getGreeting(): string {
+  const hour = new Date().getHours()
+  if (hour < 12) return 'Good morning'
+  if (hour < 17) return 'Good afternoon'
+  return 'Good evening'
+}
+
+const MOTIVATIONAL_MESSAGES = [
+  'Small steps every day lead to big changes over time. You are doing great.',
+  'Every reading you log helps your doctor give you the best possible care.',
+  'Tracking your health is one of the most powerful things you can do for yourself.',
+  'Consistency is the key — and you are showing up. That matters.',
+  'Your doctor is on your team. Every tap you make helps them help you.',
+]
+
+function getDailyMotivation(): string {
+  const dayIndex = new Date().getDate() % MOTIVATIONAL_MESSAGES.length
+  return MOTIVATIONAL_MESSAGES[dayIndex]
+}
+
 export default function ConfirmPage() {
   const router = useRouter()
   const [patientId, setPatientId] = useState<string | null>(null)
+  const [patientName, setPatientName] = useState<string | null>(null)
   const [pending, setPending] = useState<PendingConfirmation[]>([])
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(true)
@@ -46,7 +67,10 @@ export default function ConfirmPage() {
     if (!isTokenValid()) { router.replace('/'); return }
     const pid = getPatientId()
     setPatientId(pid)
-    if (pid) loadPending(pid)
+    if (pid) {
+      loadPending(pid)
+      getPatientProfile().then(p => setPatientName(p.patient_name)).catch(() => {})
+    }
   }, [router, loadPending])
 
   function toggleAll() {
@@ -96,9 +120,24 @@ export default function ConfirmPage() {
 
   return (
     <main className="min-h-screen px-4 py-6 max-w-md mx-auto">
-      {/* Header */}
+      {/* Welcome */}
+      <div className="mb-4">
+        <p className="text-xs text-gray-400 uppercase tracking-wide mb-0.5">ARIA · My Health</p>
+        <h1 className="text-xl font-bold text-gray-900">
+          {getGreeting()}{patientName ? `, ${patientName}` : patientId ? `, Patient ${patientId}` : ''}
+        </h1>
+        <p className="text-sm text-gray-500 mt-0.5">Here is your health summary for today.</p>
+      </div>
+
+      {/* Motivational message */}
+      <div className="mb-6 bg-blue-50 border border-blue-100 rounded-2xl px-5 py-4 text-center">
+        <p className="text-sm text-blue-800 font-medium leading-relaxed">{getDailyMotivation()}</p>
+        <p className="text-xs text-blue-400 mt-2">— Your ARIA health team</p>
+      </div>
+
+      {/* Nav row */}
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-lg font-semibold">Medications</h1>
+        <h2 className="text-base font-semibold text-gray-800">Medications</h2>
         <button onClick={() => router.push('/submit')}
           className="text-sm text-blue-700 font-medium border border-blue-700 rounded-lg px-3 py-1">
           + BP reading
@@ -176,6 +215,7 @@ export default function ConfirmPage() {
             : 'Tap the downloaded file — your Calendar or Google Calendar app will open to import.'}
         </p>
       </section>
+
     </main>
   )
 }

@@ -1,4 +1,12 @@
 ﻿# ARIA v4.3 — Project Status
+<<<<<<< HEAD
+<<<<<<< HEAD
+Last updated: 2026-05-03 by Krishna (Priority Score column first, 3-band color coding red/amber/green, null score shows No data, column reorder)
+Previous: 2026-05-03 by Krishna (search bar wired live, alert disposition dropdown, TierOverrideModal, drug interaction chatbot, active_problems in patient API, worker _start_listener crash fix)
+=======
+Last updated: 2026-05-03 by Kush (scalability fixes + briefing adaptive window — connection pool tuning, midnight recompute stagger, LLM session decoupling, server-side pagination + search, briefing window now matches Layer 1 adaptive window)
+>>>>>>> ad75928 (fixed the adaptive window)
+=======
 Last updated: 2026-05-03 by Kush (logic fixes — variability agenda item always None, ICD-10 code normalization, Pattern B suppression explicit guard; ruff clean)
 Previous: 2026-05-03 by Kush (scalability fixes + briefing adaptive window — connection pool tuning, midnight recompute stagger, LLM session decoupling, server-side pagination + search, briefing window now matches Layer 1 adaptive window)
 >>>>>>> 501e570 (fixed variability agenda always None, ICD-10 code normalisation, Pattern B explicit guard)
@@ -20,7 +28,7 @@ Previous: 2026-04-26 by Yash (AUDIT.md Fixes 25, 58, 61 — severity-weighted co
 
 ---
 
-## off_hours Fix — Stamp from Pattern Onset Not Job Execution — 2026-05-03
+## Logic Fixes — Variability Agenda, ICD-10 Normalisation, Pattern B Guard — 2026-05-03
 
 **Author:** Kush Patel
 **Files changed:** `backend/app/services/pattern_engine/gap_detector.py`, `backend/app/services/pattern_engine/inertia_detector.py`, `backend/app/services/pattern_engine/deterioration_detector.py`, `backend/app/services/pattern_engine/adherence_analyzer.py`, `backend/app/services/worker/processor.py`
@@ -44,6 +52,49 @@ Previous: 2026-04-26 by Yash (AUDIT.md Fixes 25, 58, 61 — severity-weighted co
 
 ## Logic Fixes — Variability Agenda, ICD-10 Normalisation, Pattern B Guard — 2026-05-03
 
+**Author:** Kush Patel
+**Files changed:** `backend/app/services/briefing/composer.py`, `backend/app/services/worker/processor.py`, `backend/app/services/fhir/ingestion.py`, `backend/app/services/pattern_engine/adherence_analyzer.py`
+
+Three logic correctness fixes identified from architecture audit. ruff check passes.
+
+### Fix 1 — Variability agenda item always None (composer.py)
+
+**Problem:** `compose_briefing` tried to source the variability visit-agenda string by scanning the `alerts` list for `alert_type == "variability"`. Two compounding bugs: (a) variability never creates an alert row — `alert_type` in the schema only covers `gap_urgent|gap_briefing|inertia|deterioration|adherence`; (b) even if a row existed, `a.alert_type` would return the literal string `"variability"`, not the human-readable agenda text (e.g. *"High BP variability detected (CV 18%) — consider ABPM referral."*). Result: `variability_agenda_item` was always `None` for every patient, silently suppressing the variability finding from every briefing visit agenda.
+
+**Fix:** Added `from app.services.pattern_engine.variability_detector import run_variability_detector` to composer imports. Replaced the broken alert-scan with a direct `await run_variability_detector(session, patient_id)` call inside `compose_briefing`. The detector is deterministic Layer 1 logic and reuses the same session already open for the briefing queries. `variability_result["visit_agenda_item"]` is the authoritative agenda string.
+
+### Fix 2 — ICD-10 code normalization missing in comorbidity checks (processor.py + ingestion.py)
+
+**Problem:** Two functions matched ICD-10 codes against uppercase prefix constants (`"I50"`, `"G45"`, etc.) using raw `code.startswith()` with no normalization:
+- `processor.py._apply_tier_reclassification`: checks `_COMORBIDITY_BLOCK_PREFIXES` to block demotion to low tier. If a code arrives as `"i50.9"` (lowercase) or `"I50.9"` (dot present is fine, but lowercase isn't), the block silently fails → patient could be incorrectly demoted to low.
+- `ingestion.py._determine_risk_tier`: applies CHF/stroke/TIA auto-override at ingestion time with the same raw `.startswith()`. Same failure mode.
+
+Demo patients are unaffected (FHIR bundles produce uppercase codes), but a non-standard bundle would bypass both safety floors.
+
+**Fix:**
+- `processor.py`: added `norm_codes = [c.upper().replace(".", "").replace("-", "") for c in codes]` before the `any(startswith)` check.
+- `ingestion.py`: normalized each code inline as `code = raw.upper().replace(".", "").replace("-", "")` at the top of the loop. Both functions now match the same normalization pattern used by `threshold_utils._norm()`.
+
+### Fix 3 — Pattern B suppression relies on implicit `float("inf")` guard (adherence_analyzer.py)
+
+**Problem:** CLAUDE.md mandates: *"Suppression must NOT apply when no recent med change."* This was enforced only because `_days_since(None, now)` returns `float("inf")`, making `inf <= titration_window` evaluate to `False`. Correct today, but a fragile implicit invariant — any refactor of `_days_since` that returns a large integer instead of `inf` would silently allow suppression to fire for patients with no medication history, misclassifying Pattern B as "none".
+
+**Fix:** Added an explicit early-return guard in `_check_pattern_b_suppression` immediately after `get_last_med_change_date`:
+```python
+if last_med_date is None:
+    logger.debug("patient=%s pattern_b_suppression: no med change — suppression skipped", patient_id)
+    return ("B", _INTERPRETATIONS["B"])
+```
+The invariant is now self-documenting and refactor-safe. `_days_since` and `titration_window` are only called when a real med change date exists.
+
+---
+
+## Scalability Fixes — Pool Tuning, Midnight Stagger, LLM Decoupling, Server-side Pagination — 2026-05-03
+
+**Author:** Kush Patel
+**Files changed:** `backend/app/db/base.py`, `backend/app/services/worker/scheduler.py`, `backend/app/services/briefing/summarizer.py`, `backend/app/services/worker/processor.py`, `backend/app/services/briefing/composer.py`, `backend/app/api/patients.py`, `frontend/src/lib/types.ts`, `frontend/src/lib/api.ts`, `frontend/src/components/dashboard/PatientList.tsx`
+
+Four structural scalability improvements plus one briefing consistency fix identified from architecture review. Existing tests and demo flow unaffected.
 **Author:** Kush Patel
 **Files changed:** `backend/app/services/briefing/composer.py`, `backend/app/services/worker/processor.py`, `backend/app/services/fhir/ingestion.py`, `backend/app/services/pattern_engine/adherence_analyzer.py`
 
@@ -211,11 +262,11 @@ The frontend recomputed BP average independently using a fixed 28-day window, no
 
 ### Consistent behaviour across visit lifecycle
 
-| State | Briefing API | Dashboard BP Trend |
-|---|---|---|
-| Appointment day | Returns today's briefing | Uses `trend_avg_systolic` from briefing (single source) |
-| Between visits | 404 — no active briefing | `trend_avg_systolic = null` → live 28-day computation |
-| Urgent alert between visits | Returns mini-briefing | Uses mini-briefing's 7-day `trend_avg_systolic` |
+| State                       | Briefing API             | Dashboard BP Trend                                      |
+| --------------------------- | ------------------------ | ------------------------------------------------------- |
+| Appointment day             | Returns today's briefing | Uses `trend_avg_systolic` from briefing (single source) |
+| Between visits              | 404 — no active briefing | `trend_avg_systolic = null` → live 28-day computation   |
+| Urgent alert between visits | Returns mini-briefing    | Uses mini-briefing's 7-day `trend_avg_systolic`         |
 
 ### Pre-existing changes documented (from prior commit `50a2ee2`)
 
@@ -267,13 +318,13 @@ Fix 42 L2 was marked ✓ DONE in AUDIT.md but the "production detectors read rul
 
 All use `_mock_session()` fixture pattern; no real DB connection.
 
-| Test | What it verifies |
-|------|-----------------|
-| `test_calibration_no_recommendation_below_threshold` | 3 dismissals → `GET /admin/calibration-recommendations` returns `[]` |
-| `test_calibration_recommendation_after_4_dismissals` | 4 dismissals → recommendation surfaced with correct `dismissal_count` and `threshold` |
-| `test_approve_calibration_rule_creates_active_rule` | `POST /admin/calibration-rules` returns 201 with `active: true` |
-| `test_outcome_check_scheduled_on_disagree` | `disposition=disagree` → `OutcomeVerification` row with `check_after - dismissed_at == 30 days` |
-| `test_outcome_check_resolves_deterioration_cluster` | `run_outcome_checks()` direct call → `outcome_type = "deterioration_cluster"` when concerning alert exists |
+| Test                                                 | What it verifies                                                                                           |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `test_calibration_no_recommendation_below_threshold` | 3 dismissals → `GET /admin/calibration-recommendations` returns `[]`                                       |
+| `test_calibration_recommendation_after_4_dismissals` | 4 dismissals → recommendation surfaced with correct `dismissal_count` and `threshold`                      |
+| `test_approve_calibration_rule_creates_active_rule`  | `POST /admin/calibration-rules` returns 201 with `active: true`                                            |
+| `test_outcome_check_scheduled_on_disagree`           | `disposition=disagree` → `OutcomeVerification` row with `check_after - dismissed_at == 30 days`            |
+| `test_outcome_check_resolves_deterioration_cluster`  | `run_outcome_checks()` direct call → `outcome_type = "deterioration_cluster"` when concerning alert exists |
 
 **Test run:** 82 tests passing across `test_api.py` + `test_worker.py`; zero regressions in existing worker tests (new calibration query hits same mock → returns empty set → no behaviour change). `ruff check app/` clean.
 
@@ -320,11 +371,11 @@ Full clinical review of all 14 guardrail, 4 certainty, and 5 scope patterns. All
 
 9 tests that were already failing before this session (unrelated to the chatbot fixes above):
 
-| Test file | Issue | Fix |
-|-----------|-------|-----|
-| `test_chat_validator.py` | Imported `check_groundedness`, `check_evidence_consistency` from chat validator — these were removed when the chat validator was narrowed. Tests for those functions also removed. `test_empty_data_fails_when_not_acknowledged` used a clinical answer that now passes the clinical-terms short-circuit — updated to use a non-clinical answer. `test_certainty_blocked_will_improve` tested "will improve" which doesn't match any certainty pattern — updated to "will definitely improve". | Removed stale imports and tests; updated assertions to match current code |
-| `test_chat_agent.py` | `response.evidence` — `ChatResponse` has `data_gaps` not `evidence` (old field name). `test_blocked_response_structure` checked for "can't reliably" — never a real message. | `evidence` → `data_gaps`; assertion updated to match `_BLOCKED_ANSWER_GUARDRAIL` text |
-| `test_phase5_phase7.py` | `_is_off_hours` imported from `processor` — function was moved to `datetime_utils` in an earlier session. | Updated to `from app.utils.datetime_utils import is_off_hours as _is_off_hours` |
+| Test file                | Issue                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Fix                                                                                   |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `test_chat_validator.py` | Imported `check_groundedness`, `check_evidence_consistency` from chat validator — these were removed when the chat validator was narrowed. Tests for those functions also removed. `test_empty_data_fails_when_not_acknowledged` used a clinical answer that now passes the clinical-terms short-circuit — updated to use a non-clinical answer. `test_certainty_blocked_will_improve` tested "will improve" which doesn't match any certainty pattern — updated to "will definitely improve". | Removed stale imports and tests; updated assertions to match current code             |
+| `test_chat_agent.py`     | `response.evidence` — `ChatResponse` has `data_gaps` not `evidence` (old field name). `test_blocked_response_structure` checked for "can't reliably" — never a real message.                                                                                                                                                                                                                                                                                                                   | `evidence` → `data_gaps`; assertion updated to match `_BLOCKED_ANSWER_GUARDRAIL` text |
+| `test_phase5_phase7.py`  | `_is_off_hours` imported from `processor` — function was moved to `datetime_utils` in an earlier session.                                                                                                                                                                                                                                                                                                                                                                                      | Updated to `from app.utils.datetime_utils import is_off_hours as _is_off_hours`       |
 
 **Test run:** 583 tests passing (up from 574 before pre-existing fixes); `ruff check app/` clean.
 
@@ -514,13 +565,13 @@ Phase 2 added `Patient.next_appointment` as a second query (Q1b) to all three de
 ### Shadow mode re-run — 67.6% (11 FN, 1 FP)
 After re-ingesting with Phase 1 adapter changes (including the corrected `last_visit_date`, full `historic_bp_systolic`, `problem_assessments`), shadow mode was re-run against the existing full-timeline synthetic data. Agreement dropped from 94.3% → 67.6% (25/37 labelled, FAILED). All 11 false negatives investigated — none represent ARIA bugs:
 
-| Group | Visits | Root cause |
-|---|---|---|
-| Cold start | 2008-01-21, 2008-01-24 | Only 1–6 readings exist; inertia/deterioration below minimum data threshold. Expected limitation. |
-| Active med adjustment | 2008-01-31, 2008-02-01 | Meds started 2008-01-14/21 (same day as first elevated readings). `last_med_change >= MIN(elevated_datetime)` → inertia correctly suppressed. |
-| BP declining | 2008-02-14, 2008-02-18, 2008-02-28 | Treatment responding: `recent_7d_avg` = 128–136, slope negative. Slope direction check correctly suppresses inertia. Physician concern is longitudinal, not acute. |
-| Same-day med change | 2009-02-26 | Sular restarted at this very visit. `last_med_change (2009-02-26) >= MIN(elevated_datetime)` → inertia suppressed. Intervention just occurred — ARIA silence is clinically appropriate. |
-| avg_sys at threshold | 2011-11-10, 2011-11-21, 2011-12-22 | `avg_systolic` = 132–134 is at/below comorbidity-adjusted patient_threshold (~133). Inertia Condition 1 (`avg_sys >= threshold`) fails; `duration_days` returned as default 0.0. `elevated_count=39` reflects readings individually above threshold but the window average is borderline. Physician concern may reflect clinic reading (144 on Nov 10) not captured in home avg. |
+| Group                 | Visits                             | Root cause                                                                                                                                                                                                                                                                                                                                                                       |
+| --------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cold start            | 2008-01-21, 2008-01-24             | Only 1–6 readings exist; inertia/deterioration below minimum data threshold. Expected limitation.                                                                                                                                                                                                                                                                                |
+| Active med adjustment | 2008-01-31, 2008-02-01             | Meds started 2008-01-14/21 (same day as first elevated readings). `last_med_change >= MIN(elevated_datetime)` → inertia correctly suppressed.                                                                                                                                                                                                                                    |
+| BP declining          | 2008-02-14, 2008-02-18, 2008-02-28 | Treatment responding: `recent_7d_avg` = 128–136, slope negative. Slope direction check correctly suppresses inertia. Physician concern is longitudinal, not acute.                                                                                                                                                                                                               |
+| Same-day med change   | 2009-02-26                         | Sular restarted at this very visit. `last_med_change (2009-02-26) >= MIN(elevated_datetime)` → inertia suppressed. Intervention just occurred — ARIA silence is clinically appropriate.                                                                                                                                                                                          |
+| avg_sys at threshold  | 2011-11-10, 2011-11-21, 2011-12-22 | `avg_systolic` = 132–134 is at/below comorbidity-adjusted patient_threshold (~133). Inertia Condition 1 (`avg_sys >= threshold`) fails; `duration_days` returned as default 0.0. `elevated_count=39` reflects readings individually above threshold but the window average is borderline. Physician concern may reflect clinic reading (144 on Nov 10) not captured in home avg. |
 
 The drop from 94.3% to 67.6% is explained by the Phase 1 ingestion changes: corrected `historic_bp_systolic` (all 65 clinic readings now included) lowered `median(historic_bp_systolic)` and hence `patient_threshold`, and the new `last_visit_date` changed adaptive window lengths — both of which affect whether inertia/deterioration fire at early 2008 visits. The prior 94.3% result was computed against an older, incomplete `historic_bp_systolic` array.
 
@@ -743,28 +794,28 @@ iEMR JSON → [DONE] FHIR Bundle → [DONE] PostgreSQL tables → [DONE] Synthet
 
 ## API Endpoints Status
 
-| Endpoint | Status | Notes |
-|---|---|---|
-| GET /api/patients | DONE | |
-| GET /api/patients/{id} | DONE | |
-| GET /api/briefings/{patient_id} | DONE | marks read_at, writes audit |
-| GET /api/readings?patient_id= | DONE | 28-day window |
-| POST /api/readings | DONE | manual entry |
-| GET /api/alerts | DONE | unacknowledged only; optional ?patient_id= filter (Fix 24) |
-| POST /api/alerts/{id}/acknowledge | DONE | writes audit; optional disposition payload writes alert_feedback (Fix 42 L1); disagree → schedules outcome verification |
-| GET /api/adherence/{patient_id} | DONE | per-medication breakdown |
-| POST /api/ingest | DONE | validates then ingests |
-| POST /api/admin/trigger-scheduler | DONE | DEMO_MODE guard |
-| GET /api/shadow-mode/results | DONE | serves pre-computed JSON results file |
-| POST /api/ble-webhook | DONE | BLE device readings, source=ble_auto, idempotent (Fix 44) |
-| GET /api/gap-explanations | DONE | list explanations for patient (Fix 41) |
-| POST /api/gap-explanations | DONE | record gap explanation (Fix 41) |
-| DELETE /api/gap-explanations/{id} | DONE | remove explanation (Fix 41) |
-| GET /api/admin/calibration-recommendations | DONE | 4+ dismissal pairs (Fix 42 L2) |
-| POST /api/admin/calibration-rules | DONE | approve calibration rule (Fix 42 L2) |
-| GET /api/admin/outcome-verifications | DONE | due retrospective prompts (Fix 42 L3) |
-| POST /api/admin/outcome-verifications/{id}/respond | DONE | clinician response (Fix 42 L3) |
-| GET /health | DONE | |
+| Endpoint                                           | Status | Notes                                                                                                                   |
+| -------------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------- |
+| GET /api/patients                                  | DONE   |                                                                                                                         |
+| GET /api/patients/{id}                             | DONE   |                                                                                                                         |
+| GET /api/briefings/{patient_id}                    | DONE   | marks read_at, writes audit                                                                                             |
+| GET /api/readings?patient_id=                      | DONE   | 28-day window                                                                                                           |
+| POST /api/readings                                 | DONE   | manual entry                                                                                                            |
+| GET /api/alerts                                    | DONE   | unacknowledged only; optional ?patient_id= filter (Fix 24)                                                              |
+| POST /api/alerts/{id}/acknowledge                  | DONE   | writes audit; optional disposition payload writes alert_feedback (Fix 42 L1); disagree → schedules outcome verification |
+| GET /api/adherence/{patient_id}                    | DONE   | per-medication breakdown                                                                                                |
+| POST /api/ingest                                   | DONE   | validates then ingests                                                                                                  |
+| POST /api/admin/trigger-scheduler                  | DONE   | DEMO_MODE guard                                                                                                         |
+| GET /api/shadow-mode/results                       | DONE   | serves pre-computed JSON results file                                                                                   |
+| POST /api/ble-webhook                              | DONE   | BLE device readings, source=ble_auto, idempotent (Fix 44)                                                               |
+| GET /api/gap-explanations                          | DONE   | list explanations for patient (Fix 41)                                                                                  |
+| POST /api/gap-explanations                         | DONE   | record gap explanation (Fix 41)                                                                                         |
+| DELETE /api/gap-explanations/{id}                  | DONE   | remove explanation (Fix 41)                                                                                             |
+| GET /api/admin/calibration-recommendations         | DONE   | 4+ dismissal pairs (Fix 42 L2)                                                                                          |
+| POST /api/admin/calibration-rules                  | DONE   | approve calibration rule (Fix 42 L2)                                                                                    |
+| GET /api/admin/outcome-verifications               | DONE   | due retrospective prompts (Fix 42 L3)                                                                                   |
+| POST /api/admin/outcome-verifications/{id}/respond | DONE   | clinician response (Fix 42 L3)                                                                                          |
+| GET /health                                        | DONE   |                                                                                                                         |
 
 ---
 

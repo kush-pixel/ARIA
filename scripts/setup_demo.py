@@ -69,18 +69,20 @@ _DEMO_PATIENTS = ["DEMO_GAP", "DEMO_ADH", "DEMO_EHR"]
 _ALL_PATIENTS = [_PATIENT_A] + _DEMO_PATIENTS
 
 # Hardcoded adherence pattern for DEMO_ADH — deterministic across every run.
-# Day indices 0-27 (Apr 7 = 0, May 4 = 27).  16 confirmed = 57.1% ≈ 58%.
-# Structured as streaks: 3 good, 1 miss, 2 good, 2 miss, 3 good, 1 miss,
-# 1 good, 2 miss, 3 good, 1 miss, 1 good, 2 miss, 1 good, 2 miss, 1 good.
+# Day indices 0-27 (day 0 = today minus 27 days, day 27 = today).
+# 16 confirmed = 57.1% ≈ 58%.  Day 27 (today) is intentionally absent so the
+# patient app always shows pending medications on demo day.
+# Streaks: 3 good, 1 miss, 2 good, 2 miss, 3 good, 1 miss,
+#          1 good, 2 miss, 3 good, 1 miss, 1 good, 2 miss, 1 good, 2 miss, 1 good.
 _ADH_CONFIRMED_DAYS: frozenset[int] = frozenset({
-    0, 1, 2,          # Apr 7-9
-    4, 5,             # Apr 11-12
-    8, 9, 10,         # Apr 15-17
-    12,               # Apr 19
-    15, 16, 17,       # Apr 22-24
-    20,               # Apr 27
-    22, 23,           # Apr 29-30
-    26,               # May 3
+    0, 1, 2,
+    4, 5,
+    8, 9, 10,
+    12,
+    15, 16, 17,
+    20,
+    22, 23,
+    26,
 })
 
 # ── Reading generation helpers ─────────────────────────────────────────────────
@@ -164,11 +166,11 @@ def _gen_demo_gap_readings() -> list[Reading]:
 
 
 def _gen_demo_adh_readings() -> list[Reading]:
-    """28 days of morning-only readings Apr 7 – May 4, average ~152 mmHg."""
+    """28 days of morning-only readings ending today, average ~152 mmHg."""
     random.seed(99)
     rows: list[Reading] = []
 
-    start_date = date(2026, 4, 7)
+    start_date = date.today() - timedelta(days=27)
 
     for day_idx in range(28):
         d = start_date + timedelta(days=day_idx)
@@ -193,14 +195,18 @@ def _gen_demo_adh_readings() -> list[Reading]:
 
 
 def _gen_demo_adh_confirmations() -> list[MedicationConfirmation]:
-    """2 medications × 28 days at ~58% adherence with realistic streak pattern."""
+    """2 medications × 28 days at ~58% adherence with realistic streak pattern.
+
+    Window ends today so day 27 (today) is always unconfirmed — the patient
+    app will always show pending medications regardless of when the demo runs.
+    """
     random.seed(55)
     rows: list[MedicationConfirmation] = []
     meds = [
         ("amlodipine 5mg", "17767"),
         ("lisinopril 10mg", "29046"),
     ]
-    start_date = date(2026, 4, 7)
+    start_date = date.today() - timedelta(days=27)
 
     for med_name, rxnorm in meds:
         for day_idx in range(28):
