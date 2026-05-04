@@ -509,6 +509,7 @@ Linking ARIA to pharmacy dispensing records would provide an objective signal fo
 ## Demo
 
 Demo Video: https://youtu.be/Dnuikyftd-k
+
 Aria Ai video: https://youtu.be/ZyLbQzBVr6g
 
 **Illinois Institute of Technology · CS 595 · Spring 2026**
