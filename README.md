@@ -3,7 +3,7 @@
 <img src="frontend/public/ARIA_LIGHT LOGO.jpg" alt="ARIA Logo" width="150" style="border-radius: 20px;" />
 
 # ARIA
-### Adaptive Real-time Intelligence Architecture
+### Adherence Risk Intelligence Agent
 
 <p>
   <img src="https://img.shields.io/badge/Python-3.11-3776ab?style=for-the-badge&logo=python&logoColor=white" />
