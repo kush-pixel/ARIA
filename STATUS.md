@@ -1,5 +1,6 @@
 ﻿# ARIA v4.3 — Project Status
-Last updated: 2026-05-03 by Krishna (Priority Score column first, 3-band color coding red/amber/green, null score shows No data, column reorder)
+Last updated: 2026-05-04 by Sahil (Patient app — welcome message + motivational footer on confirm dashboard)
+Previous: 2026-05-03 by Krishna (Priority Score column first, 3-band color coding red/amber/green, null score shows No data, column reorder)
 Previous: 2026-05-03 by Krishna (search bar wired live, alert disposition dropdown, TierOverrideModal, drug interaction chatbot, active_problems in patient API, worker _start_listener crash fix)
 Previous: 2026-05-02 by Kush (demo day prep — Layer 3 LLM validation hardened, setup_demo.py ALL CHECKS PASSED, alert inbox patient names, confirmation timeshift fix)
 Previous: 2026-05-02 by Kush (patient panel + briefing lifecycle fixes — BP Trend single source of truth via trend_avg_systolic, briefing API post-visit filter, 5 hardcoded value fixes, ruff clean)
@@ -16,6 +17,27 @@ Previous: 2026-04-27 by Kush (Phase 1 + Phase 8 — AUDIT.md Fixes 6,7,8,9,12,16
 Previous: 2026-04-27 by Nesh (Phase 4 complete — Fixes 10, 21, 40, 46, 47, 60 implemented; 428 unit tests passing, ruff clean)
 Previous: 2026-04-27 by Sahil (Phase 5 complete + Phase 7 complete except Fix 43; 426 unit tests passing, ruff clean)
 Previous: 2026-04-26 by Yash (AUDIT.md Fixes 25, 58, 61 — severity-weighted comorbidity, adaptive gap/inertia normalization, risk_score_computed_at staleness indicator)
+
+---
+
+## Patient App — Welcome Message + Motivational Footer — 2026-05-04
+
+**Author:** Sahil Khalsa
+**Files changed:** `patient-app/src/app/confirm/page.tsx`
+
+### Changes
+
+**Welcome header** (top of confirm/dashboard page, shown immediately after login):
+- "ARIA · My Health" label in small caps
+- Time-aware greeting: "Good morning / afternoon / evening, Patient {id}"
+- Subtitle: "Here is your health summary for today."
+
+**Motivational footer** (blue card at bottom of page):
+- Rotates through 5 messages, one per day (deterministic day-of-month modulo — consistent all day, no flicker on re-render)
+- Signed "— Your ARIA health team"
+- Styled: `bg-blue-50` card, `text-blue-800` message, `text-blue-400` signature
+
+**No backend changes.** Patient ID sourced from `localStorage` via existing `getPatientId()`. Greeting computed client-side from `new Date().getHours()`.
 
 ---
 
