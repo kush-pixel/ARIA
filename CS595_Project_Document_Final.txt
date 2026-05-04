@@ -1,0 +1,1008 @@
+================================================================================
+CS595 2026 - Project Information Document
+ARIA - Adherence Risk Intelligence Agent
+================================================================================
+
+
+1. PROJECT DEFINITION
+
+Project Title: ARIA - Adherence Risk Intelligence Agent
+
+Author(s): Krishna Patel, Kush Patel, Sahilsingh Khalsa, Nesh Rochwani,
+           Prakriti Sharma, Yash Sharma
+
+Team Name: NeuraCare Nexus
+
+LOF Pillar: [X] Data Analysis & Population Health
+
+Last Updated: May 3, 2026
+
+
+================================================================================
+2. INTRODUCTION
+================================================================================
+
+2a. Problem Description
+
+A general practitioner managing roughly 1,800 hypertensive patients gets about
+8 minutes per consultation. When a patient walks in, the GP typically has access
+to a single clinic blood pressure reading from three months ago, a static
+medication list from the last visit, and no structured record of what happened
+in between. Home readings, missed doses, worsening trends, and drug interactions
+introduced after the last visit are all invisible until the patient arrives.
+
+This gap creates two compounding problems in hypertension management.
+
+The first is therapeutic inertia. Estimates suggest it contributes to 40 to 80
+percent of uncontrolled hypertension cases. The GP sees persistently elevated
+blood pressure but makes no medication adjustment - not because they are unaware
+of the problem in general, but because they lack structured evidence that the
+current regimen is failing for this specific patient at this specific point in
+time. Without a clear picture of the home reading trend and whether medications
+have been taken consistently, the GP has limited grounds to act.
+
+The second is the inability to distinguish between two clinically different
+patients who look identical on paper. Patient A has poorly controlled blood
+pressure because they are not taking their medications reliably. Patient B has
+poorly controlled blood pressure despite taking their medications consistently.
+These two situations call for completely different responses. The first suggests
+a behavioral conversation about adherence barriers. The second indicates that
+the treatment itself may need to be reconsidered. Without data connecting
+adherence behavior to blood pressure trajectory, the GP cannot tell which
+patient they are dealing with.
+
+There is also a drug interaction blind spot. A patient who added an NSAID such
+as Voltaren for knee pain since their last hypertension review may now be in a
+triple whammy drug interaction with their ACE inhibitor and diuretic. Without
+a structured check at each encounter, this combination can persist unnoticed
+across visits.
+
+ARIA addresses all three of these problems by generating a structured pre-visit
+clinical intelligence briefing at 7:30 AM on appointment day - before the
+patient walks in. The GP receives a prioritized summary of what happened between
+visits, with drug interaction flags, adherence signals, blood pressure trend
+analysis, and a structured visit agenda - all derived from home monitoring data
+and the patient's EHR record.
+
+
+2b. Purpose
+
+ARIA is a between-visit clinical intelligence platform for hypertension
+management at general practice scale. It does four things:
+
+1. Ingests structured patient EHR data via FHIR R4 Bundle from the clinic's
+   iEMR system.
+
+2. Monitors home blood pressure and medication adherence via the CuffLink
+   patient app.
+
+3. Analyzes this data through a three-layer AI pipeline - deterministic rules,
+   weighted risk scoring, and LLM narrative - plus a deterministic drug
+   interaction detector.
+
+4. Delivers a prioritized pre-visit clinical briefing, sorted by patient
+   urgency, so the GP knows exactly what to discuss in those 8 minutes.
+
+Goals and objectives:
+
+- Detect reading gaps before they become clinical gaps. A High Risk patient
+  with CHF who stops measuring at home is flagged after a single missed day.
+
+- Identify therapeutic inertia. Flag patients whose blood pressure has remained
+  persistently elevated above their adaptive personal threshold while their
+  medication regimen has been unchanged for the duration of the window.
+
+- Surface adherence concerns. Distinguish patients with poor adherence from
+  patients who are adherent but not responding to treatment. These two groups
+  require different clinical conversations.
+
+- Detect deterioration. Identify patients whose blood pressure is trending
+  upward, including sudden step-change rises, not just gradual slopes.
+
+- Check drug interactions. Run four deterministic rules against the current
+  medication list at every briefing generation, with severity escalation when
+  relevant comorbidities are present.
+
+- Score and prioritize patients. Compute a weighted numeric risk score
+  (0.0-100.0) for every monitoring-active patient and sort the dashboard by
+  tier first, then score within each tier.
+
+- Generate a readable briefing. Convert the deterministic briefing payload into
+  a 3-sentence clinician-readable summary using an LLM with 11 validation
+  checks before any output reaches the UI.
+
+- Validate against physician clinical judgment. Run shadow mode evaluation
+  against the physician's own historical HTN concern assessments from the iEMR
+  dataset to measure how well ARIA's alert logic aligns with clinical ground
+  truth.
+
+
+2c. Scope
+
+Included in Scope
+
+Disease Focus: Hypertension as the sole disease module. The system is
+architected to support additional disease modules, but no other disease is
+implemented.
+
+EHR Ingestion: FHIR R4 Bundle import from the iEMR dataset. The adapter
+converts iEMR JSON to FHIR resources. The ingestion layer only sees FHIR
+resources - it has no awareness of the source EHR format.
+
+Three-Layer AI Pipeline:
+  - Layer 1: Five deterministic detectors - gap detection, therapeutic inertia,
+    adherence-BP correlation, deterioration, and variability detection.
+  - Layer 2: Weighted risk scoring using five clinical signals (systolic vs
+    personal baseline, medication inertia, inverted adherence, reading gap, and
+    comorbidity severity). Output is a 0.0-100.0 score stored on the patients
+    table.
+  - Layer 3: LLM narrative generation. A 3-sentence readable summary generated
+    after the deterministic briefing is complete and validated, with 11
+    checks before any output is stored.
+
+Drug Interaction Detection: Four deterministic rules run at every briefing
+generation. No LLM is involved. Severity escalates based on active
+comorbidities.
+
+Risk Tier System: Three-tier classification (High/Medium/Low) with immovable
+ingestion-time overrides for CHF, Stroke, and TIA, nightly algorithmic
+reclassification with hysteresis, and a clinician manual override endpoint.
+
+Clinician Dashboard: Patient list sorted by tier then risk score, individual
+patient briefing pages, alert inbox with escalation and calibration suppression,
+and a clinical chatbot embedded in the briefing page.
+
+Patient PWA (CuffLink): An installable Progressive Web App for home BP
+submission and medication confirmation. JWT authentication with a separate
+patient secret from the clinician secret.
+
+Synthetic Data Engine: Generates clinically realistic home BP readings and
+medication confirmation records interpolated from clinic anchor points with
+peer-reviewed variance parameters.
+
+Shadow Mode Validation: Offline evaluation that replays the alert engine at
+each historical clinic visit using only data available before that visit, then
+compares ARIA's output against the physician's recorded HTN concern assessment
+from the iEMR data.
+
+Audit Logging: Immutable audit_events table capturing bundle imports, reading
+ingestion, briefing views, alert acknowledgments, LLM validation attempts, and
+tier reclassification events.
+
+Background Processing: APScheduler-driven 7:30 AM briefing generation for
+patients with appointments, midnight pattern recompute sweep for all
+monitoring-active patients, and a 30-second poll-based job worker.
+
+
+Excluded from Scope
+
+- OpenMRS integration (identified as a stretch goal in the original project
+  plan; not implemented)
+- BLE Bluetooth device integration (GATT 0x1810 - infrastructure partially
+  present as a webhook endpoint, but no physical device pairing)
+- Real-time pharmacy data feeds or electronic prescription access
+- Wearable, CGM, or IoT device integration
+- Machine learning models for prediction or adaptive threshold learning
+- Type 2 Diabetes extension module
+- Personalized per-patient baseline modeling using ML
+- Full production EHR integration beyond the iEMR prototype environment
+- HIPAA-compliant production hardening or enterprise security infrastructure
+- Autonomous clinical decision-making
+- Multi-patient shadow mode validation (currently validated on patient 1091 only)
+- Live physician-AI comparison UI showing match/partial match/mismatch alongside
+  iEMR physician judgments (validation runs offline via shadow mode script)
+- Structured clinician agreement capture panel in the dashboard UI (individual
+  alert dispositions are supported; the three-input structured comparison panel
+  from the original proposal was not built)
+
+
+2d. Audience
+
+Primary Users - Clinicians (Physicians, Nurse Practitioners, Cardiologists,
+Internists, Care Managers)
+
+These are the users ARIA is built for. They manage large hypertension panels
+under time pressure - roughly 8 minutes per consultation - with limited
+visibility into what happened between appointments. They are comfortable with
+clinical summaries but appropriately skeptical of unexplained AI outputs.
+They need to see what data drove each finding, not just a risk score. They
+also need a fast way to override the system when they have clinical context
+that ARIA does not.
+
+Secondary Users - Population Health Managers and Care Coordinators
+
+Users who monitor patient populations at the panel level rather than the
+individual patient level. They care about which patient segments are most at
+risk and where attention is needed at scale. The tier-filtered dashboard view
+and alert inbox serve this audience.
+
+Tertiary Users - Health Informatics Researchers and Students
+
+The prototype demonstrates a complete AI decision support pipeline including
+FHIR-native EHR ingestion, multi-signal deterministic analysis, constrained
+LLM generation, and physician-validated shadow mode evaluation against real
+clinical data. This audience evaluates the system for technical rigor and
+clinical validity methodology.
+
+
+2e. Overview
+
+ARIA is a clinical intelligence platform that sits between EHR visits. It
+consists of five integrated components:
+
+1. EHR Integration - The iEMR adapter converts raw iEMR JSON to FHIR R4
+   Bundle format. The ingestion layer validates the bundle, populates 12
+   database tables, and triggers ingestion-time risk tier overrides for
+   patients with CHF, Stroke, or TIA in their problem list.
+
+2. Synthetic Data Engine - Generates home BP readings and medication
+   confirmations across the patient's full care history by interpolating
+   between clinic anchor points. Day-to-day systolic SD is 8-12 mmHg,
+   morning readings are 5-10 mmHg higher than evening, device outage periods
+   appear as absent rows, and a white-coat dip appears in the 3-5 days before
+   each appointment.
+
+3. Three-Layer AI Pipeline - Layer 1 runs five deterministic detectors and
+   fires alerts. Layer 2 computes a weighted numeric risk score. Layer 3
+   converts the deterministic briefing JSON into a 3-sentence readable summary
+   after 11 validation checks pass.
+
+4. Clinician Dashboard - Patient list sorted by risk urgency, individual
+   briefing pages with drug interactions and visit agenda, alert inbox with
+   escalation and calibration suppression, and an embedded clinical chatbot
+   (Ask ARIA).
+
+5. Patient PWA (CuffLink) - A Progressive Web App at port 3001 where
+   patients submit home BP readings and confirm medication doses. Patients
+   never see their own clinical interpretation, risk tier, or risk score.
+
+All clinical outputs are framed as decision support only. The system enforces
+clinical language constraints at both the deterministic layer and the LLM
+validation layer. "Possible adherence concern" is used instead of
+"non-adherent." "Treatment review warranted" is used instead of "medication
+failure." No dose-change recommendations are ever generated.
+
+
+2f. Glossary / Terminology
+
+FHIR R4 - HL7 Fast Healthcare Interoperability Resources version 4. The
+standard format used to represent and exchange healthcare data. ARIA uses FHIR
+R4 Bundle resources as the interchange format between the iEMR adapter and the
+ingestion layer.
+
+iEMR - The de-identified electronic medical record dataset provided by
+Leap of Faith Technologies. Contains real longitudinal clinical data from
+actual patient visits, including BP readings, medication history, encounter
+dates, and physician-recorded HTN concern assessments per visit.
+
+Therapeutic Inertia - The failure to intensify or adjust treatment when a
+patient's blood pressure remains persistently above their clinical target
+despite an unchanged medication regimen. Estimated to contribute to 40-80
+percent of uncontrolled hypertension cases.
+
+Layer 1 / Layer 2 / Layer 3 - The three sequential stages of ARIA's AI
+pipeline. Layer 1 is deterministic rule-based detection. Layer 2 is weighted
+numeric risk scoring. Layer 3 is LLM narrative generation. Layers run in
+strict order; Layer 3 never runs before Layer 1 is complete.
+
+Risk Tier - The categorical patient classification: High, Medium, or Low.
+Controls primary sort order on the dashboard. Set at ingestion for patients
+with CHF, Stroke, or TIA (immovable floor); otherwise set algorithmically by
+the nightly reclassification job or manually by the clinician.
+
+Risk Score - A numeric priority score from 0.0 to 100.0 computed by Layer 2.
+Controls sort order within each tier. Computed from five weighted signals:
+systolic vs personal baseline (30%), medication inertia (25%), inverted
+adherence (20%), reading gap (15%), comorbidity severity (10%).
+
+Adaptive Window - The detection window used by all Layer 1 detectors and Layer
+2 scoring. Calculated as the interval between the patient's last visit date and
+next appointment, bounded between 14 and 90 days. Falls back to 28 days when
+appointment data is unavailable.
+
+Patient-Adaptive Threshold - The systolic blood pressure threshold used by the
+inertia and deterioration detectors for each individual patient. Calculated as
+max(130, stable_baseline_mean + 1.5 * SD) capped at 145 mmHg. Adjusted down
+7 mmHg for patients with CHF, Stroke, or TIA.
+
+White-Coat Dip - The observed drop in home BP readings in the days before a
+clinical appointment. The detectors exclude readings within 5 days of the next
+appointment to prevent this dip from masking legitimate inertia or
+deterioration flags.
+
+Drug Interaction Detector - A deterministic rule checker that runs four
+interaction rules against the patient's current medication list at every
+briefing generation. No LLM is involved. Four rules: NSAID + antihypertensive,
+triple whammy (NSAID + ACE/ARB + diuretic), K-sparing diuretic + ACE/ARB, and
+beta-blocker + non-DHP calcium channel blocker.
+
+Shadow Mode - The offline validation system that replays ARIA's alert engine at
+each historical clinic visit using only data available before that visit, then
+compares the output against the physician's recorded HTN concern assessment
+(PROBLEM_STATUS2_FLAG: 3=stable, 2=concerned, 1=urgent).
+
+CuffLink - The patient-facing app and brand name for ARIA's home monitoring
+layer. A Progressive Web App (Next.js 14) installable on iOS, Android, and
+desktop.
+
+Cold-Start Suppression - When a patient has been enrolled for fewer than 21
+days, the inertia, deterioration, and adherence detectors are suppressed. The
+gap detector still runs. This prevents false positives from insufficient data.
+
+
+2g. Skills Needed
+
+- Python (FastAPI, SQLAlchemy async, Pydantic v2, pytest)
+- PostgreSQL and relational database design (12 tables, indexes, migrations)
+- TypeScript and Next.js 14 (strict mode, Tailwind CSS, recharts)
+- FHIR R4 standard and healthcare data formats
+- Clinical informatics concepts (therapeutic inertia, adherence, hypertension
+  management thresholds)
+- LLM API usage (Anthropic claude-sonnet-4-20250514) and prompt validation
+- Background job processing (APScheduler, async job queues)
+- Progressive Web App development
+- JWT authentication patterns
+- Statistical signal processing (rolling averages, linear slope computation,
+  coefficient of variation, Beta distribution for synthetic data)
+- Supabase / cloud PostgreSQL deployment
+
+
+================================================================================
+3. SYSTEM OVERVIEW
+================================================================================
+
+3a. Architecture
+
+ARIA follows a layered architecture with a clear separation between data
+ingestion, analysis, presentation, and patient monitoring.
+
+EHR Ingestion Layer
+  iEMR JSON --> Adapter (adapter.py) --> FHIR R4 Bundle
+  --> Ingestion (ingestion.py) --> 12 PostgreSQL tables
+  --> Ingestion-time auto-overrides (CHF/Stroke/TIA --> High Risk)
+
+Analysis Pipeline (Background Worker)
+  Queued job (processing_jobs) --> 30-second poll worker
+  --> Layer 1: 5 deterministic detectors (gap, inertia, adherence,
+      deterioration, variability)
+  --> Layer 2: Weighted risk score (0.0-100.0) stored on patients table
+  --> Nightly tier reclassification with hysteresis
+
+Briefing Generation (APScheduler at 7:30 AM)
+  Briefing job queued for appointment-day patients
+  --> Drug interaction check (4 rules, deterministic)
+  --> Briefing payload composed and stored
+  --> Layer 3: LLM summary generated and validated (11 checks)
+  --> Briefing written to database
+
+Clinician Dashboard (Next.js 14, port 3000)
+  GET /api/patients --> patients sorted by tier, then risk score
+  GET /api/briefings/{id} --> most-recent active briefing
+  GET /api/alerts --> active unacknowledged alerts
+  POST /api/chat --> Ask ARIA chatbot
+
+Patient PWA (Next.js 14, port 3001)
+  POST /api/readings --> home BP submission
+  POST /api/confirmations/confirm --> medication confirmation
+  GET /api/confirmations/pending --> upcoming doses
+
+Backend: FastAPI at port 8000. All routes are async. No operations run in
+the HTTP request path that are not required for that request.
+
+Database: PostgreSQL via Supabase. 12 tables with a full index set including
+a unique idempotency index on processing_jobs, a unique reading deduplication
+index (patient, datetime, source), and a unique confirmation deduplication index
+(patient, medication, scheduled time).
+
+
+3b. Technologies Used
+
+Backend:
+  Python 3.11
+  FastAPI
+  SQLAlchemy 2.0 (async only - session.query() is never used)
+  Pydantic v2 (SettingsConfigDict pattern)
+  asyncpg (PostgreSQL driver)
+  APScheduler (7:30 AM and midnight scheduled jobs)
+  python-jose (JWT)
+  ruff (linting and formatting)
+
+Database:
+  PostgreSQL via Supabase
+  asyncpg connection driver
+
+AI:
+  Anthropic claude-sonnet-4-20250514 (Layer 3 and chatbot - architecture spec)
+  OpenAI gpt-4o-mini (currently used in demo deployment - one-line reversion)
+
+Frontend:
+  Next.js 14 (TypeScript strict mode)
+  Tailwind CSS
+  recharts (BP sparklines, trend charts)
+  @ducanh2912/next-pwa (patient app installable PWA)
+
+Testing:
+  pytest with fixture-based unit tests
+  601 unit tests (ruff check clean)
+
+Version Control:
+  Git (branch: nesh)
+
+
+3c. Dependencies
+
+External Services:
+  Supabase - Managed PostgreSQL hosting and connection pooling
+  Anthropic API - Layer 3 LLM narrative and chatbot
+  OpenAI API - Current demo substitute for Layer 3 (gpt-4o-mini)
+
+Data Dependencies:
+  iEMR dataset (Leap of Faith Technologies / Dr. Rad) - de-identified
+  longitudinal patient records including clinic BP readings, medication history,
+  encounter dates, and physician HTN concern assessments per visit
+
+Internal Dependencies:
+  The analysis pipeline has strict ordering. Layer 1 must complete before
+  Layer 2 runs. Layer 3 never runs before Layer 1 output is stored and verified.
+  Synthetic data generation depends on clinical_context rows being populated
+  first (EHR ingestion must precede generation).
+
+
+3d. Hardware and Software Requirements
+
+Development Environment:
+  macOS or Linux (tested on macOS 25.4.0)
+  Python 3.11 via Conda (environment: aria)
+  Node.js (for Next.js frontend build)
+  PostgreSQL client (psql or similar for setup verification)
+
+Runtime:
+  Backend: uvicorn app.main:app --reload --port 8000 (from backend/)
+  Frontend: npm run dev (port 3000)
+  Patient PWA: npm run dev (port 3001)
+  Background worker: python scripts/run_worker.py
+  Scheduler: python scripts/run_scheduler.py
+
+Accounts and Credentials:
+  Supabase account with project and DATABASE_URL configured in backend/.env
+  Anthropic API key in backend/.env
+  JWT secrets (clinician and patient, separate) in backend/.env
+
+No special hardware is required for development. All compute runs locally.
+A real deployment would require a persistent server for the background worker
+and scheduler, but the prototype runs entirely on a development machine.
+
+
+3e. Data Description and Sources
+
+Primary Data - iEMR Dataset (Leap of Faith Technologies / Dr. Rad)
+  De-identified longitudinal clinical records from real patient visits.
+  Demo patient 1091: 124 clinic visits over 11 years (2002-2015), 65 in-clinic
+  BP readings (mean 133.8 mmHg, SD 16.2 mmHg), 14 active medications including
+  a triple whammy interaction, and 17 coded problems (CHF I50.9, T2DM E11,
+  CAD I25, HTN I10, and others).
+
+Synthetic Home Reading Data
+  Generated by reading_generator.py for each patient. Interpolates linearly
+  between consecutive clinic BP anchor points with Gaussian noise. Day-to-day
+  systolic SD is 8-12 mmHg (never flat). For patient 1091, the generator
+  produces 1,800+ home readings across the 2008-2015 period. Medication
+  confirmations are generated separately using a Beta distribution
+  (alpha=6.5, beta=0.65, mean ~91%) per medication per inter-visit interval.
+
+Demo Patient Set (4 patients)
+  Patient A (1091) - Therapeutic inertia + triple whammy drug interaction.
+    CHF auto-override. High Risk.
+  Patient B (DEMO_EHR) - EHR-only patient, no home readings. Overdue labs.
+    NSAID + antihypertensive interaction. monitoring_active=False.
+  Patient C (DEMO_GAP) - 82 days of readings, then a 9-12 day gap.
+    Gap alert and inertia alert expected.
+  Patient D (DEMO_ADH) - 28 days of readings, ~58% adherence rate.
+    Adherence Pattern A alert expected.
+
+Data accessibility: The iEMR dataset is provided by Leap of Faith Technologies
+and is stored locally in data/raw/iemr/. Synthetic data is generated on demand
+from the clinic anchor points in the database. All demo data is reproducible
+by running python scripts/setup_demo.py from the project root.
+
+
+3f. Pre-Work / Setup
+
+1. Clone repository and activate Conda environment:
+   conda activate aria
+
+2. Configure backend/.env with DATABASE_URL, Anthropic API key, and JWT
+   secrets.
+
+3. Run database setup (creates tables and applies migrations):
+   python scripts/setup_db.py (from project root)
+
+4. Ingest iEMR data for demo patients:
+   python scripts/run_adapter.py --patient 1091
+   python scripts/run_ingestion.py --patient 1091
+
+5. Generate synthetic data:
+   python scripts/run_generator.py --patient 1091 --mode full-timeline
+
+6. Run demo setup (seeds all four demo patients, idempotent):
+   python scripts/setup_demo.py
+
+7. Start all services:
+   uvicorn app.main:app --reload --port 8000 (from backend/)
+   npm run dev (from frontend/)
+   npm run dev (from patient-app/)
+   python scripts/run_worker.py
+   python scripts/run_scheduler.py
+
+
+================================================================================
+4. FUNCTIONAL REQUIREMENTS
+================================================================================
+
+4a. List of User Tasks
+
+Clinician Tasks:
+  View patient list sorted by urgency
+  Filter patient list by risk tier
+  Search patient list by name or ID
+  Open individual patient briefing
+  Review BP trend and home reading history
+  Review drug interaction flags
+  Review medication status and adherence signal
+  Review active problems and overdue investigations
+  Review visit agenda
+  Acknowledge alerts
+  Undo alert acknowledgment (within 24 hours)
+  Override patient risk tier
+  View acknowledged alert history
+  Ask clinical questions via chatbot (Ask ARIA)
+
+Patient Tasks:
+  Log in to patient app
+  Submit home BP reading (morning / evening / ad hoc)
+  Confirm medication dose taken
+  Download medication reminder calendar file (.ics)
+
+Admin Tasks:
+  Trigger manual briefing generation (POST /api/admin/trigger-scheduler)
+  Trigger manual pattern recompute
+  Ingest FHIR Bundle via API
+
+
+4b. User Stories
+
+As a clinician opening my morning dashboard, I want to see which of my
+patients most urgently need attention today, so I can prioritize my
+consultations before anyone walks in.
+
+As a clinician reviewing a patient briefing, I want to see drug interaction
+flags with plain-English descriptions and severity levels, so I can decide
+whether to review the medication list during the visit.
+
+As a clinician, I want to see whether a patient's elevated blood pressure is
+associated with low adherence or high adherence, so I know whether to have a
+medication conversation or an adherence conversation.
+
+As a clinician, I want to override a patient's risk tier with a documented
+reason, and have that decision protected for a defined review period, so the
+algorithm does not reverse my clinical judgment the next morning.
+
+As a clinician, I want to ask the system a natural-language question about a
+patient (such as why their score is high or what their adherence was last
+month) without having to navigate through multiple screens.
+
+As a clinician, I want the visit agenda to tell me the 3-6 most important
+things to discuss with this patient, ordered by clinical priority, so those
+8 minutes have structure.
+
+As a patient, I want to submit my morning and evening blood pressure readings
+quickly from my phone, so my GP has an accurate picture of what my blood
+pressure has been doing between appointments.
+
+As a patient, I want to confirm when I have taken my medications so that my
+GP can see my adherence record without me having to explain it at every visit.
+
+
+4c. Use Cases
+
+Use Case 1: Clinician Morning Dashboard Review
+  Actor: Clinician
+  Pre-condition: At least one monitoring-active patient with a briefing
+  generated for today's appointment.
+  Flow: Clinician opens dashboard, reviews sorted patient list, filters by
+  High Risk if needed, opens a briefing, reads AI summary, reviews drug
+  interactions and visit agenda, acknowledges relevant alerts, closes briefing.
+  Post-condition: Briefing read_at is set. Audit event logged.
+
+Use Case 2: Clinician Alert Acknowledgment
+  Actor: Clinician
+  Pre-condition: Active unacknowledged alert visible in alert inbox.
+  Flow: Clinician reviews alert, clicks acknowledge. System sets
+  acknowledged_at. Audit event logged. Alert disappears from inbox.
+  Clinician can undo within 24 hours.
+  Post-condition: Alert acknowledged, audit event written.
+
+Use Case 3: Clinician Risk Tier Override
+  Actor: Clinician
+  Pre-condition: Patient does not have a system-override tier (CHF/Stroke/TIA).
+  Flow: Clinician submits PATCH /api/patients/{id}/tier with new tier and
+  documented reason. System validates. If demotion, sets
+  tier_override_suppressed_until = now + 28 days.
+  Post-condition: Tier updated, suppression set. Nightly job will not reverse
+  for 28 days unless risk score >= 85.
+  Exception: Returns 409 if patient has a system-override tier (EHR update
+  and re-ingestion required to change these patients).
+
+Use Case 4: Patient BP Submission
+  Actor: Patient (authenticated)
+  Pre-condition: Patient logged into CuffLink PWA with valid JWT.
+  Flow: Patient enters two readings, selects session type, optionally records
+  symptoms and whether medication was taken. Submits form.
+  System validates reading plausibility. Stores to readings table. Writes
+  audit event (reading_ingested).
+  Post-condition: Reading stored, audit logged, background worker picks up
+  and runs Layer 1 on next sweep.
+
+Use Case 5: Clinician Chatbot Query (Ask ARIA)
+  Actor: Clinician
+  Pre-condition: Clinician has opened a patient briefing page.
+  Flow: Clinician types a natural-language question. Chatbot calls one or
+  more tool functions (get_briefing, get_readings, get_alerts). Responds with
+  a direct answer grounded in patient data. Three-layer guardrails prevent
+  off-topic responses, cross-patient queries, and prescriptive language.
+  Post-condition: Clinician receives a data-grounded answer.
+
+
+4d. Prioritization
+
+Priority 1 (Core - built and working):
+  Layer 1 gap detector, inertia detector, adherence detector, deterioration
+  detector, variability detector. Risk tier system with auto-overrides and
+  nightly reclassification. Layer 2 risk scoring. Briefing generation. LLM
+  validation (Layer 3). Drug interaction detector (4 rules). Clinician
+  dashboard patient list and briefing pages. Alert inbox. Patient PWA (BP
+  submission and medication confirmation). Audit logging. Background worker.
+  Shadow mode validation.
+
+Priority 2 (Enhanced - built and working):
+  Ask ARIA clinical chatbot with three-layer guardrails. Synthetic data engine
+  (full care timeline, clinical realism rules). Calibration suppression for
+  alert inbox. Clinician tier override endpoint. Alert escalation (gap_urgent,
+  deterioration unacknowledged >24h). Off-hours badge on alerts. Medication
+  calendar reminders (.ics). Interactive dashboard tour.
+
+Priority 3 (Future work - not built):
+  BLE Bluetooth cuff pairing. SMART on FHIR launch. Lab values ingestion.
+  Weight recalibration via clinician feedback data. Multi-patient shadow mode
+  validation. Structured physician-AI comparison UI. Alert disposition
+  structured capture. 30-day outcome verification display in dashboard.
+
+
+4e. List of Functional Requirements
+
+FR-01: The system shall ingest patient EHR data via FHIR R4 Bundle format.
+  The adapter shall convert iEMR JSON to FHIR resources without the ingestion
+  layer having direct knowledge of iEMR field names.
+
+FR-02: The system shall apply immovable High Risk overrides at ingestion for
+  patients with CHF (I50), Haemorrhagic Stroke (I61), Ischaemic Stroke (I63/
+  I64), or TIA (G45) in the problem list. These overrides cannot be reversed
+  via the clinician tier endpoint.
+
+FR-03: Layer 1 shall run five deterministic detectors for every
+  monitoring-active patient on the nightly sweep: gap detection, therapeutic
+  inertia, adherence-BP correlation, deterioration, and variability.
+
+FR-04: The gap detector shall flag based on tier-appropriate thresholds.
+  High Risk: flag at 1 day, urgent at 3 days. Medium: flag at 3 days, urgent
+  at 5 days. Low: flag at 7 days, urgent at 14 days.
+
+FR-05: The therapeutic inertia detector shall use a patient-adaptive threshold
+  derived from stable historic readings, not a population constant. Comorbidity
+  adjustment (-7 mmHg for CHF/Stroke/TIA, floor 130) shall be applied.
+  White-coat exclusion (readings within 5 days of next appointment) shall be
+  applied before threshold comparison.
+
+FR-06: The adherence-BP correlation detector shall classify each patient into
+  Pattern A (high BP + low adherence), Pattern B (high BP + high adherence),
+  or Pattern C (normal BP + low adherence). Pattern B shall be suppressed
+  during active titration windows (drug-class-aware: diuretics/beta-blockers
+  14 days, ACE/ARBs 28 days, amlodipine 56 days) when BP is actively
+  declining.
+
+FR-07: The deterioration detector shall require three gates: positive linear
+  slope, recent 3-day average above days 4-10 baseline, and recent average at
+  or above patient-adaptive threshold. A step-change sub-detector shall fire
+  independently when the 7-day recent rolling mean exceeds the 7-day mean from
+  three weeks ago by 15 mmHg or more.
+
+FR-08: Layer 2 shall compute a weighted risk score using five signals. Weights:
+  systolic vs personal baseline 30%, medication inertia 25%, inverted adherence
+  20%, reading gap 15%, comorbidity severity 10%. Comorbidity severity shall
+  use a points-based severity-weighted scheme, not a raw count.
+
+FR-09: The risk score and risk_score_computed_at shall be stored on the
+  patients table after every Layer 2 computation. A staleness badge shall
+  appear in the dashboard when risk_score_computed_at is more than 26 hours old.
+
+FR-10: The drug interaction checker shall evaluate four rules: NSAID +
+  antihypertensive (warning), triple whammy (concern, escalates to critical
+  when CHF + CKD present), K-sparing diuretic + ACE/ARB (warning, escalates
+  when CKD), beta-blocker + non-DHP CCB (concern). Triple whammy shall
+  supersede the simpler NSAID rule when both apply.
+
+FR-11: Layer 3 shall generate a 3-sentence readable summary from the
+  deterministic briefing payload. Eleven validation checks shall pass before
+  the summary is stored. If validation fails after one retry, readable_summary
+  shall be stored as null. Every validation attempt shall write an audit_events
+  row.
+
+FR-12: Layer 3 shall never produce output containing: "non-adherent",
+  "non-compliant", "hypertensive crisis", "medication failure", dose-change
+  instructions, the word "prescribe", the word "diagnose", "emergency", "tell
+  the patient", patient ID verbatim, or prompt injection markers.
+
+FR-13: GET /api/briefings/{patient_id} shall return only the most-recent
+  active briefing (appointment_date >= today OR appointment_date IS NULL).
+  Past appointment briefings shall not be returned.
+
+FR-14: The clinician dashboard patient list shall sort by risk tier (High >
+  Medium > Low) first, then by risk score descending within each tier.
+
+FR-15: The BP Trend value shown in the dashboard patient list shall use the
+  trend_avg_systolic field from the active briefing as the single source of
+  truth. Independent recomputation in the frontend shall only occur when no
+  active briefing exists.
+
+FR-16: Patients shall never see their own BP readings, risk tier, risk score,
+  or any clinical interpretation via the patient app.
+
+FR-17: Every bundle import, reading ingestion, briefing view, alert
+  acknowledgment, LLM validation attempt, and tier reclassification shall
+  produce an audit_events row with actor_type, actor_id, patient_id, action,
+  resource_type, resource_id, and outcome (success or failure).
+
+FR-18: The nightly tier reclassification shall apply a hysteresis band between
+  the promotion threshold (score >= 75 for medium to high) and the demotion
+  threshold (score < 40 for high to medium). Transitions shall guard against
+  oscillation without requiring a stored history of previous scores.
+
+FR-19: The clinician tier override endpoint shall set a 28-day suppression
+  window on demotion (aligned to NICE NG136 4-week review standard). Score >=
+  85 during suppression shall break the suppression and allow promotion. System-
+  override patients (CHF/Stroke/TIA) shall return 409.
+
+FR-20: The Ask ARIA chatbot shall apply three-layer guardrails: off-topic
+  detection, scope check (no cross-patient queries), and output validation
+  (no prescriptive language or dose instructions).
+
+FR-21: Synthetic home readings shall have day-to-day systolic SD of 8-12 mmHg,
+  morning readings 5-10 mmHg above evening, device outage periods as absent
+  rows (never null values), and a white-coat dip of 10-15 mmHg in the 3-5 days
+  before each appointment.
+
+FR-22: Cold-start suppression shall prevent inertia, deterioration, and
+  adherence detectors from running for patients enrolled fewer than 21 days.
+  The gap detector shall still run.
+
+
+4f. Data Structures and Interfaces
+
+Database Tables (12):
+  patients - demographics, name, risk tier, tier_override_source,
+    tier_override_suppressed_until, risk_score, risk_score_computed_at,
+    monitoring_active, next_appointment
+  clinical_context - pre-computed EHR context (one row per patient), active
+    problems, medications, med_history JSONB, allergies, clinic BP history,
+    overdue labs, problem assessments, recent labs
+  readings - home and clinic BP readings with two-reading sessions, session
+    type, source, position, symptoms, medication_taken flag
+  medication_confirmations - scheduled dose records with confirmed_at (null
+    for missed doses)
+  alerts - detector-fired flags with gap_days, systolic_avg, off_hours,
+    escalated fields
+  alert_feedback - clinician dispositions (agree_acting, agree_monitoring,
+    disagree)
+  briefings - structured briefing payload as JSONB, model_version,
+    prompt_hash, read_at
+  processing_jobs - background job queue with idempotency_key and status
+  audit_events - immutable log of all significant actions
+  gap_explanations - patient-reported explanations for monitoring gaps
+  calibration_rules - clinician-approved threshold adjustments per
+    patient-detector pair
+  outcome_verifications - 30-day retrospective outcome tracking after
+    alert dismissal
+
+Briefing JSON Payload Fields:
+  trend_summary, trend_avg_systolic, medication_status, adherence_summary,
+  active_problems, problem_assessments, overdue_labs, drug_interactions,
+  visit_agenda, urgent_flags, risk_score, data_limitations, patient_context
+
+FHIR R4 Resources Used (ingestion input):
+  Patient, Condition, MedicationRequest, AllergyIntolerance, Observation
+  (vitals), ServiceRequest, and three non-standard ARIA extension keys
+  (_aria_med_history, _aria_problem_assessments, _aria_visit_dates)
+
+REST API Endpoints (backend, port 8000):
+  GET/POST /api/patients, GET /api/patients/{id}, PATCH /api/patients/{id}/tier
+  GET /api/readings, POST /api/readings
+  GET /api/briefings/{patient_id}
+  GET /api/alerts, GET /api/alerts/acknowledged,
+    POST /api/alerts/{id}/acknowledge, DELETE /api/alerts/{id}/acknowledge
+  POST /api/ingest
+  GET /api/confirmations/pending, POST /api/confirmations/confirm
+  POST /api/chat
+  POST /api/admin/trigger-scheduler
+  GET /api/shadow-mode/{patient_id}
+
+
+================================================================================
+5. GENERAL SCHEDULE
+================================================================================
+
+The project was delivered across two main development sprints, starting from
+the design phase in January 2026 and completing in early May 2026.
+
+Sprint 1 - January 2026 to March 2026
+
+The first sprint focused on establishing the data infrastructure and the core
+analysis pipeline. This included:
+
+- iEMR to FHIR R4 adapter and ingestion pipeline (adapter.py, ingestion.py)
+- PostgreSQL schema design (12 tables, migrations, indexes)
+- Layer 1 detector implementation: gap detector, therapeutic inertia detector,
+  adherence-BP correlation, deterioration detector
+- Basic risk scoring (Layer 2) using weighted signal formula
+- Initial briefing composition (Layer 1 output to structured JSON)
+- Basic clinician dashboard patient list view
+- Initial synthetic reading generation for demo patient 1091
+- Shadow mode evaluation script (offline batch validation)
+- Background worker implementation (30-second poll loop)
+
+Deliverable: Working end-to-end pipeline for patient 1091. Layer 1 detectors
+running. Basic dashboard displaying patient list with alerts.
+
+
+Sprint 2 - March 2026 to May 2026
+
+The second sprint completed the full system and refined everything to demo
+quality. Key work included:
+
+- Layer 3 LLM narrative generation with 11 validation checks
+- Drug interaction detector (4 deterministic rules, comorbidity escalation)
+- Risk tier auto-overrides and nightly reclassification with hysteresis
+- Clinician tier override endpoint
+- Full briefing page UI (drug interactions, visit agenda, AI summary,
+  adherence signal, active problems)
+- Alert inbox with escalation and calibration suppression
+- Patient PWA (CuffLink) - BP submission, medication confirmation, .ics calendar
+- Ask ARIA clinical chatbot with three-layer guardrails
+- Full frontend redesign (medical blue system, sparklines, search, pagination)
+- Variability detector
+- Synthetic data engine full care timeline (1,800+ readings for patient 1091)
+- All 4 demo patients seeded and validated via setup_demo.py
+- BP Trend single source of truth (trend_avg_systolic field)
+- Active briefing filter (excludes past appointment briefings)
+- 601 unit tests, ruff check clean
+
+Deliverable: Complete system with all four demo patients, all five Layer 1
+detectors, drug interaction detection, patient PWA, clinical chatbot, and
+shadow mode achieving 78.4% agreement with physician clinical judgments.
+
+
+Final Status
+
+The project is complete for prototype purposes. Shadow mode achieved 78.4%
+agreement (37 labeled evaluation points, 6 false negatives, 2 false positives)
+against the physician-recorded HTN concern assessments from the iEMR dataset.
+The target was 80%; the current result is 1.6 percentage points below that
+threshold. All false negatives are clinically explainable (cold start,
+active treatment response, same-day medication changes). No false negatives
+are caused by system bugs.
+
+Layer 3 currently uses OpenAI gpt-4o-mini as a temporary substitute for
+Anthropic claude-sonnet-4-20250514 in the demo deployment. The validation
+layer operates identically regardless of model. Reverting to the specification
+model is a one-line change.
+
+The setup_demo.py script produces ALL CHECKS PASSED for all four demo patients
+in a single run.
+
+
+================================================================================
+6. SUBMISSION OF RESULTS
+================================================================================
+
+6a. Source Code
+
+All source code is maintained in the project Git repository on the nesh branch.
+Key directories:
+
+  backend/app/ - FastAPI backend (config, models, API routes, services)
+  backend/app/services/pattern_engine/ - Layer 1 detectors and Layer 2 scorer
+  backend/app/services/briefing/ - Layer 3 generation, drug interaction checker
+  backend/app/services/fhir/ - iEMR adapter and FHIR ingestion
+  backend/app/services/generator/ - Synthetic reading and confirmation generators
+  backend/app/services/worker/ - Background job processor and scheduler
+  frontend/src/ - Clinician dashboard (Next.js 14, TypeScript)
+  patient-app/src/ - CuffLink patient PWA (Next.js 14)
+  scripts/ - Setup, seeding, shadow mode, and admin scripts
+  prompts/ - Layer 3 LLM prompt (briefing_summary_prompt.md)
+  tests/ - 601 unit tests
+
+6b. Data and Sample Data
+
+  data/raw/iemr/ - De-identified iEMR source data (provided by LOF)
+  Demo patients seeded via scripts/setup_demo.py (idempotent, re-runnable)
+  Shadow mode results: data/shadow_mode_results.json
+
+6c. AI Prompts
+
+  prompts/briefing_summary_prompt.md - Layer 3 system prompt. Includes
+  instructions for 3-sentence structure, forbidden language, grounding rules,
+  and clinical language requirements.
+
+  The chatbot prompt is embedded in backend/app/services/chat/agent.py.
+
+  Both prompts include explicit constraints aligned with the LLM validator's
+  11 checks. The prompt hash (SHA-256) is stored in the briefings table for
+  every generated summary.
+
+6d. Documentation
+
+  ARIA_MASTER_DOCUMENT.md - Full product and technical documentation. Covers
+  all five system components, the three-layer AI architecture, drug interaction
+  rules, risk tier system, shadow mode methodology, limitations, and future work.
+
+  CLAUDE.md - Project coding standards, database schema, clinical boundaries,
+  pattern engine query logic, and operational rules for the codebase.
+
+  AUDIT.md - Full log of all fixes and architectural decisions made during
+  development.
+
+  STATUS.md - Chronological development log from the team.
+
+  documentation/ - Team access guide, patient app documentation, chatbot
+  documentation, and risk tier reclassification specification.
+
+6e. Screenshots and Demo Materials
+
+  PRESENTATION_GUIDE.md - Step-by-step walkthrough of every screen in the
+  demo, with the exact data and expected values to show for each demo patient.
+  Covers the clinician dashboard, all four patient briefings, alert inbox,
+  drug interaction cards, chatbot, and patient PWA.
+
+  The demo can be run live from localhost with all four seeded demo patients.
+  Each patient demonstrates a distinct clinical scenario:
+    Patient 1091: Therapeutic inertia + drug interaction + CHF auto-override
+    DEMO_EHR:     EHR-only patient + NSAID interaction + overdue labs
+    DEMO_GAP:     Monitoring gap + gap alert
+    DEMO_ADH:     Low adherence + adherence alert (Pattern A)
+
+6f. Other Final Deliverables
+
+Shadow Mode Validation Report:
+  Results at data/shadow_mode_results.json. Agreement rate: 78.4% (37 points
+  evaluated). Methodology: replay alert engine at each historical clinic visit
+  using only data available before that visit; compare against
+  PROBLEM_STATUS2_FLAG (physician HTN concern label: 1=urgent, 2=concerned,
+  3=stable). False negative and false positive analysis documented in
+  ARIA_MASTER_DOCUMENT.md section 13 and AUDIT.md.
+
+Architecture Decision Record:
+  AUDIT.md documents 60+ architectural decisions and fixes made during
+  development, including the reasoning behind the adaptive window design,
+  patient-adaptive threshold calculation, hysteresis band selection, and
+  LLM validation rule design.
+
+Clinical Boundary Enforcement Record:
+  All clinical language constraints are enforced at two levels: the
+  deterministic layer (strings in _INTERPRETATIONS dicts, briefing composer
+  text) and the LLM validation layer (11 checks in llm_validator.py).
+  The enforcement is documented in CLAUDE.md and ARIA_MASTER_DOCUMENT.md
+  section 15.
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================

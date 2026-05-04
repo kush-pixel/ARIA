@@ -1,0 +1,34 @@
+Student Final Project Contribution Report
+ARIA - Adherence Risk Intelligence Agent
+Team: NeuraCare Nexus
+CS595 | Spring 2026
+
+
+Krishna Patel — 9/10
+
+From day one, Krishna anchored the team's clinical direction — she defined the problem space, maintained the relationship with our clinician contact, and made sure our detection logic and language stayed medically grounded. On the technical side, she led the synthetic data generator, made significant contributions to the chatbot, and drove most of the frontend development. Her work on presentations and system design was polished and consistent. A natural project leader who took ownership without being asked.
+
+
+Kush Patel — 10/10
+
+Kush was the technical backbone of this project from the very first commit. He built the initial database schema and Supabase connection, implemented the FHIR ingestion engine and iEMR adapter, and authored the synthetic reading and confirmation generators. He implemented shadow mode, led the full frontend redesign across multiple phases, and drove the clinical UI overhaul that made the dashboard demo-ready. His fingerprints are on the drug interaction detector, alert feedback loop, chatbot guardrails, risk tier system, and nearly every major bug fix across the final audit cycle — including the off_hours stamping fix, ICD-10 normalization, adaptive window corrections, and Pattern B suppression logic. With 50 commits touching every layer of the stack, Kush was indispensable. Could not have shipped this without him.
+
+
+Sahilsingh Khalsa — 10/10
+
+Sahil owned the two most complex AI components in the system. He built the briefing composer — the deterministic JSON assembly layer that is the core output of Layer 1 — and implemented Layer 3 LLM output validation and guardrails. He then led the full chatbot implementation across multiple iterations, including backend routing, frontend UI, guardrail logic, social phrase handling, and follow-up chip behavior, ultimately delivering a polished Ask ARIA experience. He also built the patient PWA (BP submission, medication confirmation, .ics reminders), wired the frontend to the backend across 24 API routes, and implemented Phase 7 features including alert escalation, calibration suppression, and the 30-day outcome verification loop. His fixes extended to clinical compliance details like correcting the suppression window to 28 days per NICE NG136. Deeply technical and consistently thorough.
+
+
+Prakriti Sharma — 6/10
+
+Prakriti contributed meaningfully in specific areas — she implemented the risk scorer (Layer 2), worked on the v5.0 pattern engine including adaptive threshold and Pattern B suppression logic, and added the antihypertensive filtering to the briefing UI medication and adherence sections. These were real, functional contributions. However, her overall commit volume and involvement across the project's broader scope was more limited compared to the rest of the team, particularly in the later sprint where the bulk of the integration and hardening work happened. A solid contributor in the areas she owned, but there was room for more consistent engagement across the project.
+
+
+Yash Sharma — 6/10
+
+Yash contributed to the risk scorer implementation, Phase 0 setup, briefing UI medication filtering, and delivered a set of fixes tracked under his name. His work was functional and covered real parts of the system. That said, his involvement in the heavier integration and bug-fixing phases of Sprint 2 was minimal. Like Prakriti, he was a solid contributor within a narrower scope but had room to be more involved across the broader project.
+
+
+Nesh Rochwani — 10/10
+
+I served as the project's technical lead and integration owner. My direct contributions included building the background worker and APScheduler pipeline — the infrastructure that drives every nightly pattern recompute and 7:30 AM briefing — along with a set of Phase 4 bug fixes and the patient-adaptive threshold correction in the briefing composer. Beyond code, I owned the system's architectural documentation (CLAUDE.md, AUDIT.md, project specification), which became the operational reference every team member worked from. I coordinated the end-to-end integration across all layers, managed the demo environment, and drove the final audit and hardening cycle that brought the system to a shippable state. Where I could improve: more consistent hands-on commits throughout the sprint rather than concentrated bursts. Overall though, I held the system together across all its moving parts and feel my contribution reflects that.
