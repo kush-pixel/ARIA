@@ -18,6 +18,7 @@ Public API:
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
@@ -25,9 +26,11 @@ from typing import Any
 # TEMP: OpenAI testing override — revert to `import anthropic` when switching back
 from openai import BadRequestError as OpenAIBadRequestError
 from openai import OpenAI
+from sqlalchemy import select as _select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.models.patient import Patient as _Patient
 from app.services.briefing.llm_validator import ValidationResult
 from app.services.chat import session as session_store
 from app.services.chat.formatter import ChatResponse, make_blocked_response, parse_response
@@ -174,7 +177,7 @@ async def _build_patient_context(
     briefing = await get_briefing(db_session, patient_id)
     ctx = await get_clinical_context(db_session, patient_id)
 
-    lines = ["## Patient Context — ID: [REDACTED]"]
+    lines = ["## Current Patient Context (this session is locked to this patient only)"]
 
     if briefing.get("data_available"):
         lines.append(f"Risk score: {briefing.get('risk_score')}")
@@ -371,9 +374,35 @@ async def run_agent(
     client = OpenAI(api_key=settings.openai_api_key)
     groq_tools = _to_groq_tools(TOOL_SCHEMAS)
 
+    # Fetch current patient name
+    _pt_row = await db_session.execute(_select(_Patient).where(_Patient.patient_id == patient_id))
+    _pt = _pt_row.scalar_one_or_none()
+    patient_name = _pt.name if _pt and _pt.name else f"Patient {patient_id}"
+
+    # Block questions that mention another patient's name
+    _all_pts = await db_session.execute(_select(_Patient.name).where(_Patient.patient_id != patient_id))
+    _other_names: list[str] = [row[0] for row in _all_pts if row[0]]
+    for other_name in _other_names:
+        parts = other_name.split() + [other_name]
+        for part in parts:
+            if len(part) > 2 and re.search(rf"\b{re.escape(part)}\b", question, flags=re.IGNORECASE):
+                yield _sse("done", {
+                    "answer": "No data available for this patient currently.",
+                    "confidence": "no_data",
+                    "data_gaps": [],
+                    "tools_used": [],
+                    "blocked": False,
+                })
+                return
+
     system_prompt = _load_system_prompt()
     patient_context = await _build_patient_context(patient_id, db_session)
-    system_content = system_prompt + "\n\n" + patient_context
+    lock_notice = (
+        f"\n\n## SCOPE LOCK\n"
+        f"You are answering questions about ONE specific patient: **{patient_name}**.\n"
+        f"All tool calls are automatically scoped to this patient. You cannot query any other patient."
+    )
+    system_content = system_prompt + "\n\n" + patient_context + lock_notice
 
     history = await session_store.get_history(clinician_id, patient_id, db_session)
     messages: list[dict[str, Any]] = [
