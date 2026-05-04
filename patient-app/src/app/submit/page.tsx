@@ -207,7 +207,7 @@ export default function SubmitPage() {
         {/* Safety banner */}
         {urgentChecked && (
           <div className="bg-red-50 border border-red-300 rounded-2xl p-4 text-red-800 text-sm font-medium">
-            If you are experiencing chest pain or sudden shortness of breath, call <strong>999</strong> immediately.
+            If you are experiencing chest pain or sudden shortness of breath, call <strong>911</strong> immediately.
           </div>
         )}
 
