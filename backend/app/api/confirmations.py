@@ -22,6 +22,7 @@ from app.config import settings
 from app.db.session import get_session
 from app.models.audit_event import AuditEvent
 from app.models.medication_confirmation import MedicationConfirmation
+from app.models.patient import Patient
 from app.utils.ics_generator import generate_ics
 from app.utils.logging_utils import get_logger
 
@@ -99,9 +100,38 @@ class ConfirmResponse(BaseModel):
     confirmed: int
 
 
+class PatientProfile(BaseModel):
+    """Basic patient profile for the PWA header."""
+
+    patient_id: str
+    patient_name: str | None
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+
+@router.get("/confirmations/me", response_model=PatientProfile)
+async def patient_profile(
+    patient_id: str = Depends(patient_required),
+    db: AsyncSession = Depends(get_session),
+) -> PatientProfile:
+    """Return the authenticated patient's profile (id + name).
+
+    Args:
+        patient_id: Injected from the patient JWT sub claim.
+        db: Async database session.
+
+    Returns:
+        PatientProfile with patient_id and name (null if not set).
+    """
+    result = await db.execute(select(Patient).where(Patient.patient_id == patient_id))
+    patient = result.scalar_one_or_none()
+    return PatientProfile(
+        patient_id=patient_id,
+        patient_name=patient.name if patient else None,
+    )
 
 
 @router.get("/confirmations/pending", response_model=list[PendingConfirmation])
