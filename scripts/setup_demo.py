@@ -57,6 +57,11 @@ from app.services.worker.processor import (
 
 _DEMO_APPT = datetime.now(UTC) + timedelta(hours=5)
 _DEMO_DATE = _DEMO_APPT.date()
+# High-risk patients first, then medium — 30-min slots
+_DEMO_APPT_A   = _DEMO_APPT                           # Patient A  — high,   slot 0
+_DEMO_APPT_EHR = _DEMO_APPT + timedelta(minutes=30)   # DEMO_EHR   — high,   slot 1
+_DEMO_APPT_GAP = _DEMO_APPT + timedelta(minutes=60)   # DEMO_GAP   — medium, slot 2
+_DEMO_APPT_ADH = _DEMO_APPT + timedelta(minutes=90)   # DEMO_ADH   — medium, slot 3
 
 _PATIENT_A = "1091"
 _SHIFT_DAYS = 5654
@@ -464,7 +469,7 @@ async def _timeshift_patient_a(dry_run: bool) -> None:
             update(Patient)
             .where(Patient.patient_id == _PATIENT_A)
             .values(
-                next_appointment=_DEMO_APPT,
+                next_appointment=_DEMO_APPT_A,
                 enrolled_at=datetime(2025, 1, 6, tzinfo=UTC),
             )
         )
@@ -502,7 +507,7 @@ async def _seed_demo_gap(dry_run: bool) -> None:
             age=62,
             risk_tier="medium",
             monitoring_active=True,
-            next_appointment=_DEMO_APPT,
+            next_appointment=_DEMO_APPT_GAP,
             enrolled_at=datetime(2025, 11, 5, tzinfo=UTC),
             enrolled_by="setup_demo",
         ))
@@ -559,7 +564,7 @@ async def _seed_demo_adh(dry_run: bool) -> None:
             age=55,
             risk_tier="medium",
             monitoring_active=True,
-            next_appointment=_DEMO_APPT,
+            next_appointment=_DEMO_APPT_ADH,
             enrolled_at=datetime(2025, 11, 5, tzinfo=UTC),
             enrolled_by="setup_demo",
         ))
@@ -611,7 +616,7 @@ async def _seed_demo_ehr(dry_run: bool) -> None:
             tier_override="CHF in problem list",
             tier_override_source="system",
             monitoring_active=False,
-            next_appointment=_DEMO_APPT,
+            next_appointment=_DEMO_APPT_EHR,
             enrolled_at=datetime(2026, 1, 5, tzinfo=UTC),
             enrolled_by="setup_demo",
         ))
