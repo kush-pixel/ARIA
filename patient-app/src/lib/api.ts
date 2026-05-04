@@ -24,6 +24,7 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 export interface TokenResponse {
   access_token: string
   expires_in: number
+  patient_name: string | null
 }
 
 export async function login(researchId: string): Promise<TokenResponse> {
@@ -63,6 +64,15 @@ export interface PendingConfirmation {
   medication_name: string
   rxnorm_code: string | null
   scheduled_time: string
+}
+
+export interface PatientProfile {
+  patient_id: string
+  patient_name: string | null
+}
+
+export async function getPatientProfile(): Promise<PatientProfile> {
+  return apiFetch<PatientProfile>('/api/confirmations/me')
 }
 
 export async function getPendingConfirmations(patientId: string): Promise<PendingConfirmation[]> {

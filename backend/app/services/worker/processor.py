@@ -84,6 +84,7 @@ async def _upsert_alert(
     patient_id: str,
     alert_type: str,
     gap_days: int | None = None,
+    pattern_triggered_at: datetime | None = None,
 ) -> None:
     """Insert an alert row for today if one does not already exist.
 
@@ -95,6 +96,9 @@ async def _upsert_alert(
         patient_id: Patient to alert on.
         alert_type: gap_urgent | gap_briefing | inertia | deterioration
         gap_days: Only set for gap_urgent and gap_briefing alert types.
+        pattern_triggered_at: Datetime of the reading that first made the pattern
+            detectable. Used to evaluate off_hours so the flag reflects when the
+            clinical event occurred, not when the nightly job ran.
     """
     today = datetime.now(UTC).date()
     existing = await session.execute(
@@ -108,6 +112,7 @@ async def _upsert_alert(
     )
     if existing.scalar_one_or_none() is None:
         now = datetime.now(UTC)
+        off_hours_ref = pattern_triggered_at if pattern_triggered_at is not None else now
         session.add(
             Alert(
                 patient_id=patient_id,
@@ -115,7 +120,7 @@ async def _upsert_alert(
                 gap_days=gap_days,
                 triggered_at=now,
                 delivered_at=now,
-                off_hours=is_off_hours(now),
+                off_hours=is_off_hours(off_hours_ref),
             )
         )
 
@@ -128,6 +133,7 @@ async def _maybe_upsert_alert(
     detector_type: str,
     *,
     gap_days: int | None = None,
+    pattern_triggered_at: datetime | None = None,
 ) -> None:
     """Write an alert row unless an active calibration rule suppresses it.
 
@@ -142,6 +148,7 @@ async def _maybe_upsert_alert(
         suppressed_detectors: Detector types with active calibration rules for this patient.
         detector_type: Logical detector name (gap | inertia | deterioration | adherence).
         gap_days: Only set for gap alert types.
+        pattern_triggered_at: Passed through to _upsert_alert for off_hours evaluation.
     """
     if detector_type in suppressed_detectors:
         session.add(AuditEvent(
@@ -158,7 +165,7 @@ async def _maybe_upsert_alert(
             detector_type,
         )
         return
-    await _upsert_alert(session, patient_id, alert_type, gap_days=gap_days)
+    await _upsert_alert(session, patient_id, alert_type, gap_days=gap_days, pattern_triggered_at=pattern_triggered_at)
 
 
 # ---------------------------------------------------------------------------
@@ -321,13 +328,13 @@ async def _handle_pattern_recompute(job: ProcessingJob, session: AsyncSession) -
         alert_type = "gap_urgent" if gap["status"] == "urgent" else "gap_briefing"
         raw_days = gap["gap_days"]
         gap_days_int = min(int(raw_days), 32767) if math.isfinite(raw_days) else None
-        await _maybe_upsert_alert(session, pid, alert_type, suppressed_detectors, "gap", gap_days=gap_days_int)
+        await _maybe_upsert_alert(session, pid, alert_type, suppressed_detectors, "gap", gap_days=gap_days_int, pattern_triggered_at=gap["triggered_at"])
     if inertia["inertia_detected"]:
-        await _maybe_upsert_alert(session, pid, "inertia", suppressed_detectors, "inertia")
+        await _maybe_upsert_alert(session, pid, "inertia", suppressed_detectors, "inertia", pattern_triggered_at=inertia["triggered_at"])
     if adherence["pattern"] == "A":
-        await _maybe_upsert_alert(session, pid, "adherence", suppressed_detectors, "adherence")
+        await _maybe_upsert_alert(session, pid, "adherence", suppressed_detectors, "adherence", pattern_triggered_at=adherence["triggered_at"])
     if deterioration["deterioration"]:
-        await _maybe_upsert_alert(session, pid, "deterioration", suppressed_detectors, "deterioration")
+        await _maybe_upsert_alert(session, pid, "deterioration", suppressed_detectors, "deterioration", pattern_triggered_at=deterioration["triggered_at"])
     await session.flush()
     logger.info("Alert rows written for patient=%s", pid)
 
@@ -356,10 +363,14 @@ async def _handle_briefing_generation(job: ProcessingJob, session: AsyncSession)
     """Compose a deterministic briefing JSON and optional LLM summary.
 
     Layer execution order is strict — never reverse:
-      1. compose_briefing()      — Layer 1 deterministic JSON (9 fields)
-      2. generate_llm_summary()  — Layer 3 optional LLM readable summary
+      1. compose_briefing()   — Layer 1 deterministic JSON (9 fields), committed
+                                immediately so the DB connection is released.
+      2. call_llm_only()      — Layer 3 LLM call with NO session held, runs in a
+                                thread so the event loop stays responsive.
+      3. validate + patch     — validation audit event and readable_summary written
+                                in a fresh session after the LLM returns.
 
-    Appointment date is sourced from patients.next_appointment (Fix 20).
+    Appointment date is sourced from patients.next_appointment.
     Falls back to today when next_appointment is None (preserves demo-mode
     behaviour where next_appointment may not be set).
 
@@ -368,19 +379,19 @@ async def _handle_briefing_generation(job: ProcessingJob, session: AsyncSession)
 
     Args:
         job: The ProcessingJob being executed. patient_id must be set.
-        session: Async database session.
+        session: Async database session used only for Layer 1.
 
     Raises:
         ValueError: patient_id is missing from the job.
     """
+    from app.models.briefing import Briefing as BriefingModel
     from app.services.briefing.composer import compose_briefing
-    from app.services.briefing.summarizer import generate_llm_summary
+    from app.services.briefing.llm_validator import validate_llm_output
+    from app.services.briefing.summarizer import call_llm_only
 
     if not job.patient_id:
         raise ValueError("briefing_generation job is missing patient_id")
 
-    # Fix 20: source appointment date from patients.next_appointment, NOT
-    # from idempotency_key parsing (key is for deduplication only).
     patient_row = await session.execute(
         select(Patient).where(Patient.patient_id == job.patient_id)
     )
@@ -390,25 +401,77 @@ async def _handle_briefing_generation(job: ProcessingJob, session: AsyncSession)
     else:
         appointment_date = date.today()
 
+    # Layer 1 — deterministic briefing. Commit immediately so the connection
+    # is returned to the pool before the LLM call begins.
     briefing = await compose_briefing(session, job.patient_id, appointment_date)
+    await session.commit()
+    briefing_id = str(briefing.briefing_id)
+    llm_payload = dict(briefing.llm_response)
+    patient_id = briefing.patient_id
+
     logger.info(
         "briefing_generation Layer 1 complete: patient=%s briefing_id=%s",
         job.patient_id,
-        briefing.briefing_id,
+        briefing_id,
     )
 
-    # Layer 3 is optional — log failure but do not fail the job
+    # Layer 3 — LLM call with no session held, then validate + patch.
+    # Each phase opens its own short-lived session so a pool connection is
+    # held only for the DB writes, not during the multi-second LLM round-trip.
     try:
-        await generate_llm_summary(briefing, session)
+        summary_text: str | None = None
+        model_version: str | None = None
+        prompt_hash: str | None = None
+
+        for attempt in range(2):
+            candidate, mv, ph = await call_llm_only(llm_payload)
+            if model_version is None:
+                model_version, prompt_hash = mv, ph
+
+            async with AsyncSessionLocal() as val_session:
+                result = await validate_llm_output(
+                    candidate, llm_payload, briefing_id, patient_id, val_session
+                )
+                await val_session.commit()
+
+            if result.passed:
+                summary_text = candidate
+                break
+
+            if attempt == 0:
+                logger.warning(
+                    "Layer 3 validation failed (attempt 1) briefing=%s check=%s — retrying",
+                    briefing_id,
+                    result.failed_check,
+                )
+            else:
+                logger.error(
+                    "Layer 3 validation failed (attempt 2) briefing=%s check=%s — storing None",
+                    briefing_id,
+                    result.failed_check,
+                )
+
+        async with AsyncSessionLocal() as patch_session:
+            b_row = await patch_session.execute(
+                select(BriefingModel).where(BriefingModel.briefing_id == briefing_id)
+            )
+            b = b_row.scalar_one_or_none()
+            if b is not None:
+                b.llm_response = {**b.llm_response, "readable_summary": summary_text}
+                b.model_version = model_version
+                b.prompt_hash = prompt_hash
+                b.generated_at = datetime.now(UTC)
+                await patch_session.commit()
+
         logger.info(
             "briefing_generation Layer 3 complete: patient=%s briefing_id=%s",
             job.patient_id,
-            briefing.briefing_id,
+            briefing_id,
         )
     except Exception as exc:
         logger.warning(
             "Layer 3 LLM summary skipped for briefing=%s: %s",
-            briefing.briefing_id,
+            briefing_id,
             exc,
         )
 
@@ -545,8 +608,9 @@ async def _apply_tier_reclassification(
             )
             ctx = cc_row.scalar_one_or_none()
             codes: list[str] = (ctx.problem_codes or []) if ctx is not None else []
+            norm_codes = [c.upper().replace(".", "").replace("-", "") for c in codes]
             has_blocking_comorbidity = any(
-                code.startswith(_COMORBIDITY_BLOCK_PREFIXES) for code in codes
+                code.startswith(_COMORBIDITY_BLOCK_PREFIXES) for code in norm_codes
             )
             if has_blocking_comorbidity:
                 logger.info(

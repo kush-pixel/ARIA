@@ -28,8 +28,10 @@ from app.models.reading import Reading
 from app.services.briefing.medication_safety import check_interactions
 from app.services.pattern_engine.threshold_utils import (
     compute_patient_threshold,
+    compute_window_days,
     get_titration_window,
 )
+from app.services.pattern_engine.variability_detector import run_variability_detector
 from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -411,6 +413,7 @@ def _build_visit_agenda(
     variability_agenda_item: str | None = None,
     patient_threshold: float = _ELEVATED_SYSTOLIC,
     drug_interactions: list[dict] | None = None,
+    window_days: int = 28,
 ) -> list[str]:
     """Build a prioritised visit agenda (up to 6 items).
 
@@ -502,7 +505,7 @@ def _build_visit_agenda(
         if overall_rate < _ADHERENCE_THRESHOLD:
             agenda.append(
                 f"Discuss possible adherence concern: {overall_rate:.0f}% overall "
-                f"confirmation rate across all medications in the past 28 days."
+                f"confirmation rate across all medications in the past {window_days} days."
             )
 
     # 3a. Warning-level drug interactions — before variability flag
@@ -673,8 +676,17 @@ async def compose_briefing(
     if ctx is None:
         raise ValueError(f"Clinical context for patient {patient_id!r} not found.")
 
-    # ── Fetch last 28 days of readings (ascending by time) ────────────────────
-    since = _now_utc() - timedelta(days=28)
+    # ── Compute adaptive window (mirrors Layer 1 detectors) ──────────────────
+    window_days, _window_source = compute_window_days(
+        patient.next_appointment, ctx.last_visit_date
+    )
+    logger.debug(
+        "patient=%s briefing window_days=%d source=%s",
+        patient_id, window_days, _window_source,
+    )
+
+    # ── Fetch window readings (ascending by time) ─────────────────────────────
+    since = _now_utc() - timedelta(days=window_days)
     readings_result = await session.execute(
         select(Reading)
         .where(
@@ -700,7 +712,7 @@ async def compose_briefing(
     )
     alerts = list(alerts_result.scalars().all())
 
-    # ── Fetch 28-day medication confirmations ─────────────────────────────────
+    # ── Fetch window medication confirmations ────────────────────────────────
     confs_result = await session.execute(
         select(MedicationConfirmation)
         .where(
@@ -719,6 +731,7 @@ async def compose_briefing(
         last_clinic_systolic=ctx.last_clinic_systolic,
         last_clinic_diastolic=ctx.last_clinic_diastolic,
         monitoring_active=patient.monitoring_active,
+        window_days=window_days,
     )
     trajectory = _build_long_term_trajectory(
         ctx.historic_bp_systolic,
@@ -742,15 +755,15 @@ async def compose_briefing(
     )
     urgent_flags = _build_urgent_flags(alerts)
 
-    # Fix 59: pull variability agenda item from detector result stored on last alert, if available
-    variability_agenda_item: str | None = next(
-        (a.alert_type for a in alerts if a.alert_type == "variability"),
-        None,
-    )
+    # Variability detector is called directly — no alert row is written for variability,
+    # so the agenda item cannot be sourced from the alerts table.
+    variability_result = await run_variability_detector(session, patient_id)
+    variability_agenda_item: str | None = variability_result["visit_agenda_item"]
 
     data_limitations = _build_data_limitations(
         readings=readings,
         monitoring_active=patient.monitoring_active,
+        window_days=window_days,
         enrolled_at=patient.enrolled_at,
     )
 
@@ -775,6 +788,7 @@ async def compose_briefing(
         variability_agenda_item=variability_agenda_item,
         patient_threshold=patient_threshold,
         drug_interactions=drug_interactions,
+        window_days=window_days,
     )
 
     # Structured average for dashboard display — home readings only, consistent

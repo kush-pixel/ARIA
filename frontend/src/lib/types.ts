@@ -1,5 +1,21 @@
 export type RiskTier = 'high' | 'medium' | 'low'
 
+export interface TierCounts {
+  all: number
+  high: number
+  medium: number
+  low: number
+}
+
+export interface PaginatedPatients {
+  patients: Patient[]
+  total: number
+  page: number
+  page_size: number
+  total_pages: number
+  counts: TierCounts
+}
+
 export interface Patient {
   patient_id: string
   name: string | null

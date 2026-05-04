@@ -103,7 +103,8 @@ def _determine_risk_tier(problem_codes: list[str]) -> tuple[str, str | None, str
         default "medium" tier applies.  ``tier_override_source`` is ``"system"``
         for all auto-override cases — these are immovable safety floors.
     """
-    for code in problem_codes:
+    for raw in problem_codes:
+        code = raw.upper().replace(".", "").replace("-", "")
         if code.startswith("I50"):
             return "high", "CHF in problem list", "system"
         if code.startswith("I61"):

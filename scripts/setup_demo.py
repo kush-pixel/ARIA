@@ -34,10 +34,14 @@ from sqlalchemy import delete, func, select, update
 
 from app.db.base import AsyncSessionLocal
 from app.models.alert import Alert
+from app.models.alert_feedback import AlertFeedback
 from app.models.audit_event import AuditEvent
 from app.models.briefing import Briefing
+from app.models.calibration_rule import CalibrationRule
 from app.models.clinical_context import ClinicalContext
+from app.models.gap_explanation import GapExplanation
 from app.models.medication_confirmation import MedicationConfirmation
+from app.models.outcome_verification import OutcomeVerification
 from app.models.patient import Patient
 from app.models.processing_job import ProcessingJob
 from app.models.reading import Reading
@@ -65,18 +69,20 @@ _DEMO_PATIENTS = ["DEMO_GAP", "DEMO_ADH", "DEMO_EHR"]
 _ALL_PATIENTS = [_PATIENT_A] + _DEMO_PATIENTS
 
 # Hardcoded adherence pattern for DEMO_ADH — deterministic across every run.
-# Day indices 0-27 (Apr 7 = 0, May 4 = 27).  16 confirmed = 57.1% ≈ 58%.
-# Structured as streaks: 3 good, 1 miss, 2 good, 2 miss, 3 good, 1 miss,
-# 1 good, 2 miss, 3 good, 1 miss, 1 good, 2 miss, 1 good, 2 miss, 1 good.
+# Day indices 0-27 (day 0 = today minus 27 days, day 27 = today).
+# 16 confirmed = 57.1% ≈ 58%.  Day 27 (today) is intentionally absent so the
+# patient app always shows pending medications on demo day.
+# Streaks: 3 good, 1 miss, 2 good, 2 miss, 3 good, 1 miss,
+#          1 good, 2 miss, 3 good, 1 miss, 1 good, 2 miss, 1 good, 2 miss, 1 good.
 _ADH_CONFIRMED_DAYS: frozenset[int] = frozenset({
-    0, 1, 2,          # Apr 7-9
-    4, 5,             # Apr 11-12
-    8, 9, 10,         # Apr 15-17
-    12,               # Apr 19
-    15, 16, 17,       # Apr 22-24
-    20,               # Apr 27
-    22, 23,           # Apr 29-30
-    26,               # May 3
+    0, 1, 2,
+    4, 5,
+    8, 9, 10,
+    12,
+    15, 16, 17,
+    20,
+    22, 23,
+    26,
 })
 
 # ── Reading generation helpers ─────────────────────────────────────────────────
@@ -160,11 +166,11 @@ def _gen_demo_gap_readings() -> list[Reading]:
 
 
 def _gen_demo_adh_readings() -> list[Reading]:
-    """28 days of morning-only readings Apr 7 – May 4, average ~152 mmHg."""
+    """28 days of morning-only readings ending today, average ~152 mmHg."""
     random.seed(99)
     rows: list[Reading] = []
 
-    start_date = date(2026, 4, 7)
+    start_date = date.today() - timedelta(days=27)
 
     for day_idx in range(28):
         d = start_date + timedelta(days=day_idx)
@@ -189,14 +195,18 @@ def _gen_demo_adh_readings() -> list[Reading]:
 
 
 def _gen_demo_adh_confirmations() -> list[MedicationConfirmation]:
-    """2 medications × 28 days at ~58% adherence with realistic streak pattern."""
+    """2 medications × 28 days at ~58% adherence with realistic streak pattern.
+
+    Window ends today so day 27 (today) is always unconfirmed — the patient
+    app will always show pending medications regardless of when the demo runs.
+    """
     random.seed(55)
     rows: list[MedicationConfirmation] = []
     meds = [
         ("amlodipine 5mg", "17767"),
         ("lisinopril 10mg", "29046"),
     ]
-    start_date = date(2026, 4, 7)
+    start_date = date.today() - timedelta(days=27)
 
     for med_name, rxnorm in meds:
         for day_idx in range(28):
@@ -232,7 +242,11 @@ async def _teardown(dry_run: bool) -> None:
     _cascade_models: list[type] = [
         AuditEvent,
         Briefing,
+        OutcomeVerification,   # references alert_feedback + alerts
+        AlertFeedback,         # references alerts
         Alert,
+        CalibrationRule,
+        GapExplanation,
         ProcessingJob,
         MedicationConfirmation,
         Reading,
@@ -262,7 +276,7 @@ async def _teardown(dry_run: bool) -> None:
                 print(f"  Deleted patient record: {pid}")
 
         # Clear transient tables for Patient A — readings + confirmations stay
-        for model in [AuditEvent, Briefing, Alert, ProcessingJob]:
+        for model in [AuditEvent, Briefing, OutcomeVerification, AlertFeedback, Alert, CalibrationRule, GapExplanation, ProcessingJob]:
             result = await session.execute(
                 delete(model).where(model.patient_id == _PATIENT_A)
             )
@@ -562,11 +576,11 @@ async def _seed_demo_adh(dry_run: bool) -> None:
             last_med_change=date(2025, 11, 5),
             allergies=[],
             allergy_reactions=[],
-            last_visit_date=date(2025, 11, 5),
+            last_visit_date=date(2026, 4, 5),
             last_clinic_systolic=148,
             last_clinic_diastolic=92,
             historic_bp_systolic=[148],
-            historic_bp_dates=["2025-11-05"],
+            historic_bp_dates=["2026-04-05"],
             overdue_labs=[],
             social_context=None,
         ))

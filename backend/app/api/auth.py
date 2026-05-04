@@ -37,6 +37,7 @@ class PatientTokenResponse(BaseModel):
 
     access_token: str
     expires_in: int
+    patient_name: str | None = None
 
 
 @router.post("/auth/patient-token", response_model=PatientTokenResponse)
@@ -82,4 +83,8 @@ async def patient_token(
     token = jwt.encode(payload, settings.patient_jwt_secret, algorithm="HS256")
 
     logger.info("patient_token issued for patient=%s", body.research_id)
-    return PatientTokenResponse(access_token=token, expires_in=_TOKEN_EXPIRY_SECONDS)
+    return PatientTokenResponse(
+        access_token=token,
+        expires_in=_TOKEN_EXPIRY_SECONDS,
+        patient_name=patient.name,
+    )

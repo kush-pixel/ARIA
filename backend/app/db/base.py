@@ -31,6 +31,9 @@ engine = create_async_engine(
     _async_url(settings.database_url),
     echo=settings.app_debug,
     pool_pre_ping=True,
+    pool_size=10,
+    max_overflow=5,
+    pool_timeout=30,
     connect_args={
         "prepared_statement_cache_size": 0,
         "statement_cache_size": 0,
