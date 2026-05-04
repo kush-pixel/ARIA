@@ -2,10 +2,21 @@
 
 const TOKEN_KEY = 'aria_patient_token'
 const PATIENT_ID_KEY = 'aria_patient_id'
+const PATIENT_NAME_KEY = 'aria_patient_name'
 
-export function saveToken(token: string, patientId: string): void {
+export function saveToken(token: string, patientId: string, patientName?: string | null): void {
   localStorage.setItem(TOKEN_KEY, token)
   localStorage.setItem(PATIENT_ID_KEY, patientId)
+  if (patientName) {
+    localStorage.setItem(PATIENT_NAME_KEY, patientName)
+  } else {
+    localStorage.removeItem(PATIENT_NAME_KEY)
+  }
+}
+
+export function getPatientName(): string | null {
+  if (typeof window === 'undefined') return null
+  return localStorage.getItem(PATIENT_NAME_KEY)
 }
 
 export function getToken(): string | null {

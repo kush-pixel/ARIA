@@ -19,6 +19,7 @@ const SYMPTOMS: Symptom[] = [
   { id: 'dizziness', label: 'Dizziness', note: 'Your doctor will be informed at your next visit.' },
   { id: 'chest_pain', label: 'Chest pain' },
   { id: 'shortness_of_breath', label: 'Shortness of breath' },
+  { id: 'other', label: 'Other' },
 ]
 
 const URGENT_SYMPTOMS = new Set(['chest_pain', 'shortness_of_breath'])
@@ -38,6 +39,7 @@ export default function SubmitPage() {
   const [medTaken, setMedTaken] = useState<MedTaken | ''>('')
   const [twoReadings, setTwoReadings] = useState(false)
   const [symptoms, setSymptoms] = useState<Set<string>>(new Set())
+  const [otherText, setOtherText] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [done, setDone] = useState(false)
@@ -64,6 +66,9 @@ export default function SubmitPage() {
 
     setLoading(true)
     try {
+      const symptomList = Array.from(symptoms).map(s =>
+        s === 'other' && otherText.trim() ? `other: ${otherText.trim()}` : s
+      )
       await submitReading({
         patient_id: patientId,
         systolic_1: parseInt(sys1),
@@ -74,7 +79,7 @@ export default function SubmitPage() {
         session,
         ...(medTaken ? { medication_taken: medTaken } : {}),
         submitted_by: 'patient',
-        symptoms: symptoms.size > 0 ? Array.from(symptoms) : [],
+        symptoms: symptomList.length > 0 ? symptomList : [],
       })
       setDone(true)
     } catch (err: unknown) {
@@ -202,6 +207,16 @@ export default function SubmitPage() {
               </span>
             </label>
           ))}
+          {symptoms.has('other') && (
+            <input
+              type="text"
+              placeholder="Please describe your symptom…"
+              value={otherText}
+              onChange={e => setOtherText(e.target.value)}
+              maxLength={120}
+              className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          )}
         </section>
 
         {/* Safety banner */}

@@ -24,6 +24,7 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 export interface TokenResponse {
   access_token: string
   expires_in: number
+  patient_name: string | null
 }
 
 export async function login(researchId: string): Promise<TokenResponse> {

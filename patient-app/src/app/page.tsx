@@ -20,8 +20,8 @@ export default function LoginPage() {
     setError('')
     setLoading(true)
     try {
-      const { access_token } = await login(researchId.trim())
-      saveToken(access_token, researchId.trim())
+      const { access_token, patient_name } = await login(researchId.trim())
+      saveToken(access_token, researchId.trim(), patient_name)
       router.replace('/confirm')
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Login failed'
