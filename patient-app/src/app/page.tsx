@@ -57,10 +57,9 @@ export default function LoginPage() {
             <input
               id="research-id"
               type="text"
-              inputMode="numeric"
               value={researchId}
               onChange={e => setResearchId(e.target.value)}
-              placeholder="e.g. 1091"
+              placeholder="e.g. DEMO_ADH"
               required
               className="w-full border border-gray-300 rounded-lg px-3 py-2 text-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
