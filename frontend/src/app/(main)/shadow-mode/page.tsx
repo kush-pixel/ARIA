@@ -75,16 +75,17 @@ function ResultBadge({ result }: { result: ShadowModeVisit['result'] }) {
         AGREE ✓
       </span>
     )
+
   if (result === 'false_negative')
     return (
       <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[13px] font-semibold bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400">
-        FALSE NEG ✗
+        DISAGREE ✗
       </span>
     )
   if (result === 'false_positive')
     return (
       <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[13px] font-semibold bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
-        FALSE POS ⚠
+        DISAGREE ✗
       </span>
     )
   return (
@@ -392,6 +393,7 @@ function ExpandedCard({ visit }: { visit: ShadowModeVisit }) {
             </span>
           )}
         </div>
+
         <p className="text-[14px] text-slate-600 dark:text-slate-400">
           ARIA pre-visit:{' '}
           <span className="font-semibold">
@@ -407,18 +409,18 @@ function ExpandedCard({ visit }: { visit: ShadowModeVisit }) {
 // Main page
 // ---------------------------------------------------------------------------
 
-type FilterKey = 'all' | 'agree' | 'false_negative' | 'false_positive' | 'no_ground_truth'
+type FilterKey = 'all' | 'agree' | 'disagree' | 'no_ground_truth'
 
 const FILTERS: { key: FilterKey; label: string }[] = [
   { key: 'all', label: 'All' },
-  { key: 'agree', label: 'Agreements' },
-  { key: 'false_negative', label: 'False Negatives' },
-  { key: 'false_positive', label: 'False Positives' },
+  { key: 'agree', label: 'Agree' },
+  { key: 'disagree', label: 'Disagree' },
   { key: 'no_ground_truth', label: 'No Flag' },
 ]
 
 function applyFilter(visits: ShadowModeVisit[], filter: FilterKey): ShadowModeVisit[] {
   if (filter === 'all') return visits
+  if (filter === 'disagree') return visits.filter((v) => v.result === 'false_negative' || v.result === 'false_positive')
   return visits.filter((v) => v.result === filter)
 }
 
@@ -475,100 +477,11 @@ export default function ShadowModePage() {
           Shadow Mode: Historical Validation
         </h1>
         <p className="text-[15px] text-slate-500 dark:text-slate-400 mt-1">
-          Replaying patient 1091&apos;s {data.total_eval_points} evaluation points ({data.clinic_bp_points} clinic BP · {data.no_vitals_points} no-vitals HTN assessments). ARIA receives only data available before each visit.
+          Replaying patient John Doe&apos;s {data.total_eval_points} evaluation points ({data.clinic_bp_points} clinic BP · {data.no_vitals_points} no-vitals HTN assessments). ARIA receives only data available before each visit.
         </p>
       </div>
 
-      <div className="grid grid-cols-4 gap-4">
-        {/* Agreement rate */}
-        <div className="card p-5">
-          <p className="text-[13px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-1">
-            Agreement Rate
-          </p>
-          <p
-            className={`text-[32px] font-bold tabular-nums ${
-              data.agreement_pct >= 80
-                ? 'text-green-600 dark:text-green-400'
-                : 'text-red-600 dark:text-red-400'
-            }`}
-          >
-            {data.agreement_pct.toFixed(1)}%
-          </p>
-          <p className="text-[13px] text-slate-400 dark:text-slate-500 mt-0.5">
-            Target: &ge;80%
-          </p>
-        </div>
 
-        {/* Visits analysed */}
-        <div className="card p-5">
-          <p className="text-[13px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-1">
-            Visits Analysed
-          </p>
-          <p className="text-[32px] font-bold tabular-nums text-slate-900 dark:text-slate-100">
-            {data.with_ground_truth}
-          </p>
-          <p className="text-[13px] text-slate-400 dark:text-slate-500 mt-0.5">
-            {data.skipped} skipped · {data.no_ground_truth} no flag
-          </p>
-        </div>
-
-        {/* False negatives */}
-        <div className="card p-5">
-          <p className="text-[13px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-1">
-            False Negatives
-          </p>
-          <p
-            className={`text-[32px] font-bold tabular-nums ${
-              data.false_negatives > 0
-                ? 'text-red-600 dark:text-red-400'
-                : 'text-slate-900 dark:text-slate-100'
-            }`}
-          >
-            {data.false_negatives}
-          </p>
-          <p className="text-[13px] text-slate-400 dark:text-slate-500 mt-0.5">
-            Physician concerned, ARIA silent
-          </p>
-        </div>
-
-        {/* Passed/failed */}
-        <div className="card p-5 flex flex-col justify-between">
-          <p className="text-[13px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-1">
-            Validation
-          </p>
-          {data.passed ? (
-            <span className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 text-[16px] font-bold w-fit">
-              ✓ PASSED
-            </span>
-          ) : (
-            <span className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 text-[16px] font-bold w-fit">
-              ✗ FAILED
-            </span>
-          )}
-          <p className="text-[13px] text-slate-400 dark:text-slate-500 mt-1">
-            {data.false_positives} false positives
-          </p>
-        </div>
-      </div>
-
-      {/* Section 2: Best demo window */}
-      {data.best_demo_window && (
-        <div className="border-l-4 border-teal-500 bg-teal-50/50 dark:bg-teal-900/10 pl-5 py-3 pr-4 rounded-r-lg">
-          <p className="text-[15px] font-semibold text-slate-800 dark:text-slate-100">
-            Best Demo Window
-          </p>
-          <p className="text-[14px] text-slate-600 dark:text-slate-400 mt-0.5">
-            {data.best_demo_window.summary}
-          </p>
-          <p className="text-[13px] text-slate-500 dark:text-slate-500 mt-1">
-            {formatDate(data.best_demo_window.date_from)} &ndash;{' '}
-            {formatDate(data.best_demo_window.date_to)}
-          </p>
-          <p className="text-[13px] text-slate-400 dark:text-slate-500 mt-1">
-            Click these visits in the timeline below to see ARIA&apos;s full reasoning.
-          </p>
-        </div>
-      )}
 
       {/* Section 3: Filter bar */}
       <div className="flex items-center gap-6 border-b border-slate-200 dark:border-slate-700">
