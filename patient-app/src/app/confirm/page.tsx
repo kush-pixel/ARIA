@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { getPendingConfirmations, confirmDoses, downloadIcs } from '@/lib/api'
 import type { PendingConfirmation } from '@/lib/api'
-import { getPatientId, isTokenValid } from '@/lib/auth'
+import { getPatientId, getPatientName, isTokenValid } from '@/lib/auth'
 
 function formatTime(iso: string): string {
   const d = new Date(iso)
@@ -39,6 +39,7 @@ function getDailyMotivation(): string {
 export default function ConfirmPage() {
   const router = useRouter()
   const [patientId, setPatientId] = useState<string | null>(null)
+  const [patientName, setPatientName] = useState<string | null>(null)
   const [pending, setPending] = useState<PendingConfirmation[]>([])
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(true)
@@ -66,6 +67,7 @@ export default function ConfirmPage() {
     if (!isTokenValid()) { router.replace('/'); return }
     const pid = getPatientId()
     setPatientId(pid)
+    setPatientName(getPatientName())
     if (pid) loadPending(pid)
   }, [router, loadPending])
 
@@ -117,12 +119,18 @@ export default function ConfirmPage() {
   return (
     <main className="min-h-screen px-4 py-6 max-w-md mx-auto">
       {/* Welcome */}
-      <div className="mb-6">
+      <div className="mb-4">
         <p className="text-xs text-gray-400 uppercase tracking-wide mb-0.5">ARIA · My Health</p>
         <h1 className="text-xl font-bold text-gray-900">
-          {getGreeting()}{patientId ? `, Patient ${patientId}` : ''}
+          {getGreeting()}{patientName ? `, ${patientName}` : patientId ? `, Patient ${patientId}` : ''}
         </h1>
         <p className="text-sm text-gray-500 mt-0.5">Here is your health summary for today.</p>
+      </div>
+
+      {/* Motivational message */}
+      <div className="mb-6 bg-blue-50 border border-blue-100 rounded-2xl px-5 py-4 text-center">
+        <p className="text-sm text-blue-800 font-medium leading-relaxed">{getDailyMotivation()}</p>
+        <p className="text-xs text-blue-400 mt-2">— Your ARIA health team</p>
       </div>
 
       {/* Nav row */}
@@ -206,11 +214,6 @@ export default function ConfirmPage() {
         </p>
       </section>
 
-      {/* Motivational footer */}
-      <div className="mt-8 mb-4 bg-blue-50 border border-blue-100 rounded-2xl px-5 py-4 text-center">
-        <p className="text-sm text-blue-800 font-medium leading-relaxed">{getDailyMotivation()}</p>
-        <p className="text-xs text-blue-400 mt-2">— Your ARIA health team</p>
-      </div>
     </main>
   )
 }
