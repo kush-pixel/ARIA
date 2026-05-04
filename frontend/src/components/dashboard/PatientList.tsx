@@ -106,8 +106,16 @@ function deriveChiefConcern(patient: Patient): string {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function formatApptTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+function formatApptDateTime(iso: string): string {
+  const d = new Date(iso)
+  const now = new Date()
+  const isToday = d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  const time = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+  if (isToday) return `Today · ${time}`
+  const dateStr = d.toLocaleDateString('en-GB', { month: 'short', day: 'numeric' })
+  return `${dateStr} · ${time}`
 }
 
 function isScoreStale(computedAt: string | null): boolean {
@@ -115,13 +123,6 @@ function isScoreStale(computedAt: string | null): boolean {
   return Date.now() - new Date(computedAt).getTime() > 26 * 60 * 60 * 1000
 }
 
-function isToday(iso: string): boolean {
-  const d = new Date(iso)
-  const now = new Date()
-  return d.getFullYear() === now.getFullYear() &&
-    d.getMonth() === now.getMonth() &&
-    d.getDate() === now.getDate()
-}
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
@@ -269,7 +270,7 @@ export default function PatientList() {
           </div>
         ) : (
           pageSlice.map((patient, idx) => {
-            const apptToday = patient.next_appointment && isToday(patient.next_appointment)
+
             const trend = bpTrends[patient.patient_id]
             const chiefConcern = deriveChiefConcern(patient)
             const isLast = idx === pageSlice.length - 1
@@ -340,10 +341,10 @@ export default function PatientList() {
 
                 {/* Appointment */}
                 <button onClick={() => router.push(`/patients/${patient.patient_id}`)} className="flex justify-center">
-                  {patient.next_appointment && apptToday ? (
+                  {patient.next_appointment ? (
                     <span className="inline-flex items-center gap-1.5 text-[13px] font-semibold text-blue-600 dark:text-blue-400">
                       <Clock size={13} strokeWidth={2} />
-                      {formatApptTime(patient.next_appointment)}
+                      {formatApptDateTime(patient.next_appointment)}
                     </span>
                   ) : (
                     <span className="text-[13px] text-gray-300 dark:text-gray-700">—</span>

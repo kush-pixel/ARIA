@@ -210,6 +210,7 @@ export default function ChatPanel({ patientId, patient, readings }: ChatPanelPro
   }, [patientId])
 
   useEffect(() => {
+    clearChatSession(patientId).catch(() => {})
     return () => { clearChatSession(patientId).catch(() => {}) }
   }, [patientId])
 
