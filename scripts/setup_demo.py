@@ -715,7 +715,7 @@ async def _verify() -> bool:
         if p_a:
             ok &= _chk("risk_tier = high", p_a.risk_tier == "high")
             ok &= _chk(
-                "next_appointment = 2026-05-05",
+                f"next_appointment = {_DEMO_DATE}",
                 p_a.next_appointment is not None and p_a.next_appointment.date() == _DEMO_DATE,
             )
             ok &= _chk(
@@ -887,11 +887,22 @@ async def _verify() -> bool:
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-async def _main(dry_run: bool, verify_only: bool) -> None:
+async def _main(dry_run: bool, verify_only: bool, recompute_only: bool) -> None:
     tag = " (DRY RUN)" if dry_run else ""
     print(f"=== ARIA Demo Setup{tag} ===")
     print(f"Target demo date : {_DEMO_DATE}")
     print(f"Demo appointment : {_DEMO_APPT.isoformat()}")
+
+    if recompute_only:
+        # Refresh alerts and briefings without touching seeded data.
+        # Use on demo day to ensure alerts reflect the current gap duration
+        # and risk scores are up to date before the presentation.
+        print("\n── Recompute-only: Pattern recompute + briefing generation ─")
+        for pid in _ALL_PATIENTS:
+            await _run_patient(pid)
+        await _verify()
+        print("\n=== Done ===")
+        return
 
     if not verify_only:
         await _teardown(dry_run)
@@ -919,5 +930,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ARIA demo environment setup")
     parser.add_argument("--dry-run", action="store_true", help="Preview changes, no DB writes")
     parser.add_argument("--verify-only", action="store_true", help="Run checklist only, no setup")
+    parser.add_argument(
+        "--recompute-only",
+        action="store_true",
+        help="Re-run pattern engine + briefings for all patients without reseeding. "
+             "Use on demo day to refresh alerts before the presentation.",
+    )
     args = parser.parse_args()
-    asyncio.run(_main(dry_run=args.dry_run, verify_only=args.verify_only))
+    asyncio.run(_main(
+        dry_run=args.dry_run,
+        verify_only=args.verify_only,
+        recompute_only=args.recompute_only,
+    ))

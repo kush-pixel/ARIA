@@ -10,6 +10,7 @@ from typing import Literal
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session
@@ -18,6 +19,7 @@ from app.models.alert import Alert
 from app.models.audit_event import AuditEvent
 from app.models.clinical_context import ClinicalContext
 from app.models.patient import Patient
+from app.models.processing_job import ProcessingJob
 from app.models.reading import Reading
 from app.utils.datetime_utils import is_off_hours
 from app.utils.logging_utils import get_logger
@@ -162,6 +164,24 @@ async def create_reading(
             logger.info(
                 "symptom_urgent alert (sob+chf): patient=%s", payload.patient_id
             )
+
+    # Enqueue a reactive pattern_recompute so alerts and risk score update within
+    # 30 seconds of the reading landing, instead of waiting for the midnight sweep.
+    # Hourly idempotency key means at most one reactive recompute per patient per hour.
+    await session.execute(
+        pg_insert(ProcessingJob)
+        .values(
+            job_type="pattern_recompute",
+            patient_id=payload.patient_id,
+            idempotency_key=(
+                f"pattern_recompute:{payload.patient_id}:{now.strftime('%Y-%m-%dT%H')}"
+            ),
+            status="queued",
+            queued_at=now,
+            created_by="reading_submit",
+        )
+        .on_conflict_do_nothing(index_elements=["idempotency_key"])
+    )
 
     await session.commit()
     await session.refresh(reading)
