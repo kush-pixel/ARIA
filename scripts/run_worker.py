@@ -125,9 +125,7 @@ async def main() -> None:
         _SWEEP_MINUTE,
     )
 
-    # Strip the SQLAlchemy dialect prefix so asyncpg can parse the raw URL (Fix 60)
-    raw_db_url = settings.database_url.replace("+asyncpg", "")
-    processor = WorkerProcessor(listen_url=raw_db_url)
+    processor = WorkerProcessor()
 
     try:
         await processor.run()

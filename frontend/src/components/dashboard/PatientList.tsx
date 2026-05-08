@@ -185,6 +185,22 @@ export default function PatientList() {
       .catch(() => setLoading(false))
   }, [page, search, tierFilter])
 
+  // Silent 10-second poll — updates patient list without a loading flash.
+  // BP trends already travel with the patient payload via trend_avg_systolic.
+  useEffect(() => {
+    const id = setInterval(() => {
+      getPatients({ page, pageSize: PAGE_SIZE, search, tier: tierFilter })
+        .then((data: PaginatedPatients) => {
+          setPatients(data.patients)
+          setTotal(data.total)
+          setTotalPages(data.total_pages)
+          setCounts(data.counts)
+        })
+        .catch(() => {})
+    }, 10_000)
+    return () => clearInterval(id)
+  }, [page, search, tierFilter])
+
   // Full spinner on initial load only; subsequent page/search changes show inline opacity
   if (loading && patients.length === 0) {
     return (

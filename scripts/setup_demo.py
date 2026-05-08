@@ -57,6 +57,11 @@ from app.services.worker.processor import (
 
 _DEMO_APPT = datetime.now(UTC) + timedelta(hours=5)
 _DEMO_DATE = _DEMO_APPT.date()
+# High-risk patients first, then medium — 30-min slots
+_DEMO_APPT_A   = _DEMO_APPT                           # Patient A  — high,   slot 0
+_DEMO_APPT_EHR = _DEMO_APPT + timedelta(minutes=30)   # DEMO_EHR   — high,   slot 1
+_DEMO_APPT_GAP = _DEMO_APPT + timedelta(minutes=60)   # DEMO_GAP   — medium, slot 2
+_DEMO_APPT_ADH = _DEMO_APPT + timedelta(minutes=90)   # DEMO_ADH   — medium, slot 3
 
 _PATIENT_A = "1091"
 _SHIFT_DAYS = 5654
@@ -464,7 +469,7 @@ async def _timeshift_patient_a(dry_run: bool) -> None:
             update(Patient)
             .where(Patient.patient_id == _PATIENT_A)
             .values(
-                next_appointment=_DEMO_APPT,
+                next_appointment=_DEMO_APPT_A,
                 enrolled_at=datetime(2025, 1, 6, tzinfo=UTC),
             )
         )
@@ -502,7 +507,7 @@ async def _seed_demo_gap(dry_run: bool) -> None:
             age=62,
             risk_tier="medium",
             monitoring_active=True,
-            next_appointment=_DEMO_APPT,
+            next_appointment=_DEMO_APPT_GAP,
             enrolled_at=datetime(2025, 11, 5, tzinfo=UTC),
             enrolled_by="setup_demo",
         ))
@@ -559,7 +564,7 @@ async def _seed_demo_adh(dry_run: bool) -> None:
             age=55,
             risk_tier="medium",
             monitoring_active=True,
-            next_appointment=_DEMO_APPT,
+            next_appointment=_DEMO_APPT_ADH,
             enrolled_at=datetime(2025, 11, 5, tzinfo=UTC),
             enrolled_by="setup_demo",
         ))
@@ -611,7 +616,7 @@ async def _seed_demo_ehr(dry_run: bool) -> None:
             tier_override="CHF in problem list",
             tier_override_source="system",
             monitoring_active=False,
-            next_appointment=_DEMO_APPT,
+            next_appointment=_DEMO_APPT_EHR,
             enrolled_at=datetime(2026, 1, 5, tzinfo=UTC),
             enrolled_by="setup_demo",
         ))
@@ -710,7 +715,7 @@ async def _verify() -> bool:
         if p_a:
             ok &= _chk("risk_tier = high", p_a.risk_tier == "high")
             ok &= _chk(
-                "next_appointment = 2026-05-05",
+                f"next_appointment = {_DEMO_DATE}",
                 p_a.next_appointment is not None and p_a.next_appointment.date() == _DEMO_DATE,
             )
             ok &= _chk(
@@ -882,11 +887,22 @@ async def _verify() -> bool:
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-async def _main(dry_run: bool, verify_only: bool) -> None:
+async def _main(dry_run: bool, verify_only: bool, recompute_only: bool) -> None:
     tag = " (DRY RUN)" if dry_run else ""
     print(f"=== ARIA Demo Setup{tag} ===")
     print(f"Target demo date : {_DEMO_DATE}")
     print(f"Demo appointment : {_DEMO_APPT.isoformat()}")
+
+    if recompute_only:
+        # Refresh alerts and briefings without touching seeded data.
+        # Use on demo day to ensure alerts reflect the current gap duration
+        # and risk scores are up to date before the presentation.
+        print("\n── Recompute-only: Pattern recompute + briefing generation ─")
+        for pid in _ALL_PATIENTS:
+            await _run_patient(pid)
+        await _verify()
+        print("\n=== Done ===")
+        return
 
     if not verify_only:
         await _teardown(dry_run)
@@ -914,5 +930,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ARIA demo environment setup")
     parser.add_argument("--dry-run", action="store_true", help="Preview changes, no DB writes")
     parser.add_argument("--verify-only", action="store_true", help="Run checklist only, no setup")
+    parser.add_argument(
+        "--recompute-only",
+        action="store_true",
+        help="Re-run pattern engine + briefings for all patients without reseeding. "
+             "Use on demo day to refresh alerts before the presentation.",
+    )
     args = parser.parse_args()
-    asyncio.run(_main(dry_run=args.dry_run, verify_only=args.verify_only))
+    asyncio.run(_main(
+        dry_run=args.dry_run,
+        verify_only=args.verify_only,
+        recompute_only=args.recompute_only,
+    ))
