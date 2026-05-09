@@ -1,4 +1,4 @@
-# ARIA — Summer 2026 Development Plan
+# ARIA : Summer 2026 Development Plan
 ## Leap of Faith Technologies × Illinois Institute of Technology
 ## Team: NeuraCare Nexus
 ## Duration: 16 Weeks | Budget: $3,000
@@ -11,33 +11,33 @@ A between-visit clinical intelligence platform for hypertension management. A PC
 
 - Ingesting patient EHR data via FHIR R4 Bundle
 - Generating clinically realistic synthetic home BP readings and medication confirmations
-- Running three-layer AI analysis — deterministic rules → risk scoring → LLM explanation
+- Running three-layer AI analysis : deterministic rules → risk scoring → LLM explanation
 - Delivering a structured pre-visit briefing at 7:30 AM on appointment days
 - Providing a clinician chatbot for real-time patient data queries
 - Collecting home BP readings and medication confirmations via a patient PWA
 
 **Current state:** Four demo patients, full three-layer pipeline operational, patient PWA live, clinician chatbot live.
 
-**Regulatory context:** ARIA is built for the US healthcare market. Clinical guidelines follow ACC/AHA 2017. Compliance framework is HIPAA. De-identified patients are used for the summer physician validation study — HIPAA does not apply to de-identified data. Before onboarding real US patients, Supabase must be upgraded to Team plan ($599/month) for HIPAA BAA, and all vendors handling PHI (Railway, Sentry, Anthropic, Doppler) must sign BAAs.
+**Regulatory context:** ARIA is built for the US healthcare market. Clinical guidelines follow ACC/AHA 2017. Compliance framework is HIPAA. De-identified patients are used for the summer physician validation study : HIPAA does not apply to de-identified data. Before onboarding real US patients, Supabase must be upgraded to Team plan ($599/month) for HIPAA BAA, and all vendors handling PHI (Railway, Sentry, Anthropic, Doppler) must sign BAAs.
 
 ---
 
 ## What ARIA Will Be After 16 Weeks
 
-- Clinically accurate detection covering diastolic BP, heart rate, symptoms, orthostatic hypotension, masked hypertension, circadian patterns, and polypharmacy — signals the current system ignores entirely
+- Clinically accurate detection covering diastolic BP, heart rate, symptoms, orthostatic hypotension, masked hypertension, circadian patterns, and polypharmacy : signals the current system ignores entirely
 - Per-comorbidity ACC/AHA-aligned thresholds replacing the flat adjustment across all detectors
 - ML-grade algorithms: CUSUM replacing linear slope, Isolation Forest anomaly scoring, CausalImpact medication response assessment
 - A chatbot that cites its sources, persists conversations, proactively surfaces hypotheses, and communicates uncertainty explicitly
-- A **native React Native (Expo)** patient app on iOS and Android — guided clinically valid measurements, Face ID/Touch ID biometric login, APNs/FCM push notifications, offline support, OCR camera scan, direct Apple and Google Calendar integration, Apple HealthKit and Google Health Connect ready
+- A **native React Native (Expo)** patient app on iOS and Android : guided clinically valid measurements, Face ID/Touch ID biometric login, APNs/FCM push notifications, offline support, OCR camera scan, direct Apple and Google Calendar integration, Apple HealthKit and Google Health Connect ready
 - One validated wearable device integration eliminating manual transcription
 - Clinician workflow tools: 30-second briefing layout, tablet-responsive dashboard, one-click actions, medication adjustment from dashboard, post-appointment feedback
 - Multi-practice infrastructure: Row-Level Security, practice admin role, practice-level analytics
-- Real physician validation — briefings reviewed by practising clinicians against real clinical judgement
+- Real physician validation : briefings reviewed by practising clinicians against real clinical judgement
 - Production-grade infrastructure: Alembic migrations, GitHub Actions CI/CD, Celery task queue, real-time SSE dashboard
 
 ---
 
-## Week 1 — Critical Fixes (Ships Before Anything Else)
+## Week 1 : Critical Fixes (Ships Before Anything Else)
 
 These are bugs, security issues, and an architectural safety gap. Nothing else starts until these are closed.
 
@@ -60,7 +60,7 @@ The `.env` file contains live Supabase credentials, Anthropic API key, Groq API 
 
 **Actions:**
 - Rotate every credential in `.env` immediately
-- Migrate to Doppler (free tier) — inject at runtime via Railway environment
+- Migrate to Doppler (free tier) : inject at runtime via Railway environment
 - Add `.env` to `.gitignore`
 - Add `git-secrets` pre-commit hook to block future credential commits
 
@@ -92,21 +92,21 @@ No rate limiting exists on any endpoint. The chatbot, briefing, and reading subm
 **Effort:** 4 hours.
 
 ### 1.6 Drug Interaction Immediate Alert
-Currently `medication_safety.py` only runs when a briefing is generated. If a FHIR re-ingestion adds a new medication that creates a dangerous combination (triple whammy, k-sparing + ACE/ARB etc.), the combination sits in the database undetected until the next briefing — potentially days.
+Currently `medication_safety.py` only runs when a briefing is generated. If a FHIR re-ingestion adds a new medication that creates a dangerous combination (triple whammy, k-sparing + ACE/ARB etc.), the combination sits in the database undetected until the next briefing : potentially days.
 
-**Fix:** Whenever `clinical_context.current_medications` is updated via **FHIR re-ingestion**, enqueue a `pattern_recompute` job. The worker re-runs drug interaction detection and fires a `drug_interaction` alert immediately if a new dangerous combination is detected. (Sprint 6.3 extends this to wearable sync and clinician-recorded adjustments — two additional pathways added when those features exist.)
+**Fix:** Whenever `clinical_context.current_medications` is updated via **FHIR re-ingestion**, enqueue a `pattern_recompute` job. The worker re-runs drug interaction detection and fires a `drug_interaction` alert immediately if a new dangerous combination is detected. (Sprint 6.3 extends this to wearable sync and clinician-recorded adjustments : two additional pathways added when those features exist.)
 
 **Alert behaviour:**
 - New `alert_type = "drug_interaction"` in the alerts table
-- Deduplication check — only fire if no unacknowledged drug interaction alert already exists for this patient
-- `off_hours = TRUE` if triggered 6PM–8AM or weekend — clinician sees it at start of next working day
-- SSE push delivers it to the dashboard in real time (Sprint S1.5 infrastructure — real-time SSE endpoint)
+- Deduplication check : only fire if no unacknowledged drug interaction alert already exists for this patient
+- `off_hours = TRUE` if triggered 6PM–8AM or weekend : clinician sees it at start of next working day
+- SSE push delivers it to the dashboard in real time (Sprint S1.5 infrastructure : real-time SSE endpoint)
 
-**Schema note:** The `drug_interaction` alert_type is added in Week 1 via a raw `ALTER TABLE alerts DROP CONSTRAINT IF EXISTS alerts_alert_type_check; ALTER TABLE alerts ADD CONSTRAINT alerts_alert_type_check CHECK (alert_type IN ('gap_urgent','gap_briefing','inertia','deterioration','adherence','drug_interaction'));` statement — acceptable before Alembic exists. Sprint S1.1 reconciles this into the baseline Alembic migration as the first tracked schema change.
+**Schema note:** The `drug_interaction` alert_type is added in Week 1 via a raw `ALTER TABLE alerts DROP CONSTRAINT IF EXISTS alerts_alert_type_check; ALTER TABLE alerts ADD CONSTRAINT alerts_alert_type_check CHECK (alert_type IN ('gap_urgent','gap_briefing','inertia','deterioration','adherence','drug_interaction'));` statement : acceptable before Alembic exists. Sprint S1.1 reconciles this into the baseline Alembic migration as the first tracked schema change.
 
 **Alert card in clinician inbox:**
 ```
-🔴 DRUG INTERACTION — David Patel
+🔴 DRUG INTERACTION : David Patel
    New medication detected: Ibuprofen 400mg (added 14 May, 14:32)
    Triple whammy combination active:
    Ibuprofen + Ramipril + Furosemide → AKI risk
@@ -119,7 +119,7 @@ Currently `medication_safety.py` only runs when a briefing is generated. If a FH
 
 ---
 
-## Sprint 1 — Infrastructure Hardening (Weeks 2–3)
+## Sprint 1 : Infrastructure Hardening (Weeks 2–3)
 
 ### S1.1 Alembic Database Migrations
 
@@ -128,7 +128,7 @@ Currently `medication_safety.py` only runs when a briefing is generated. If a FH
 **Deliverable:**
 - `alembic init migrations/` with `target_metadata = Base.metadata`
 - Baseline migration reconciling all 17 existing `ADD COLUMN` statements
-- All future schema changes go through `alembic revision` — `setup_db.py` raw SQL retired
+- All future schema changes go through `alembic revision` : `setup_db.py` raw SQL retired
 - `alembic upgrade head` as first step in CI/CD pipeline
 
 **Effort:** 2 days (baseline reconciliation requires careful testing against real Supabase).
@@ -151,7 +151,7 @@ jobs:
   security:
     - pip-audit
     - bandit -r app/ -c .bandit
-    - trivy fs .                  # secret scan — blocks if .env found
+    - trivy fs .                  # secret scan : blocks if .env found
 
   deploy:
     needs: [lint-test, security]
@@ -166,13 +166,13 @@ CI uses a dedicated Supabase free-tier project. Never touches production.
 
 **Problem:** The current 30-second polling loop means:
 - Jobs wait up to 30 seconds before pickup
-- No priority queue — 7:30 AM briefings compete equally with background recomputes
+- No priority queue : 7:30 AM briefings compete equally with background recomputes
 - Cannot scale horizontally
 
 **Deliverable:**
 - Redis via Upstash (free tier sufficient at demo scale)
 - Three queues: `critical` (briefing on appointment day), `high` (pattern recompute on new reading), `default` (bulk recomputes)
-- `processing_jobs` table retained as audit log — Celery writes status back
+- `processing_jobs` table retained as audit log : Celery writes status back
 - APScheduler replaced with Celery Beat for 7:30 AM scheduler and midnight recompute
 - `run_worker.py` updated to start Celery worker instead of polling loop
 
@@ -186,11 +186,11 @@ CI uses a dedicated Supabase free-tier project. Never touches production.
 - `sentry_sdk.init()` in `main.py` with `traces_sample_rate=0.1`
 - Captures all unhandled exceptions in FastAPI, Celery worker, and Layer 3 LLM calls
 - Alerts if `briefing_generation` fails between 7:00–9:00 AM
-- Sentry free tier: 5,000 errors/month — sufficient
+- Sentry free tier: 5,000 errors/month : sufficient
 
 **Effort:** 2 hours.
 
-### S1.5 Real-Time Dashboard — Server-Sent Events
+### S1.5 Real-Time Dashboard : Server-Sent Events
 
 **Problem:** Dashboard polls every 10 seconds via `setInterval`. Clinician sees stale data between polls.
 
@@ -219,7 +219,7 @@ CI uses a dedicated Supabase free-tier project. Never touches production.
 
 ### S1.7 Multi-Tenancy + Row-Level Security (Infrastructure)
 
-**Infrastructure prerequisite — must exist before any real practice is onboarded.** Without RLS, Practice A can see Practice B's patients. This ships in Sprint 1 so the physician validation study (Weeks 9–16) can safely onboard multiple practices.
+**Infrastructure prerequisite : must exist before any real practice is onboarded.** Without RLS, Practice A can see Practice B's patients. This ships in Sprint 1 so the physician validation study (Weeks 9–16) can safely onboard multiple practices.
 
 **Staged migration (safe to run against existing data):**
 ```sql
@@ -237,15 +237,15 @@ CREATE POLICY patient_isolation ON patients
     USING (practice_id = current_setting('app.practice_id'));
 ```
 
-Every JWT includes `practice_id` as a claim. FastAPI middleware sets `SET LOCAL app.practice_id` at the start of each request. No query changes required — RLS enforces isolation at the database level.
+Every JWT includes `practice_id` as a claim. FastAPI middleware sets `SET LOCAL app.practice_id` at the start of each request. No query changes required : RLS enforces isolation at the database level.
 
 **Effort:** 3 days.
 
 ---
 
-## Sprint 2 — Detection Engine (Weeks 4–6)
+## Sprint 2 : Detection Engine (Weeks 4–6)
 
-All BP thresholds in this sprint follow **ACC/AHA 2017**: clinic target <130/80 mmHg, home target <130/80 mmHg. There is no age-based threshold exception in ACC/AHA — patients aged ≥80 use the same 130/80 target.
+All BP thresholds in this sprint follow **ACC/AHA 2017**: clinic target <130/80 mmHg, home target <130/80 mmHg. There is no age-based threshold exception in ACC/AHA : patients aged ≥80 use the same 130/80 target.
 
 ### 2.1 Diastolic BP Across All Detectors
 
@@ -257,7 +257,7 @@ Diastolic hypertension is an independent cardiovascular risk factor, especially 
 |---|---|
 | Inertia | Fire if `diastolic_avg >= 80` sustained, even when systolic is within range |
 | Deterioration | Diastolic step-change sub-detector: ≥10 mmHg jump over 3 weeks |
-| Variability | Separate ARV calculation for diastolic — elevated diastolic variability indicates arterial stiffness |
+| Variability | Separate ARV calculation for diastolic : elevated diastolic variability indicates arterial stiffness |
 | Risk scorer | Add `_DIASTOLIC_WEIGHT = 0.05`, reduce systolic weight from 0.30 to 0.20 |
 
 **Effort:** 2 days.
@@ -271,10 +271,10 @@ Diastolic hypertension is an independent cardiovascular risk factor, especially 
 | Signal | Logic | Output |
 |---|---|---|
 | Beta-blocker underdose | Patient on beta-blocker AND resting HR consistently > 85 bpm | Supporting evidence for inertia |
-| Resting tachycardia | HR > 100 on 3+ readings in 7 days | "Resting tachycardia noted — consider ECG" |
-| AF screening | `irregular_pulse = TRUE` on 2+ sessions within 14 days | "Possible atrial fibrillation — 12-lead ECG recommended" (ACC/AHA/HRS 2019) |
+| Resting tachycardia | HR > 100 on 3+ readings in 7 days | "Resting tachycardia noted : consider ECG" |
+| AF screening | `irregular_pulse = TRUE` on 2+ sessions within 14 days | "Possible atrial fibrillation : 12-lead ECG recommended" (ACC/AHA/HRS 2019) |
 
-**Schema addition:** `readings.irregular_pulse BOOLEAN` — patient reports whether device showed irregular heartbeat indicator.
+**Schema addition:** `readings.irregular_pulse BOOLEAN` : patient reports whether device showed irregular heartbeat indicator.
 
 **Effort:** 2 days.
 
@@ -299,7 +299,7 @@ When a patient submits a reading they report whether they took their medication 
 | Detector | Change |
 |---|---|
 | Adherence | `medication_taken=no` or `partial` correlating with elevated readings weighted more strongly than missed confirmation |
-| Inertia | Consistent `medication_taken=yes` on elevated readings rules out adherence as confound — strengthens inertia conclusion |
+| Inertia | Consistent `medication_taken=yes` on elevated readings rules out adherence as confound : strengthens inertia conclusion |
 | Deterioration | `medication_taken=no` preceding a BP spike → adherence-driven deterioration, distinct from treatment failure |
 
 **Effort:** 1 day.
@@ -308,7 +308,7 @@ When a patient submits a reading they report whether they took their medication 
 
 `bp_position` (`seated|standing`) exists but no detector compares across positions. A drop ≥20 mmHg systolic on standing affects ~20% of elderly hypertensive patients and is a leading cause of falls.
 
-**Logic:** When seated and standing readings exist in the same session, compute delta. If sustained across 3+ sessions: "Possible orthostatic hypotension — review antihypertensive dosing and timing."
+**Logic:** When seated and standing readings exist in the same session, compute delta. If sustained across 3+ sessions: "Possible orthostatic hypotension : review antihypertensive dosing and timing."
 
 **Comorbidity amplification:** Escalate concern when diabetes (E11), alpha-blocker, diuretic, or ACE inhibitor present.
 
@@ -323,13 +323,13 @@ ARIA uses the clinic vs home comparison only to exclude pre-appointment readings
 | | Home High (≥130 mmHg) | Home Normal (<130 mmHg) |
 |---|---|---|
 | **Clinic High (≥130 mmHg)** | Sustained hypertension | White-coat (possibly overtreated) |
-| **Clinic Normal (<130 mmHg)** | **Masked hypertension — high stroke risk** | Controlled |
+| **Clinic Normal (<130 mmHg)** | **Masked hypertension : high stroke risk** | Controlled |
 
-Masked hypertension is the most dangerous quadrant — clinic BP looks fine so the physician does not act, but home BP is elevated. ARIA has all the data to detect this. No other system in the standard PCP workflow does.
+Masked hypertension is the most dangerous quadrant : clinic BP looks fine so the physician does not act, but home BP is elevated. ARIA has all the data to detect this. No other system in the standard PCP workflow does.
 
 **Schema addition:** `clinical_context.bp_classification TEXT` (values: `sustained|white_coat|masked|controlled|insufficient_data`).
 
-**Thresholds:** Both home and clinic use ACC/AHA 2017 target of 130/80 mmHg. Home and clinic thresholds are identical under ACC/AHA — unlike NICE which uses different values for each setting.
+**Thresholds:** Both home and clinic use ACC/AHA 2017 target of 130/80 mmHg. Home and clinic thresholds are identical under ACC/AHA : unlike NICE which uses different values for each setting.
 
 **Effort:** 1 day.
 
@@ -343,9 +343,9 @@ ARV = mean(|SBP[i] - SBP[i-1]|)  for consecutive readings ≤2 days apart
 ```
 ARV > 10 mmHg is the validated clinical threshold (Rothwell et al., Lancet 2010).
 
-**Threshold note:** The 10 mmHg threshold comes from clinic visit-to-visit data (weeks between measurements). Daily home readings have naturally higher session-to-session variability. The physician validation study will calibrate this threshold against real home monitoring data — if the false positive rate is high, raise to 12–15 mmHg. The 10 mmHg value is a starting point, not a fixed clinical rule for home BP.
+**Threshold note:** The 10 mmHg threshold comes from clinic visit-to-visit data (weeks between measurements). Daily home readings have naturally higher session-to-session variability. The physician validation study will calibrate this threshold against real home monitoring data : if the false positive rate is high, raise to 12–15 mmHg. The 10 mmHg value is a starting point, not a fixed clinical rule for home BP.
 
-**Gap handling:** Pairs separated by 3+ days (device outage) excluded from ARV — avoids inflating variability due to normal between-outage drift.
+**Gap handling:** Pairs separated by 3+ days (device outage) excluded from ARV : avoids inflating variability due to normal between-outage drift.
 
 **Risk scorer:** Add `_VARIABILITY_WEIGHT = 0.10`, reduce other weights proportionally. Import `variability_detector` in `risk_scorer.py`.
 
@@ -375,7 +375,7 @@ Stored in `audit_events.details`. Required for clinical governance review.
 
 ### 2.9 Contextual Severity Modulation
 
-Replace the flat −7 mmHg comorbidity adjustment in `threshold_utils.py` with per-condition adjustments based on ACC/AHA 2017 and AHA/ACC Heart Failure guidelines. Applied centrally in `threshold_utils.py` — propagates automatically to all four detectors.
+Replace the flat −7 mmHg comorbidity adjustment in `threshold_utils.py` with per-condition adjustments based on ACC/AHA 2017 and AHA/ACC Heart Failure guidelines. Applied centrally in `threshold_utils.py` : propagates automatically to all four detectors.
 
 | Comorbidity | Threshold adjustment | Gap urgency |
 |---|---|---|
@@ -389,13 +389,13 @@ Replace the flat −7 mmHg comorbidity adjustment in `threshold_utils.py` with p
 
 **Effort:** 1 day.
 
-### 2.10 Circadian Pattern Analysis — Briefing Output
+### 2.10 Circadian Pattern Analysis : Briefing Output
 
 The chatbot already has `get_circadian_pattern` as a tool. Add it as a formal briefing detector output so physicians see it without needing to query the chatbot.
 
 **New detector outputs:**
-- Morning systolic consistently ≥20 mmHg above evening → "Morning surge pattern detected — discuss dosing schedule and timing with patient." Do **not** recommend bedtime dosing — the TIME trial (2022, NEJM, n=21,104) found no significant difference in cardiovascular outcomes between morning and bedtime dosing.
-- Evening BP exceeds morning (reverse dipping) → "Possible nocturnal hypertension — consider ambulatory BP monitoring referral"
+- Morning systolic consistently ≥20 mmHg above evening → "Morning surge pattern detected : discuss dosing schedule and timing with patient." Do **not** recommend bedtime dosing : the TIME trial (2022, NEJM, n=21,104) found no significant difference in cardiovascular outcomes between morning and bedtime dosing.
+- Evening BP exceeds morning (reverse dipping) → "Possible nocturnal hypertension : consider ambulatory BP monitoring referral"
 
 **Briefing display:** Separate morning and evening sparklines with delta annotated.
 
@@ -403,11 +403,11 @@ The chatbot already has `get_circadian_pattern` as a tool. Add it as a formal br
 
 ---
 
-## Sprint 3 — ML Algorithms (Weeks 7–8)
+## Sprint 3 : ML Algorithms (Weeks 7–8)
 
 **Note:** Gaussian Process Regression (personalised threshold) is deferred to post-summer. CUSUM using the existing adaptive threshold baseline is a major improvement on its own. GP regression will be evaluated once the physician validation study produces enough data to validate personalised thresholds.
 
-### 3.1 CUSUM — Replaces Linear Slope
+### 3.1 CUSUM : Replaces Linear Slope
 
 **Replaces:** Simple linear regression slope in inertia and deterioration detectors.
 
@@ -416,17 +416,17 @@ S_high[t] = max(0, S_high[t-1] + (reading - (baseline + k)))
 Alert when S_high[t] >= h
 ```
 
-Where `k` = 5 mmHg systolic / 3 mmHg diastolic (minimum shift to detect), `h` = 4×patient SD derived from **Phase I stable baseline** — the `historic_bp_systolic` array filtered to visits before the current elevated window. Using the current detection window would inflate SD with the very readings being alarmed on, reducing CUSUM sensitivity. Falls back to population SD (12 mmHg systolic) if fewer than 10 stable historic readings exist.
+Where `k` = 5 mmHg systolic / 3 mmHg diastolic (minimum shift to detect), `h` = 4×patient SD derived from **Phase I stable baseline** : the `historic_bp_systolic` array filtered to visits before the current elevated window. Using the current detection window would inflate SD with the very readings being alarmed on, reducing CUSUM sensitivity. Falls back to population SD (12 mmHg systolic) if fewer than 10 stable historic readings exist.
 
 Applied to both systolic and diastolic, consistent with Sprint 2.1. More sensitive than rolling averages. Naturally handles variable reading frequency and gaps.
 
 **Effort:** 2 days.
 
-### 3.2 Isolation Forest — Anomaly Scoring
+### 3.2 Isolation Forest : Anomaly Scoring
 
 Per-patient anomaly scoring on each new reading. Score stored as `readings.anomaly_score NUMERIC(3,2)`.
 
-Anomalous readings are **flagged in the briefing but never silently excluded** — a 198 mmHg reading scoring high on Isolation Forest may be a genuine hypertensive urgency. The briefing surfaces it: "One high-anomaly reading (198 mmHg, April 23) included in trend — review for measurement error or clinical event."
+Anomalous readings are **flagged in the briefing but never silently excluded** : a 198 mmHg reading scoring high on Isolation Forest may be a genuine hypertensive urgency. The briefing surfaces it: "One high-anomaly reading (198 mmHg, April 23) included in trend : review for measurement error or clinical event."
 
 **Cold-start:** Fewer than 30 readings → simple `|reading − patient_mean| > 3×SD` rule.
 
@@ -448,17 +448,17 @@ Incorporating diastolic (Sprint 2.1) and variability (Sprint 2.7) requires a sin
 
 **Effort:** 4 hours (update constants in `risk_scorer.py`).
 
-### 3.4 CausalImpact — Medication Response Assessment
+### 3.4 CausalImpact : Medication Response Assessment
 
 **New capability:** Objectively evaluates whether a medication change worked.
 
-For every medication change in `med_history`, models the counterfactual BP trajectory — what would BP have been if the medication had not changed? Pre-intervention period trains a Bayesian structural time series model. Post-intervention actuals vs. predicted counterfactual yield a causal effect estimate with a 95% confidence interval.
+For every medication change in `med_history`, models the counterfactual BP trajectory : what would BP have been if the medication had not changed? Pre-intervention period trains a Bayesian structural time series model. Post-intervention actuals vs. predicted counterfactual yield a causal effect estimate with a 95% confidence interval.
 
-**Dependency note:** Use `pycausalimpact` (pure Python, no TensorFlow dependency) rather than `tfcausalimpact`. `pycausalimpact` uses `pymc` for Bayesian inference — compatible with Python 3.11 and the existing async stack. Add `pycausalimpact` to `requirements.txt` and validate no numpy version conflicts before Sprint 3 begins. CausalImpact models run in the Celery worker, not in the FastAPI request path — async isolation prevents event loop conflicts.
+**Dependency note:** Use `pycausalimpact` (pure Python, no TensorFlow dependency) rather than `tfcausalimpact`. `pycausalimpact` uses `pymc` for Bayesian inference : compatible with Python 3.11 and the existing async stack. Add `pycausalimpact` to `requirements.txt` and validate no numpy version conflicts before Sprint 3 begins. CausalImpact models run in the Celery worker, not in the FastAPI request path : async isolation prevents event loop conflicts.
 
 **Requirements:**
 - Minimum 21 days of readings before the medication change to fit the BSTS model
-- Drug-class titration window must elapse before analysis runs — reuses existing `TITRATION_WINDOWS` constants (diuretics/beta-blockers 14d, ACE/ARBs 28d, amlodipine 56d, default 42d)
+- Drug-class titration window must elapse before analysis runs : reuses existing `TITRATION_WINDOWS` constants (diuretics/beta-blockers 14d, ACE/ARBs 28d, amlodipine 56d, default 42d)
 - Only surfaces to physician when posterior probability of meaningful effect (≥5 mmHg) is ≥75%
 
 **Clinical output (when threshold met):**
@@ -466,12 +466,12 @@ For every medication change in `med_history`, models the counterfactual BP traje
 Medication: Amlodipine 5mg → 10mg (2026-03-15)
 Posterior mean effect: -8.4 mmHg systolic (95% CI: -13.1 to -3.7)
 Probability of causal effect: 92%
-Assessment: BP responded to medication change — within expected titration window
+Assessment: BP responded to medication change : within expected titration window
 ```
 
 This answers the physician's most common post-prescription question: "Did it work?"
 
-**Surface:** CausalImpact output appears as a chatbot tool response (`get_medication_response`) — not directly in the briefing. The deterministic Medication Response Tracker (see New Features section) provides the briefing-level output. If they disagree, the chatbot notes both: "The deterministic tracker classified this as no_response, but the statistical model estimates a 68% probability of a real effect — below the 75% display threshold." This prevents contradictory claims appearing side-by-side in the briefing.
+**Surface:** CausalImpact output appears as a chatbot tool response (`get_medication_response`) : not directly in the briefing. The deterministic Medication Response Tracker (see New Features section) provides the briefing-level output. If they disagree, the chatbot notes both: "The deterministic tracker classified this as no_response, but the statistical model estimates a 68% probability of a real effect : below the 75% display threshold." This prevents contradictory claims appearing side-by-side in the briefing.
 
 **Effort:** 2 days.
 
@@ -479,7 +479,7 @@ This answers the physician's most common post-prescription question: "Did it wor
 
 This is frontend work that runs in parallel with Sprint 3 backend ML work. Must ship before physician validation study begins.
 
-Physicians have 8 minutes per consultation. The current briefing layout puts the AI summary at the top. Urgent flags must be first in plain English — AI summary moves below the fold as supporting detail.
+Physicians have 8 minutes per consultation. The current briefing layout puts the AI summary at the top. Urgent flags must be first in plain English : AI summary moves below the fold as supporting detail.
 
 **New layout priority:**
 ```
@@ -509,14 +509,14 @@ With 40 patients across multiple practices in the validation study, the current 
 **New features:**
 - Batch acknowledge: "Mark all inertia alerts as reviewed"
 - Urgency sort: `drug_interaction` and `gap_urgent` always first regardless of when they fired
-- Snooze: "Remind me at next appointment" — removes from inbox until then
+- Snooze: "Remind me at next appointment" : removes from inbox until then
 - Filter by type: view only adherence alerts across all patients
 
 **Effort:** 2 days.
 
 ---
 
-## Sprint 4 — Chatbot & Layer 3 (Weeks 9–11)
+## Sprint 4 : Chatbot & Layer 3 (Weeks 9–11)
 
 ### 4.1 Persistent Conversation History
 
@@ -539,7 +539,7 @@ Conversation survives navigation, page refresh, and server restarts. Every messa
 
 **Effort:** 1 day.
 
-### 4.2 Evidence Cards — Citation-Grounded Responses
+### 4.2 Evidence Cards : Citation-Grounded Responses
 
 Every factual claim the chatbot makes must show its source data. The agent returns a structured `citations` array alongside text. Frontend renders each citation as a collapsible card.
 
@@ -548,7 +548,7 @@ Every factual claim the chatbot makes must show its source data. The agent retur
   → [Source: 47 readings, April 9 – May 7, 2026]
 
 "No medication change since October 2013."
-  → [Source: medication history — last entry: Amlodipine 5mg, 2013-10-03]
+  → [Source: medication history : last entry: Amlodipine 5mg, 2013-10-03]
 ```
 
 **Effort:** 2 days.
@@ -574,7 +574,7 @@ After the briefing loads, the chatbot initiates rather than waiting:
 
 > "I noticed the BP elevation on April 12 coincides with a 3-day medication confirmation gap the previous week. Would you like me to show the correlation?"
 
-Generated from Layer 1 signals — intelligence surfaced as a question, not an assertion. Respects clinical autonomy while making the system proactive.
+Generated from Layer 1 signals : intelligence surfaced as a question, not an assertion. Respects clinical autonomy while making the system proactive.
 
 **Effort:** 2 days.
 
@@ -583,22 +583,22 @@ Generated from Layer 1 signals — intelligence surfaced as a question, not an a
 Transform `POST /api/chat/summary` (currently unguarded) into a validated clinical note formatted for direct paste into Epic or athenahealth.
 
 ```
-ARIA Between-Visit Summary — David Patel — Generated 07/05/2026 09:12
+ARIA Between-Visit Summary : David Patel : Generated 07/05/2026 09:12
 
 Objective: 47 home BP readings (09/04 – 07/05). 28-day mean 163/94 mmHg.
            Adherence 91% (41/45 confirmations).
 
 Assessment: Sustained BP above target despite current regimen (no medication
-            change since October 2013 — possible treatment review warranted).
+            change since October 2013 : possible treatment review warranted).
             Possible adherence concern noted week of 28/04 (4 missed confirmations).
 
 Actions discussed: [clinician completes]
 
-Data limitations: Home readings only — no clinic attendance since last appointment.
+Data limitations: Home readings only : no clinic attendance since last appointment.
 ARIA version: 4.3 | Validated: passed (15/15 checks)
 ```
 
-All 15 guardrail checks before return. Footer uses abstracted version identifier, not raw model name — surfacing `claude-sonnet-4-20250514` in the clinical record creates medico-legal exposure if the model changes.
+All 15 guardrail checks before return. Footer uses abstracted version identifier, not raw model name : surfacing `claude-sonnet-4-20250514` in the clinical record creates medico-legal exposure if the model changes.
 
 **Effort:** 2 days.
 
@@ -614,20 +614,20 @@ Expected 40–70% token cost reduction for consultations with 3+ turns.
 
 Hard rules for what the chatbot must acknowledge before any trend statement. Overconfident AI during a physician validation study is a direct safety risk.
 
-- Enrolled < 21 days → "I only have N days of data — the trend may not be reliable"
+- Enrolled < 21 days → "I only have N days of data : the trend may not be reliable"
 - Fewer than 10 readings in window → flag before any trend statement
 - Sparse medication history → "I can only confirm what was recorded in the FHIR bundle"
-- `readable_summary = null` (Layer 3 failed) → "I was unable to generate a validated summary — showing raw Layer 1 data instead"
+- `readable_summary = null` (Layer 3 failed) → "I was unable to generate a validated summary : showing raw Layer 1 data instead"
 
 **Effort:** 1 day.
 
 ---
 
-## Sprint 5 — Patient App: React Native with Expo (Weeks 12–13)
+## Sprint 5 : Patient App: React Native with Expo (Weeks 12–13)
 
 **Decision:** The patient app is migrated from Next.js 14 PWA to **React Native with Expo**. Full rationale is in `NATIVE_APP_MIGRATION.md`. Key reasons: biometric login, push notifications, OCR, and calendar integration are all meaningfully simpler natively; Apple HealthKit and Google Health Connect are only possible natively; BLE device SDKs are more reliable than web APIs; and the physician validation study will use real elderly patients where native accessibility is meaningfully better.
 
-**How 2 weeks is achievable:** The 6-person team develops screens in parallel — different team members own different features simultaneously. Total feature work is ~20 person-days; with 6 people over 2 weeks (60 person-days of capacity), this is feasible. App Store submission happens at the end of Week 13 — Apple's review (5–7 days) runs in parallel during Sprint 6 (Week 14), not in a dedicated week. Features deferred to post-summer: full streaks system, secure patient messaging, Section 508 accessibility compliance (basic accessibility included natively, full audit post-summer).
+**How 2 weeks is achievable:** The 6-person team develops screens in parallel : different team members own different features simultaneously. Total feature work is ~20 person-days; with 6 people over 2 weeks (60 person-days of capacity), this is feasible. App Store submission happens at the end of Week 13 : Apple's review (5–7 days) runs in parallel during Sprint 6 (Week 14), not in a dedicated week. Features deferred to post-summer: full streaks system, secure patient messaging, Section 508 accessibility compliance (basic accessibility included natively, full audit post-summer).
 
 **What gets rewritten:** The entire `patient-app/` directory (3 pages). Backend, clinician dashboard, and all API contracts are unchanged.
 
@@ -635,31 +635,31 @@ Hard rules for what the chatbot must acknowledge before any trend statement. Ove
 
 | PWA (Current) | React Native Replacement | Simpler? |
 |---|---|---|
-| WebAuthn (Face ID/Touch ID) | `expo-local-authentication` | **Yes** — one function call vs full challenge-response |
-| Web Push API | APNs + FCM via `expo-notifications` | **Yes** — works when app is closed |
-| IndexedDB + Service Worker | AsyncStorage + Expo Background Fetch | **Yes** — no service worker complexity |
-| Browser ML Kit (OCR) | `expo-camera` + ML Kit native SDK | **Yes** — full camera control |
-| Google Calendar OAuth web | `react-native-calendar-events` | **Yes** — direct OS calendar access |
+| WebAuthn (Face ID/Touch ID) | `expo-local-authentication` | **Yes** : one function call vs full challenge-response |
+| Web Push API | APNs + FCM via `expo-notifications` | **Yes** : works when app is closed |
+| IndexedDB + Service Worker | AsyncStorage + Expo Background Fetch | **Yes** : no service worker complexity |
+| Browser ML Kit (OCR) | `expo-camera` + ML Kit native SDK | **Yes** : full camera control |
+| Google Calendar OAuth web | `react-native-calendar-events` | **Yes** : direct OS calendar access |
 | Apple CalDAV (not feasible in PWA) | `react-native-calendar-events` (EventKit) | **Now possible** |
 | CSS / Tailwind | StyleSheet / NativeWind | Different |
 | HTML elements | Native components (`View`, `TextInput`) | Different |
 
 **New capabilities (not possible in PWA):**
-- Apple HealthKit — read/write BP readings to Apple Health
-- Google Health Connect — same for Android
+- Apple HealthKit : read/write BP readings to Apple Health
+- Google Health Connect : same for Android
 - Background sync while app is closed
 - Home screen widget (today's tasks + streak)
 - App Store discoverability
 
 ---
 
-### Week 12 — Setup + Toolchain + Rewrite Existing Screens
+### Week 12 : Setup + Toolchain + Rewrite Existing Screens
 
 **Expo setup (2 days):**
 - `npx create-expo-app aria-patient --template typescript`
 - EAS Build configuration, app signing (iOS provisioning profile + Android keystore)
-- Apple Developer Program enrollment ($99/year — see budget)
-- Google Play Console setup ($25 one-time — see budget)
+- Apple Developer Program enrollment ($99/year : see budget)
+- Google Play Console setup ($25 one-time : see budget)
 - Metro bundler, Xcode, Android Studio installed on team machines
 - Physical device testing: iOS (iPhone) + Android (Samsung A-series) from device lab
 
@@ -689,14 +689,14 @@ Replaces login → submit as the post-login landing page.
 │  ○  Morning BP reading         [Take →]  │
 ├──────────────────────────────────────────┤
 │  YOUR STREAK                             │
-│  14 days — keep going                    │
+│  14 days : keep going                    │
 ├──────────────────────────────────────────┤
 │  THIS WEEK                               │
 │  Readings:      5 / 7  ████████░░        │
 │  Medications:   6 / 7  █████████░        │
 ├──────────────────────────────────────────┤
 │  NEXT APPOINTMENT                        │
-│  Wednesday, 14 May — 7 days away         │
+│  Wednesday, 14 May : 7 days away         │
 ├──────────────────────────────────────────┤
 │  💡 TODAY'S TIP                          │
 │  Reducing sodium by 1 tsp/day can lower  │
@@ -706,21 +706,21 @@ Replaces login → submit as the post-login landing page.
 
 **Effort:** 2 days.
 
-### 5.2 Guided BP Measurement — Most Clinically Important Change
+### 5.2 Guided BP Measurement : Most Clinically Important Change
 
 Current app presents all fields simultaneously with no measurement guidance. ACC/AHA requires 5 minutes of quiet sitting, two readings 1 minute apart, same arm, before morning medications.
 
 **Five-step guided flow:**
 
-**Step 1 — Preparation:** `medication_taken` (yes/not yet/partial) captured here — before the reading, when clinically relevant. Illustrated sitting instructions.
+**Step 1 : Preparation:** `medication_taken` (yes/not yet/partial) captured here : before the reading, when clinically relevant. Illustrated sitting instructions.
 
-**Step 2 — First reading:** Systolic, diastolic, heart rate. Optional: irregular heartbeat indicator checkbox.
+**Step 2 : First reading:** Systolic, diastolic, heart rate. Optional: irregular heartbeat indicator checkbox.
 
-**Step 3 — 1-minute countdown:** Large visible timer. "Stay seated and relaxed."
+**Step 3 : 1-minute countdown:** Large visible timer. "Stay seated and relaxed."
 
-**Step 4 — Second reading:** Same fields.
+**Step 4 : Second reading:** Same fields.
 
-**Step 5 — Symptoms:** Checkboxes. Chest pain / shortness of breath triggers safety banner immediately. Does not disable submit.
+**Step 5 : Symptoms:** Checkboxes. Chest pain / shortness of breath triggers safety banner immediately. Does not disable submit.
 
 **Effort:** 2 days.
 
@@ -735,25 +735,25 @@ const result = await LocalAuthentication.authenticateAsync({
   fallbackLabel: 'Use PIN',
 });
 ```
-No backend public key storage or challenge-response protocol required — the OS handles biometric verification. Works on Face ID (iOS), Touch ID (iOS/older devices), and fingerprint (Android).
+No backend public key storage or challenge-response protocol required : the OS handles biometric verification. Works on Face ID (iOS), Touch ID (iOS/older devices), and fingerprint (Android).
 
 - Research ID entered once on first login
 - Patient creates a 6-digit PIN as fallback
-- 30-day refresh token alongside 8-hour access token — silently auto-refreshed
+- 30-day refresh token alongside 8-hour access token : silently auto-refreshed
 - JWT stored in encrypted `AsyncStorage` (replaces `sessionStorage`)
 - Auto-lock after 10 minutes of inactivity
 - Sign Out button in Settings
 
-**Effort:** 1.5 days (significantly simpler than WebAuthn — no backend public key storage or challenge-response in `auth.py` required).
+**Effort:** 1.5 days (significantly simpler than WebAuthn : no backend public key storage or challenge-response in `auth.py` required).
 
 ### 5.4 Push Notifications
 
-**Native implementation via `expo-notifications` (APNs for iOS, FCM for Android).** More reliable than Web Push — works when the app is closed, not just when the browser is open. No browser dependency.
+**Native implementation via `expo-notifications` (APNs for iOS, FCM for Android).** More reliable than Web Push : works when the app is closed, not just when the browser is open. No browser dependency.
 
 **Notification types:**
-- Medication time: "Time for your morning medications — tap to confirm"
+- Medication time: "Time for your morning medications : tap to confirm"
 - BP reminder: "Don't forget your morning reading" (sent at 9:30 AM if no reading submitted)
-- Appointment reminder: "Your appointment is in 3 days — keep up your readings"
+- Appointment reminder: "Your appointment is in 3 days : keep up your readings"
 - Milestone: "You've hit a 30-day streak!"
 
 **Never send:** clinical values, risk scores, alert content, BP readings.
@@ -769,7 +769,7 @@ No backend public key storage or challenge-response protocol required — the OS
 **Fix:**
 - Missed doses visible (greyed), with "I took this late" option up to 4 hours after scheduled time
 - Late confirmation records accurate `minutes_from_schedule`
-- Weekly adherence bar — number only, no clinical judgment language
+- Weekly adherence bar : number only, no clinical judgment language
 
 **Schema addition:** `medication_confirmations.missed_at TIMESTAMPTZ`
 
@@ -781,7 +781,7 @@ Current: *"Reading submitted. Your doctor will see this at your next visit."*
 
 New personalised acknowledgment based on context:
 - "That's your 47th reading. Your care team will have a detailed picture at your next appointment."
-- "You're on a 14-day streak — this consistency really helps your care team."
+- "You're on a 14-day streak : this consistency really helps your care team."
 - "Your appointment is in 7 days. Consistent readings help your physician prepare."
 - If symptoms checked: "Your care team will be aware of your symptoms at your next appointment."
 
@@ -791,26 +791,26 @@ New personalised acknowledgment based on context:
 
 ### 5.7 Offline Support
 
-**Native implementation — no Service Worker complexity:**
+**Native implementation : no Service Worker complexity:**
 - Home screen loads from cached AsyncStorage state
-- Reading form works entirely offline — reading saved to AsyncStorage queue (`aria_reading_queue`)
+- Reading form works entirely offline : reading saved to AsyncStorage queue (`aria_reading_queue`)
 - On reconnect: queue flushed to backend via Expo Background Fetch
-- Offline indicator banner: "You're offline — your data will sync when you reconnect."
-- Background Fetch runs even when app is closed — readings sync automatically on next network connection
+- Offline indicator banner: "You're offline : your data will sync when you reconnect."
+- Background Fetch runs even when app is closed : readings sync automatically on next network connection
 
 **Effort:** 1 day (simpler than IndexedDB + Service Worker + Background Sync API).
 
 ### 5.8 OCR Camera Scan Input
 
-Elderly patients with older non-BLE monitors have no way to avoid manual transcription. Patient points phone camera at the BP monitor screen — **`expo-camera` + ML Kit native SDK** reads the three numbers on-device, offline-capable, free. Full native camera control (no browser sandbox limitations, faster and more accurate than browser ML Kit). Reading goes through the same guided flow and 60–250 mmHg range validation before submission. Adds `source="ocr_scan"` to readings.
+Elderly patients with older non-BLE monitors have no way to avoid manual transcription. Patient points phone camera at the BP monitor screen : **`expo-camera` + ML Kit native SDK** reads the three numbers on-device, offline-capable, free. Full native camera control (no browser sandbox limitations, faster and more accurate than browser ML Kit). Reading goes through the same guided flow and 60–250 mmHg range validation before submission. Adds `source="ocr_scan"` to readings.
 
-**Note:** This is distinct from the "Vision AI for medication photos" out-of-scope item — this is OCR of three digits from a screen, not AI identification of medication pills.
+**Note:** This is distinct from the "Vision AI for medication photos" out-of-scope item : this is OCR of three digits from a screen, not AI identification of medication pills.
 
 **Effort:** 1 day (full native camera access is simpler than browser sandbox ML Kit).
 
 ### 5.9 Daily Tips (1-Minute Bite-Sized Insights)
 
-Replaces static health education articles. A rotating daily tip displayed on the home hub. Pre-written content, no LLM, offline-capable. Topics: sodium reduction, potassium-rich foods, breathing techniques, reading posture, sleep and BP, medication timing. Slightly personalised by comorbidity — diabetic-hypertension patients see blood sugar guidance.
+Replaces static health education articles. A rotating daily tip displayed on the home hub. Pre-written content, no LLM, offline-capable. Topics: sodium reduction, potassium-rich foods, breathing techniques, reading posture, sleep and BP, medication timing. Slightly personalised by comorbidity : diabetic-hypertension patients see blood sugar guidance.
 
 **Effort:** 1 day.
 
@@ -828,10 +828,10 @@ Deferred to post-summer to keep Sprint 5 within 2 weeks. The patient has the exi
 
 ### 5.12 Google + Apple Calendar Integration
 
-**Native advantage via `react-native-calendar-events`:** Direct OS-level access to both Google Calendar and Apple Calendar (EventKit on iOS). No OAuth dance for Google, no CalDAV complexity for Apple — both work through the device's native calendar APIs with a single library call.
+**Native advantage via `react-native-calendar-events`:** Direct OS-level access to both Google Calendar and Apple Calendar (EventKit on iOS). No OAuth dance for Google, no CalDAV complexity for Apple : both work through the device's native calendar APIs with a single library call.
 
 ```typescript
-await RNCalendarEvents.saveEvent('Morning Medications — ARIA', {
+await RNCalendarEvents.saveEvent('Morning Medications : ARIA', {
   startDate: scheduledTime.toISOString(),
   recurrenceRule: { frequency: 'daily' },
   notes: 'Take before BP reading',
@@ -846,7 +846,7 @@ ALTER TABLE patients ADD COLUMN calendar_integration TEXT; -- google|apple|ics_o
 ALTER TABLE patients ADD COLUMN calendar_oauth_token TEXT; -- encrypted at application layer
 ```
 
-**Effort:** 1 day (direct OS calendar access — significantly simpler than OAuth web flow).
+**Effort:** 1 day (direct OS calendar access : significantly simpler than OAuth web flow).
 
 ### 5.13 Full Engagement and Streaks System
 
@@ -865,33 +865,33 @@ CREATE TABLE patient_engagement (
 );
 ```
 
-**Milestones:** First reading, 7-day streak, 30 readings, 30-day streak, 100 readings. Monthly calendar heatmap on `/progress`. Computed nightly from existing readings and confirmations — no new clinical data exposed to patients.
+**Milestones:** First reading, 7-day streak, 30 readings, 30-day streak, 100 readings. Monthly calendar heatmap on `/progress`. Computed nightly from existing readings and confirmations : no new clinical data exposed to patients.
 
 **Effort:** 2 days.
 
-### 5.14 Accessibility — Section 508 / WCAG 2.1 AA
+### 5.14 Accessibility : Section 508 / WCAG 2.1 AA
 
-Deferred to post-summer to keep Sprint 5 within 2 weeks. Basic native accessibility is included automatically through React Native's `accessibilityLabel` and `accessibilityRole` properties on all components — a formal Section 508 audit and remediation is the post-summer deliverable.
+Deferred to post-summer to keep Sprint 5 within 2 weeks. Basic native accessibility is included automatically through React Native's `accessibilityLabel` and `accessibilityRole` properties on all components : a formal Section 508 audit and remediation is the post-summer deliverable.
 
-**Native advantage:** React Native's accessibility APIs work directly with VoiceOver (iOS) and TalkBack (Android) — more comprehensive than web ARIA attributes. The full compliance effort becomes 2 days (not 3) when it runs.
+**Native advantage:** React Native's accessibility APIs work directly with VoiceOver (iOS) and TalkBack (Android) : more comprehensive than web ARIA attributes. The full compliance effort becomes 2 days (not 3) when it runs.
 
 **Effort:** 2 days (post-summer).
 
-### End of Week 13 — App Store Submission (Parallel, Not a Dedicated Week)
+### End of Week 13 : App Store Submission (Parallel, Not a Dedicated Week)
 
-Physical device testing and App Store submission happen at the end of Week 13 alongside feature completion. Apple's review (5–7 days) runs in parallel during Sprint 6 (Week 14) — not a dedicated week.
+Physical device testing and App Store submission happen at the end of Week 13 alongside feature completion. Apple's review (5–7 days) runs in parallel during Sprint 6 (Week 14) : not a dedicated week.
 
 | Task | When | Notes |
 |---|---|---|
 | iOS + Android physical device testing | Week 13 (ongoing) | Push notifications and BLE must be tested on physical devices, not simulators |
 | TestFlight beta distribution | End of Week 13 | Physician validation study participants install via TestFlight |
-| Apple App Store submission | End of Week 13 | Healthcare app — include clinical decision support disclaimer + privacy nutrition label |
-| Google Play submission | End of Week 13 | 1–2 day review — typically approved before Apple |
+| Apple App Store submission | End of Week 13 | Healthcare app : include clinical decision support disclaimer + privacy nutrition label |
+| Google Play submission | End of Week 13 | 1–2 day review : typically approved before Apple |
 | Apple review response (if any) | During Week 14 | Address any App Store feedback during Sprint 6 week |
 
 ---
 
-## Sprint 6 — Wearable Integration + Clinical Validation (Week 14)
+## Sprint 6 : Wearable Integration + Clinical Validation (Week 14)
 
 **Note:** Weeks 12–13 deliver the core React Native patient app. App Store review runs in parallel this week. Secure messaging (5.11) and full accessibility compliance (5.14) are deferred to post-summer.
 
@@ -901,7 +901,7 @@ One device, done properly. Withings is a widely used clinically-validated home B
 
 **Architecture:**
 ```
-Patient authorises Withings (OAuth2 in patient app — React Native WebBrowser for OAuth flow)
+Patient authorises Withings (OAuth2 in patient app : React Native WebBrowser for OAuth flow)
         ↓
 wearable_enrollments row created
         ↓
@@ -911,7 +911,7 @@ Readings inserted: source="wearable_api", device_type="withings_bpm_connect"
         ↓
 Existing UNIQUE idx on (patient_id, effective_datetime, source) prevents duplication
         ↓
-Existing ingestion pipeline handles the rest — same detectors, same audit trail
+Existing ingestion pipeline handles the rest : same detectors, same audit trail
 ```
 
 **New schema:**
@@ -931,24 +931,24 @@ CREATE TABLE wearable_enrollments (
 );
 ```
 
-OAuth tokens encrypted at application layer — plain TEXT column provides no protection.
+OAuth tokens encrypted at application layer : plain TEXT column provides no protection.
 
 **Effort:** 3 days.
 
 ### 6.2 Polypharmacy and Medication Burden Flag
 
-If a patient is on ≥4 antihypertensive drug classes AND adherence <75%, surface as a **separate** visit agenda item — distinct from the adherence alert. Without this flag, the briefing implies the patient needs more monitoring — the exact wrong clinical response when the real problem is medication overload.
+If a patient is on ≥4 antihypertensive drug classes AND adherence <75%, surface as a **separate** visit agenda item : distinct from the adherence alert. Without this flag, the briefing implies the patient needs more monitoring : the exact wrong clinical response when the real problem is medication overload.
 
 **Output:**
 ```
 Visit Agenda:
-⚠ Medication Burden — 4 antihypertensive drug classes
+⚠ Medication Burden : 4 antihypertensive drug classes
   Adherence: 58% (last 28 days)
   High medication burden may be contributing to adherence 
-  difficulty — consider simplification review
+  difficulty : consider simplification review
 ```
 
-**Logic:** Match `clinical_context.current_medications` against a drug class map, count distinct antihypertensive classes, check adherence rate. Deterministic — no ML, no LLM.
+**Logic:** Match `clinical_context.current_medications` against a drug class map, count distinct antihypertensive classes, check adherence rate. Deterministic : no ML, no LLM.
 
 **Effort:** 1 day.
 
@@ -956,7 +956,7 @@ Visit Agenda:
 
 Week 1.6 wires the re-trigger for FHIR re-ingestion only. This sprint extends it to the two remaining pathways: wearable sync (Sprint 6.1) and clinician-recorded adjustment (Sprint 6.4). Together, all three pathways are covered.
 
-Whenever `clinical_context.current_medications` is updated by any of these pathways, enqueue a `pattern_recompute` job. The worker re-runs drug interaction detection as part of the recompute — not only at briefing generation time.
+Whenever `clinical_context.current_medications` is updated by any of these pathways, enqueue a `pattern_recompute` job. The worker re-runs drug interaction detection as part of the recompute : not only at briefing generation time.
 
 This completes the coverage started in Week 1.6.
 
@@ -964,11 +964,11 @@ This completes the coverage started in Week 1.6.
 
 ### 6.4 Medication Adjustment from Dashboard
 
-Clinician records an intended medication change directly from the dashboard without leaving ARIA. ARIA is an intent record — the clinician still prescribes in Epic. A persistent banner flags the discrepancy until FHIR re-ingestion confirms the change exists in the EMR.
+Clinician records an intended medication change directly from the dashboard without leaving ARIA. ARIA is an intent record : the clinician still prescribes in Epic. A persistent banner flags the discrepancy until FHIR re-ingestion confirms the change exists in the EMR.
 
 **Clinician form:**
 ```
-Medication Adjustment — David Patel
+Medication Adjustment : David Patel
 
 Current regimen:
   Ramipril 5mg      [Change dose ▾]  [Discontinue]
@@ -984,14 +984,14 @@ Reason (required): ________________________
 
 **On Save:**
 1. `pending_med_changes` JSONB updated in `clinical_context`
-2. `medication_safety.py` re-runs — fires drug interaction alert if new combination is dangerous
-3. `days_since_med_change` resets — inertia detector window restarts from today
-4. Titration window starts — adherence Pattern B suppression activates
+2. `medication_safety.py` re-runs : fires drug interaction alert if new combination is dangerous
+3. `days_since_med_change` resets : inertia detector window restarts from today
+4. Titration window starts : adherence Pattern B suppression activates
 5. Audit event written: `action="medication_adjustment_recorded"`, actor, old dose, new dose, reason
 6. Persistent banner on all screens for this patient:
 
 ```
-⚠ Medication change recorded in ARIA — 14 May — Dr. Smith
+⚠ Medication change recorded in ARIA : 14 May : Dr. Smith
   Ramipril 5mg → 10mg
   Confirm in Epic to complete the prescription.
 ```
@@ -1005,13 +1005,13 @@ ADD COLUMN pending_med_changes JSONB DEFAULT '[]';
 -- [{medication, old_dose, new_dose, action, reason, recorded_by, recorded_at}]
 ```
 
-**Note:** Option B (FHIR write-back — pushing a MedicationRequest directly to Epic) requires SMART on FHIR write permissions and Epic App Orchard approval. That is post-summer.
+**Note:** Option B (FHIR write-back : pushing a MedicationRequest directly to Epic) requires SMART on FHIR write permissions and Epic App Orchard approval. That is post-summer.
 
 **Effort:** 4 days.
 
 ### 6.5 Physician Validation Study
 
-The most important deliverable of the summer. Getting practising physicians to review ARIA briefings against real clinical judgement transforms this from a demo into validated clinical software. De-identified patients are used throughout — no HIPAA obligations apply to the study data.
+The most important deliverable of the summer. Getting practising physicians to review ARIA briefings against real clinical judgement transforms this from a demo into validated clinical software. De-identified patients are used throughout : no HIPAA obligations apply to the study data.
 
 **Target:** 2–3 primary care practices, 10–20 patients each, 4-week observation period.
 
@@ -1027,9 +1027,9 @@ The most important deliverable of the summer. Getting practising physicians to r
 
 ### 6.6 Webhook System for EMR Push
 
-ARIA currently only does batch FHIR ingestion — the physician manually triggers it. A webhook endpoint lets EMR systems push updates when a new medication is prescribed, a problem is added, or a visit is recorded.
+ARIA currently only does batch FHIR ingestion : the physician manually triggers it. A webhook endpoint lets EMR systems push updates when a new medication is prescribed, a problem is added, or a visit is recorded.
 
-`POST /api/webhooks/fhir` — receives a FHIR Bundle, validates it, enqueues a `bundle_import` job. Also triggers `medication_safety.py` re-run via the Sprint 6.3 re-trigger mechanism.
+`POST /api/webhooks/fhir` : receives a FHIR Bundle, validates it, enqueues a `bundle_import` job. Also triggers `medication_safety.py` re-run via the Sprint 6.3 re-trigger mechanism.
 
 This is receiving data only, not writing back to the EMR. No regulatory complications.
 
@@ -1037,7 +1037,7 @@ This is receiving data only, not writing back to the EMR. No regulatory complica
 
 ### 5.11 Secure Patient Messaging (completing Week 14)
 
-Patient sends a short message (max 500 characters) to their care team. Not two-way real-time chat. Not AI-mediated. Physician sees it in the alert inbox alongside clinical alerts. Mandatory non-emergency disclaimer before typing — "For urgent concerns, call the practice or dial 911." Full audit trail in `audit_events`.
+Patient sends a short message (max 500 characters) to their care team. Not two-way real-time chat. Not AI-mediated. Physician sees it in the alert inbox alongside clinical alerts. Mandatory non-emergency disclaimer before typing : "For urgent concerns, call the practice or dial 911." Full audit trail in `audit_events`.
 
 **New table:**
 ```sql
@@ -1053,7 +1053,7 @@ CREATE TABLE patient_messages (
 
 **Effort:** 2 days.
 
-### 5.14 Accessibility — Section 508 / WCAG 2.1 AA (completing Week 14)
+### 5.14 Accessibility : Section 508 / WCAG 2.1 AA (completing Week 14)
 
 Required under the Americans with Disabilities Act. Practically essential for the elderly patient demographic in the physician validation study.
 
@@ -1065,15 +1065,15 @@ Required under the Americans with Disabilities Act. Practically essential for th
 - `aria-label` on all inputs, descriptive text on all icon buttons
 - Specific error messages ("Systolic must be between 60 and 250") not generic ("Invalid input")
 - Colour never used as the sole means of conveying information
-- **Simplified mode (Settings toggle):** Two large buttons on the home screen — "Take BP Reading" and "Confirm Medications" — for patients with cognitive difficulties
+- **Simplified mode (Settings toggle):** Two large buttons on the home screen : "Take BP Reading" and "Confirm Medications" : for patients with cognitive difficulties
 
 **Effort:** 3 days.
 
 ---
 
-## Sprint 7 — Clinician Workflow (Week 15)
+## Sprint 7 : Clinician Workflow (Week 15)
 
-Items 7.1 (30-second briefing layout) and 7.3 (alert triage inbox redesign) were moved to Sprint 3 as prerequisites for the physician validation study — see Sprint 3 items 3.5 and 3.6. Items 7.2 (tablet responsive) and 7.4 (one-click dashboard actions) are deferred to post-summer to keep the 16-week timeline — they improve efficiency but do not block the validation study.
+Items 7.1 (30-second briefing layout) and 7.3 (alert triage inbox redesign) were moved to Sprint 3 as prerequisites for the physician validation study : see Sprint 3 items 3.5 and 3.6. Items 7.2 (tablet responsive) and 7.4 (one-click dashboard actions) are deferred to post-summer to keep the 16-week timeline : they improve efficiency but do not block the validation study.
 
 ### 7.1 30-Second Briefing Rule
 
@@ -1083,7 +1083,7 @@ Implemented in Sprint 3 (item 3.5) as a prerequisite for physician validation st
 
 ### 7.2 Mobile-First / Tablet Responsive
 
-Physical device required for clinician tablet testing — use a team-owned device. The current fixed-column layout breaks at tablet width. PCPs use tablets on rounds and home visits.
+Physical device required for clinician tablet testing : use a team-owned device. The current fixed-column layout breaks at tablet width. PCPs use tablets on rounds and home visits.
 
 **Changes:**
 - Responsive breakpoints: briefing and chat panel stack vertically on tablet and phone
@@ -1102,9 +1102,9 @@ Implemented in Sprint 3 (item 3.6) as a prerequisite for physician validation st
 
 Three buttons on every patient card in the dashboard. Reduces context switching in an 8-minute consultation.
 
-- **Send Message** — opens compose window to send a message to the patient
-- **Schedule Call** — pre-fills a callback note or links to practice scheduling system
-- **Flag for Review** — dropdown: Dosage review / Lab test needed / Urgent callback
+- **Send Message** : opens compose window to send a message to the patient
+- **Schedule Call** : pre-fills a callback note or links to practice scheduling system
+- **Flag for Review** : dropdown: Dosage review / Lab test needed / Urgent callback
 
 **Note on "Adjust Dosage":** The medication adjustment form (Sprint 6.4) is the full implementation. These one-click buttons are the quick-access shortcuts from the patient list view.
 
@@ -1115,13 +1115,13 @@ Three buttons on every patient card in the dashboard. Reduces context switching 
 Before the first patient of the day, the lead physician sees:
 
 ```
-Morning Summary — Wednesday, 7 May 2026
+Morning Summary : Wednesday, 7 May 2026
 
 Today's appointments: 12 patients with ARIA monitoring
   ├── 3 with urgent flags (action required today)
   ├── 2 with drug interaction alerts (unacknowledged)
   ├── 5 with briefings ready (review before appointment)
-  ├── 2 with stale risk scores (> 26h — recomputing now)
+  ├── 2 with stale risk scores (> 26h : recomputing now)
   └── 2 monitoring_active=FALSE (EHR only)
 
 Practice alerts this week:
@@ -1137,7 +1137,7 @@ All data already in the database. Requires a new API endpoint and a dashboard co
 
 ### 7.6 Post-Appointment Feedback Loop
 
-Currently a physician acknowledges an alert and ARIA never learns what happened. This is the most important missing loop for the validation study — without it there is no outcome data, no precision/recall against real clinical decisions, and nothing fundable.
+Currently a physician acknowledges an alert and ARIA never learns what happened. This is the most important missing loop for the validation study : without it there is no outcome data, no precision/recall against real clinical decisions, and nothing fundable.
 
 **Structured 30-second prompt after each appointment:**
 ```
@@ -1145,7 +1145,7 @@ After appointment with David Patel:
 □ Medication was changed
 □ Investigation ordered
 □ Referral made
-□ No action — ARIA flag was not clinically relevant
+□ No action : ARIA flag was not clinically relevant
 □ Patient declined intervention
 ```
 
@@ -1155,7 +1155,7 @@ This data feeds: calibration engine, alert quality metrics, and validation study
 
 ---
 
-## Sprint 8 — Product (Week 16)
+## Sprint 8 : Product (Week 16)
 
 ### 8.1 Multi-Tenancy + Row-Level Security
 
@@ -1201,14 +1201,14 @@ Implemented in Sprint 6 (item 6.6). See Sprint 6 for details.
 
 ### Medication Response Tracker
 
-For every medication change in `med_history`, ARIA knows the date but never evaluates whether it worked. CausalImpact (Sprint 3.4) is the ML version — this is the deterministic version.
+For every medication change in `med_history`, ARIA knows the date but never evaluates whether it worked. CausalImpact (Sprint 3.4) is the ML version : this is the deterministic version.
 
 **For every medication change, track:**
 - Pre-change 14-day average vs post-change 14-day average (respecting drug-class titration window)
 - Response classification: `good_response` (>10 mmHg drop) | `partial_response` (5–10 mmHg) | `no_response` (<5 mmHg) | `worsening`
 
 **Briefing output:** "BP did not respond to the medication change from March 15. Consider dose review."
-**Note:** This is the briefing-level output. CausalImpact (Sprint 3.4) is the chatbot-level output for the same question — deeper statistical analysis available on request, kept out of the briefing to avoid information overload.
+**Note:** This is the briefing-level output. CausalImpact (Sprint 3.4) is the chatbot-level output for the same question : deeper statistical analysis available on request, kept out of the briefing to avoid information overload.
 
 **Effort:** 2 days.
 
@@ -1218,11 +1218,11 @@ For every medication change in `med_history`, ARIA knows the date but never eval
 
 | Lab finding | Clinical rule |
 |---|---|
-| K+ < 3.5 mEq/L on diuretic | "Hypokalaemia confirmed — review diuretic dose" |
-| Creatinine rising >20% in 3 months on ACE/ARB | "Possible ACEi-induced AKI — consider dose review" |
+| K+ < 3.5 mEq/L on diuretic | "Hypokalaemia confirmed : review diuretic dose" |
+| Creatinine rising >20% in 3 months on ACE/ARB | "Possible ACEi-induced AKI : consider dose review" |
 | HbA1c > 75 mmol/mol in diabetic patient | Elevate risk score, add to visit agenda |
 | eGFR < 30 | Flag all nephrotoxic medications, elevate risk tier |
-| Sodium < 130 mEq/L on thiazide | "Possible hyponatraemia — urgent review" |
+| Sodium < 130 mEq/L on thiazide | "Possible hyponatraemia : urgent review" |
 
 **Effort:** 2 days.
 
@@ -1230,7 +1230,7 @@ For every medication change in `med_history`, ARIA knows the date but never eval
 
 ## Deferred to Post-Summer
 
-These items were considered and deliberately deferred — not forgotten.
+These items were considered and deliberately deferred : not forgotten.
 
 | Item | Reason for deferral |
 |---|---|
@@ -1247,7 +1247,7 @@ These items were considered and deliberately deferred — not forgotten.
 | Omron / Apple HealthKit / Samsung Galaxy Watch integration | Hardware is in the device lab. One device (Withings) done properly this summer. Others follow. |
 | PCE (Pooled Cohort Equations) score | Clinically valuable. Deferred to give physician study time to confirm which inputs are reliably available from FHIR bundles. |
 | Tablet-responsive dashboard (7.2) | Improves clinician efficiency on rounds but does not block the physician validation study. |
-| One-click dashboard actions (7.4) | Quick-access shortcuts from the patient list — useful but not required for the study. |
+| One-click dashboard actions (7.4) | Quick-access shortcuts from the patient list : useful but not required for the study. |
 
 ---
 
@@ -1267,27 +1267,27 @@ These items were considered and deliberately deferred — not forgotten.
 | 10 | Chatbot | 6 new tools, proactive hypothesis surfacing |
 | 11 | Chatbot | Clinical note generator, prompt caching, lab result rules |
 | 12 | Patient app (React Native) | Expo setup + EAS Build + app signing, rewrite 3 existing screens, home hub, guided BP measurement, food suggestions (5.10) |
-| 13 | Patient app (React Native) | Biometric login, push notifications (APNs/FCM), offline support, OCR scan, daily tips, missed dose, feedback, calendar, streaks — App Store submitted end of week |
-| 14 | Wearable + validation | Withings integration, polypharmacy flag, medication safety re-trigger, medication adjustment dashboard, EMR webhook, secure messaging (5.11), accessibility (5.14) — Apple review running in parallel |
+| 13 | Patient app (React Native) | Biometric login, push notifications (APNs/FCM), offline support, OCR scan, daily tips, missed dose, feedback, calendar, streaks : App Store submitted end of week |
+| 14 | Wearable + validation | Withings integration, polypharmacy flag, medication safety re-trigger, medication adjustment dashboard, EMR webhook, secure messaging (5.11), accessibility (5.14) : Apple review running in parallel |
 | 15 | Clinician workflow | Practice-level morning dashboard, post-appointment feedback loop |
 | 16 | Product | Practice admin role, practice analytics dashboard, bug fixes, validation study data review |
 
-**Physician validation study runs in parallel across Weeks 14–16** — physicians review briefings once the native patient app (Week 12) and Withings integration (Week 14) are both live.
+**Physician validation study runs in parallel across Weeks 14–16** : physicians review briefings once the native patient app (Week 12) and Withings integration (Week 14) are both live.
 
 ---
 
 ## Infrastructure & Budget
 
-### Category 1 — Infrastructure (Paid Tiers, 4 Months)
+### Category 1 : Infrastructure (Paid Tiers, 4 Months)
 
 | Service | Tier | Why Paid | Monthly | 4-Month |
 |---|---|---|---|---|
 | Supabase Pro (production) | Pro | PITR backup, no pausing risk, 8GB storage | $25 | $100 |
 | Supabase Pro (CI/test) | Pro | Dedicated test project, isolated from production | $25 | $100 |
 | Railway Pro (backend + worker) | Pro | Dedicated resources, no cold starts, required for 7:30 AM scheduler reliability | $20 | $80 |
-| Redis — Upstash Pay-as-you-go | Paid | 50k commands/day for Celery queue under physician validation load | $10 | $40 |
+| Redis : Upstash Pay-as-you-go | Paid | 50k commands/day for Celery queue under physician validation load | $10 | $40 |
 | Vercel Pro (clinician frontend) | Pro | Advanced analytics, 1TB bandwidth, password-protected preview deployments | $20 | $80 |
-| GitHub Team (6 members) | Team | Unlimited Actions minutes — free tier exhausted in week 1 with full CI | $24 | $96 |
+| GitHub Team (6 members) | Team | Unlimited Actions minutes : free tier exhausted in week 1 with full CI | $24 | $96 |
 | Sentry Team | Team | 50k errors/month, alerting rules, 90-day retention | $26 | $104 |
 | Domain (.com, 1 year) | Annual | Production URL for physician validation study | N/A | $12 |
 | **Infrastructure total** | | | | **$612** |
@@ -1298,21 +1298,21 @@ Free services in use: Cloudflare (WAF + DDoS protection), Resend (3k emails/mont
 
 ---
 
-### Category 2 — AI / API (4 Months)
+### Category 2 : AI / API (4 Months)
 
 | Service | Usage | Cost |
 |---|---|---|
-| Anthropic Claude — Layer 3 briefings | ~5,000 calls: daily briefings for demo patients + physician validation study patients (20 patients × 90 days) | $150 |
-| Anthropic Claude — Chatbot (Sprint 4 dev + production) | ~15,000 conversation turns across development iteration, physician reviewer sessions, and validation testing | $250 |
+| Anthropic Claude : Layer 3 briefings | ~5,000 calls: daily briefings for demo patients + physician validation study patients (20 patients × 90 days) | $150 |
+| Anthropic Claude : Chatbot (Sprint 4 dev + production) | ~15,000 conversation turns across development iteration, physician reviewer sessions, and validation testing | $250 |
 | **AI / API total** | | **$400** |
 
 ---
 
-### Category 3 — Hardware Device Lab
+### Category 3 : Hardware Device Lab
 
 | Item | Qty | Unit Price | Total | Purpose |
 |---|---|---|---|---|
-| Withings BPM Connect Pro | 2 | $100 | $200 | Primary wearable — 2 units allows concurrent patient testing + 1 spare |
+| Withings BPM Connect Pro | 2 | $100 | $200 | Primary wearable : 2 units allows concurrent patient testing + 1 spare |
 | Apple Developer Program (1 year) | 1 | $99 | $99 | Required for iOS TestFlight + App Store submission |
 | Google Play Console (one-time) | 1 | $25 | $25 | Required for Android Play Store submission |
 | **Hardware total** | | | **$324** | |
@@ -1321,27 +1321,27 @@ iOS and Android physical device testing uses team-owned phones and tablets.
 
 ---
 
-### Category 4 — ML & Cloud Compute
+### Category 4 : ML & Cloud Compute
 
 | Item | Service | Cost |
 |---|---|---|
-| CUSUM parameter sweep (k, h calibration) | AWS EC2 t3.medium spot instance — one-time run against patient cohort data | $42 |
+| CUSUM parameter sweep (k, h calibration) | AWS EC2 t3.medium spot instance : one-time run against patient cohort data | $42 |
 | **ML compute total** | | **$42** |
 
-CUSUM, Isolation Forest, and CausalImpact all run on the existing Railway Pro worker (budgeted in Category 1) — no additional compute required.
+CUSUM, Isolation Forest, and CausalImpact all run on the existing Railway Pro worker (budgeted in Category 1) : no additional compute required.
 
 ---
 
-### Category 5 — Professional Tools & Development
+### Category 5 : Professional Tools & Development
 
 | Item | Cost | Detail |
 |---|---|---|
-| Linear (project management, $8/seat × 6 × 3) | $144 | Sprint tracking, issue management — replaces ad-hoc GitHub issues |
+| Linear (project management, $8/seat × 6 × 3) | $144 | Sprint tracking, issue management : replaces ad-hoc GitHub issues |
 | **Tools & development total** | | **$144** |
 
 ---
 
-### Category 6 — Security
+### Category 6 : Security
 
 | Item | Cost | Detail |
 |---|---|---|
@@ -1370,14 +1370,14 @@ CUSUM, Isolation Forest, and CausalImpact all run on the existing Railway Pro wo
 
 At the end of 16 weeks, ARIA will be:
 
-1. **Clinically validated** — real physician feedback with structured outcome data from the post-appointment feedback loop, not just shadow mode accuracy
-2. **Detection-complete** — diastolic, heart rate, symptoms, masked hypertension, orthostatic hypotension, circadian patterns, polypharmacy — signals no competitor system surfaces in a standard PCP workflow
-3. **ML-grade** — CUSUM and CausalImpact replace statistical heuristics; Isolation Forest adds per-patient anomaly detection
-4. **Production-ready infrastructure** — Alembic, CI/CD, Celery, SSE, proper secrets management
-5. **Native patient app (iOS + Android)** — React Native with Expo, Face ID/Touch ID biometric login, APNs/FCM push notifications, offline support, OCR camera scan, direct Apple and Google Calendar integration, WCAG 2.1 AA / Section 508 compliant, App Store + Google Play distributed
-6. **Wearable-connected** — Withings BPM Connect readings flow automatically into the pipeline without manual transcription
-7. **Multi-practice ready** — Row-Level Security, practice admin role, practice analytics dashboard
-8. **Clinician workflow integrated** — 30-second briefing layout, tablet-responsive, one-click actions, medication adjustment from dashboard, post-appointment feedback
+1. **Clinically validated** : real physician feedback with structured outcome data from the post-appointment feedback loop, not just shadow mode accuracy
+2. **Detection-complete** : diastolic, heart rate, symptoms, masked hypertension, orthostatic hypotension, circadian patterns, polypharmacy : signals no competitor system surfaces in a standard PCP workflow
+3. **ML-grade** : CUSUM and CausalImpact replace statistical heuristics; Isolation Forest adds per-patient anomaly detection
+4. **Production-ready infrastructure** : Alembic, CI/CD, Celery, SSE, proper secrets management
+5. **Native patient app (iOS + Android)** : React Native with Expo, Face ID/Touch ID biometric login, APNs/FCM push notifications, offline support, OCR camera scan, direct Apple and Google Calendar integration, WCAG 2.1 AA / Section 508 compliant, App Store + Google Play distributed
+6. **Wearable-connected** : Withings BPM Connect readings flow automatically into the pipeline without manual transcription
+7. **Multi-practice ready** : Row-Level Security, practice admin role, practice analytics dashboard
+8. **Clinician workflow integrated** : 30-second briefing layout, tablet-responsive, one-click actions, medication adjustment from dashboard, post-appointment feedback
 
 The system will be demonstrable to real physician practices with real de-identified patients, with quantified precision and recall against actual clinical decision-making.
 
