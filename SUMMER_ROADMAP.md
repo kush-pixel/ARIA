@@ -1,6 +1,6 @@
 # ARIA — Summer 2026 Development Plan
 ## Leap of Faith Technologies × Illinois Institute of Technology
-## Team: Krishna Patel, Kush Patel, Sahil Khalsa, Nesh Rochwani, Prakriti Sharma, Yash Sharma
+## Team: NeuraCare Nexus
 ## Duration: 16 Weeks | Budget: $3,000
 
 ---
