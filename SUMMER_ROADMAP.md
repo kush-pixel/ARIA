@@ -1,7 +1,7 @@
 # ARIA — Summer 2026 Development Plan
 ## Leap of Faith Technologies × Illinois Institute of Technology
 ## Team: Krishna Patel, Kush Patel, Sahil Khalsa, Nesh Rochwani, Prakriti Sharma, Yash Sharma
-## Duration: 16 Weeks | Budget: $5,000
+## Duration: 16 Weeks | Budget: $3,000
 
 ---
 
@@ -1083,7 +1083,7 @@ Implemented in Sprint 3 (item 3.5) as a prerequisite for physician validation st
 
 ### 7.2 Mobile-First / Tablet Responsive
 
-The hardware budget includes an iPad ($599) specifically for clinician tablet testing, but the current fixed-column layout breaks at tablet width. PCPs use tablets on rounds and home visits.
+Physical device required for clinician tablet testing — use a team-owned device. The current fixed-column layout breaks at tablet width. PCPs use tablets on rounds and home visits.
 
 **Changes:**
 - Responsive breakpoints: briefing and chat panel stack vertically on tablet and phone
@@ -1246,6 +1246,8 @@ These items were considered and deliberately deferred — not forgotten.
 | Multi-Condition Expansion (CHF, COPD, T2D) | Hypertension detection must be fully validated before expanding to other conditions. |
 | Omron / Apple HealthKit / Samsung Galaxy Watch integration | Hardware is in the device lab. One device (Withings) done properly this summer. Others follow. |
 | PCE (Pooled Cohort Equations) score | Clinically valuable. Deferred to give physician study time to confirm which inputs are reliably available from FHIR bundles. |
+| Tablet-responsive dashboard (7.2) | Improves clinician efficiency on rounds but does not block the physician validation study. |
+| One-click dashboard actions (7.4) | Quick-access shortcuts from the patient list — useful but not required for the study. |
 
 ---
 
@@ -1264,41 +1266,41 @@ These items were considered and deliberately deferred — not forgotten.
 | 9 | Chatbot | Persistent history, evidence cards, uncertainty communication |
 | 10 | Chatbot | 6 new tools, proactive hypothesis surfacing |
 | 11 | Chatbot | Clinical note generator, prompt caching, lab result rules |
-| 12 | Patient app (React Native) | Expo setup + EAS Build + app signing, rewrite 3 existing screens, home hub, guided BP measurement |
-| 13 | Patient app (React Native) | Biometric login, push notifications (APNs/FCM), offline support, OCR scan, daily tips, food suggestions, missed dose, feedback, calendar, streaks — App Store submitted end of week |
-| 14 | Wearable + validation | Withings integration, polypharmacy flag, medication safety re-trigger, medication adjustment dashboard, EMR webhook — Apple review running in parallel |
+| 12 | Patient app (React Native) | Expo setup + EAS Build + app signing, rewrite 3 existing screens, home hub, guided BP measurement, food suggestions (5.10) |
+| 13 | Patient app (React Native) | Biometric login, push notifications (APNs/FCM), offline support, OCR scan, daily tips, missed dose, feedback, calendar, streaks — App Store submitted end of week |
+| 14 | Wearable + validation | Withings integration, polypharmacy flag, medication safety re-trigger, medication adjustment dashboard, EMR webhook, secure messaging (5.11), accessibility (5.14) — Apple review running in parallel |
 | 15 | Clinician workflow | Practice-level morning dashboard, post-appointment feedback loop |
 | 16 | Product | Practice admin role, practice analytics dashboard, bug fixes, validation study data review |
 
-**Physician validation study runs in parallel across Weeks 9–16.**
+**Physician validation study runs in parallel across Weeks 14–16** — physicians review briefings once the native patient app (Week 12) and Withings integration (Week 14) are both live.
 
 ---
 
 ## Infrastructure & Budget
 
-### Category 1 — Infrastructure (Paid Tiers, 5 Months)
+### Category 1 — Infrastructure (Paid Tiers, 4 Months)
 
-| Service | Tier | Why Paid | Monthly | 5-Month |
+| Service | Tier | Why Paid | Monthly | 4-Month |
 |---|---|---|---|---|
-| Supabase Pro (production) | Pro | PITR backup, no pausing risk, 8GB storage | $25 | $125 |
-| Supabase Pro (CI/test) | Pro | Dedicated test project, isolated from production | $25 | $125 |
-| Railway Pro (backend + worker) | Pro | Dedicated resources, no cold starts, required for 7:30 AM scheduler reliability | $20 | $100 |
-| Redis — Upstash Pay-as-you-go | Paid | 50k commands/day for Celery queue under physician validation load | $10 | $50 |
-| Vercel Pro (clinician frontend) | Pro | Advanced analytics, 1TB bandwidth, password-protected preview deployments | $20 | $100 |
-| GitHub Team (6 members) | Team | Unlimited Actions minutes — free tier exhausted in week 1 with full CI | $24 | $120 |
-| Sentry Team | Team | 50k errors/month, alerting rules, 90-day retention | $26 | $130 |
-| Doppler Team | Team | Secret audit logs, access control per member | $10 | $50 |
-| Cloudflare Pro | Pro | WAF rules, DDoS protection — production-grade for clinician-facing deployment | $20 | $100 |
-| Resend (email alerts) | Paid | 50k emails/month — free tier insufficient once practices are onboarded | $20 | $100 |
+| Supabase Pro (production) | Pro | PITR backup, no pausing risk, 8GB storage | $25 | $100 |
+| Supabase Pro (CI/test) | Pro | Dedicated test project, isolated from production | $25 | $100 |
+| Railway Pro (backend + worker) | Pro | Dedicated resources, no cold starts, required for 7:30 AM scheduler reliability | $20 | $80 |
+| Redis — Upstash Pay-as-you-go | Paid | 50k commands/day for Celery queue under physician validation load | $10 | $40 |
+| Vercel Pro (clinician frontend) | Pro | Advanced analytics, 1TB bandwidth, password-protected preview deployments | $20 | $80 |
+| GitHub Team (6 members) | Team | Unlimited Actions minutes — free tier exhausted in week 1 with full CI | $24 | $96 |
+| Sentry Team | Team | 50k errors/month, alerting rules, 90-day retention | $26 | $104 |
+| Secrets management | — | Managed via Railway environment variables — no separate secrets service needed | $0 | $0 |
+| Cloudflare | Free tier | Basic WAF and DDoS protection sufficient for physician validation study scale | $0 | $0 |
+| Resend (email alerts) | Free tier | 3k emails/month — sufficient for study scale (20 patients × 2 emails/day × 30 days = 1,200/month) | $0 | $0 |
 | Expo EAS Build | Free tier | 15 iOS builds/month — sufficient for active development sprint pace | $0 | $0 |
 | Domain (.com, 1 year) | — | Production URL for physician validation study | — | $12 |
-| **Infrastructure total** | | | | **$1,012** |
+| **Infrastructure total** | | | | **$612** |
 
 **HIPAA note:** Supabase Pro does not include a HIPAA Business Associate Agreement. The summer study uses de-identified patients so this is not required. Before onboarding real US patients post-summer, upgrade to Supabase Team ($599/month) and obtain BAAs from all vendors handling PHI.
 
 ---
 
-### Category 2 — AI / API (3 Months)
+### Category 2 — AI / API (4 Months)
 
 | Service | Usage | Cost |
 |---|---|---|
@@ -1312,13 +1314,13 @@ These items were considered and deliberately deferred — not forgotten.
 
 | Item | Qty | Unit Price | Total | Purpose |
 |---|---|---|---|---|
-| Withings BPM Connect Pro | 3 | $100 | $300 | Primary wearable — 3 units allows concurrent patient testing + 1 spare |
-| iPad Air (10.9") | 1 | $599 | $599 | Clinician dashboard tablet testing — Sprint 7 mobile-first work |
+| Withings BPM Connect Pro | 2 | $100 | $200 | Primary wearable — 2 units allows concurrent patient testing + 1 spare |
+| iPad Air | 0 | — | $0 | Use team-owned device for clinician dashboard tablet testing |
 | Android test phone (Samsung A-series) | 1 | $120 | $120 | React Native patient app testing — Android push notifications and BLE behaviour differ from iOS |
 | USB charging hub + cable set | 1 | $50 | $50 | Device lab management |
 | Apple Developer Program (1 year) | 1 | $99 | $99 | Required for iOS TestFlight + App Store submission |
 | Google Play Console (one-time) | 1 | $25 | $25 | Required for Android Play Store submission |
-| **Hardware total** | | | **$1,193** | |
+| **Hardware total** | | | **$494** | |
 
 ---
 
@@ -1332,32 +1334,16 @@ These items were considered and deliberately deferred — not forgotten.
 
 ---
 
-### Category 5 — Clinical Validation Study
+### Category 5 — Professional Tools & Development
 
 | Item | Cost | Detail |
 |---|---|---|
-| Physician participant compensation | $500 | 5 physicians × $100 per physician — structured clinical feedback sessions (2 hours each) |
-| Practice manager coordination | $100 | Admin time for scheduling and paperwork at each practice |
-| Patient consent materials (de-identified study) | $50 | Consent forms for patients in the validation cohort |
-| Ethics consultation (1 hour, university IRB advisor) | $150 | Initial review of study protocol before any patient interaction |
-| **Clinical validation total** | | **$800** |
-
----
-
-### Category 6 — Professional Tools & Development
-
-| Item | Cost | Detail |
-|---|---|---|
-| Figma Professional ($15/month × 3) | $45 | Patient app redesign — branching, prototyping, dev handoff |
 | Linear (project management, $8/seat × 6 × 3) | $144 | Sprint tracking, issue management — replaces ad-hoc GitHub issues |
-| Clinical AI & Informatics course (Coursera) | $99 | Structured clinical informatics training for non-clinical team members |
-| FHIR R4 implementation guide (HL7 print edition) | $60 | Reference for adapter correctness |
-| Postman Pro (API documentation + team sharing) | $24 | Shared API workspace for integration documentation |
-| **Tools & development total** | | **$372** |
+| **Tools & development total** | | **$144** |
 
 ---
 
-### Category 7 — Security
+### Category 6 — Security
 
 | Item | Cost | Detail |
 |---|---|---|
@@ -1366,30 +1352,19 @@ These items were considered and deliberately deferred — not forgotten.
 
 ---
 
-### Category 8 — Conference & Dissemination
-
-| Item | Cost | Detail |
-|---|---|---|
-| AMIA Annual Symposium student registration (1 member) | $280 | American Medical Informatics Association — primary venue for clinical AI research. Present physician validation findings. |
-| **Conference total** | | **$280** |
-
----
-
 ### Budget Summary
 
 | Category | Amount |
 |---|---|
-| Infrastructure (paid tiers, 5 months) | $1,012 |
+| Infrastructure (paid tiers, 4 months) | $612 |
 | AI / API | $400 |
-| Hardware device lab + App Store accounts | $1,193 |
+| Hardware device lab + App Store accounts | $494 |
 | ML & cloud compute | $42 |
-| Clinical validation study | $800 |
-| Professional tools & development | $372 |
+| Professional tools & development | $144 |
 | Security audit | $200 |
-| Conference & dissemination | $280 |
-| **Subtotal** | **$4,299** |
-| **Buffer (held in reserve)** | **$701** |
-| **Total from LOF funding** | **$5,000** |
+| **Subtotal** | **$1,892** |
+| **Buffer (held in reserve)** | **$200** |
+| **Total** | **$2,092** |
 
 ---
 
