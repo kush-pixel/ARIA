@@ -37,6 +37,21 @@ A between-visit clinical intelligence platform for hypertension management. A PC
 
 ---
 
+## Work Distribution
+
+Four members, each owning a technical domain. Every member contributes across all 16 weeks — no one is idle during another member's sprint.
+
+| | Member 1 | Member 2 | Member 3 | Member 4 |
+|---|---|---|---|---|
+| **Domain** | Data & Infrastructure | Clinical Intelligence | Clinician Experience | Patient & Integrations |
+| **Phase 1 — Foundation (Wks 1–3)** | Leads: Alembic, CI/CD, Celery, SSE, multi-tenancy RLS | Week 1 model fix, drug interaction alert | Week 1 guardrails fix, SSE frontend integration | Integration test suite |
+| **Phase 2 — Intelligence (Wks 4–8)** | Schema changes and API endpoints for all new detectors and ML features | Leads: detection engine (10 items), CUSUM, Isolation Forest, risk scorer, medication response tracker | Dashboard updates for each new alert type and briefing section | New reading fields in patient app, offline architecture design |
+| **Phase 3 — Interface (Wks 9–11)** | API endpoints for all chatbot tools | Lab result clinical rules | Leads: all chatbot work — persistent history, 6 tools, clinical note generator, prompt caching | Patient API contract review for React Native |
+| **Phase 4 — Mobile & Wearable (Wks 12–14)** | EMR webhook, medication adjustment API | Polypharmacy flag, medication safety re-trigger, Withings data validation | Medication adjustment dashboard, secure messaging backend, accessibility audit | Leads: full React Native app (5.1–5.13), Withings integration, App Store submission |
+| **Phase 5 — Study & Product (Wks 15–16)** | Practice admin role, practice analytics API | Physician validation clinical review | Post-appointment feedback UI, practice analytics dashboard | Accessibility completion, App Store follow-up, study data collection |
+
+---
+
 ## Week 1 : Critical Fixes (Ships Before Anything Else)
 
 These are bugs, security issues, and an architectural safety gap. Nothing else starts until these are closed.
@@ -1276,6 +1291,21 @@ These items were considered and deliberately deferred : not forgotten.
 
 ---
 
+## Risks & Mitigations
+
+| Risk | Likelihood | Impact | Mitigation |
+|---|---|---|---|
+| Apple App Store review exceeds 7 days for a healthcare app, delaying patient testing in Week 14 | Medium | High | Run the physician validation study via TestFlight — no App Store approval required. Submit to the App Store in parallel; approval is not on the critical path. |
+| React Native toolchain unfamiliar to the team, slowing Sprint 5 | Medium | Medium | Assign one member to complete an Expo build during Week 11 so nobody starts cold. Sprint 5 scope is already conservative — 5.11 and 5.14 deferred to post-summer. |
+| Withings API rate limit or breaking change disrupts Sprint 6.1 | Low | Medium | Build webhook fallback from day one. Manual reading submission stays fully functional throughout — no data gap if wearable sync fails. |
+| Anthropic API spend exceeds $400 estimate due to chatbot iteration during development | Medium | Low | Rate limiting (1.5) caps chatbot at 30 requests/minute per JWT. Prompt caching (Sprint 4) reduces duplicate Layer 3 calls. Monitor spend weekly. |
+| Physician recruitment falls short — fewer than 2 practices agree to participate | Medium | High | Begin outreach in Week 6 alongside detection engine work. Minimum viable study is 1 practice and 5 patients. Target IIT-affiliated clinics first. |
+| Week 1 credential audit uncovers deeper issues beyond the 4-hour time box | Medium | Medium | Time-box the audit. Fix only blocking security issues in Week 1 — non-blocking findings enter the Sprint 1 backlog. |
+| Celery migration (S1.3) introduces instability during the transition | Low | Medium | Keep the existing 30-second polling worker running in parallel until Celery is verified stable. The processing_jobs table persists regardless of which worker reads it — rollback is safe. |
+| Team member unavailability mid-summer disrupts sprint delivery | Medium | Medium | Every sprint deliverable has a primary and a documented secondary owner. No critical-path item has a single-person dependency. |
+
+---
+
 ## Infrastructure & Budget
 
 ### Category 1 : Infrastructure (Paid Tiers, 4 Months)
@@ -1317,7 +1347,7 @@ Free services in use: Cloudflare (WAF + DDoS protection), Resend (3k emails/mont
 | Google Play Console (one-time) | 1 | $25 | $25 | Required for Android Play Store submission |
 | **Hardware total** | | | **$324** | |
 
-iOS and Android physical device testing uses team-owned phones and tablets.
+iOS and Android physical device testing uses team-owned phones and tablets. If dedicated test devices are required, additional hardware costs of approximately $700 may apply.
 
 ---
 
