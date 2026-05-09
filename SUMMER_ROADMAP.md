@@ -7,7 +7,7 @@
 
 ## What ARIA Is Today
 
-A between-visit clinical intelligence platform for hypertension management. A PCP with 1,800 patients has 8 minutes per consultation and no structured view of what happened to their hypertensive patients since the last appointment. ARIA fixes this by:
+A between-visit clinical intelligence platform for hypertension management. A PCP with hundreds of patients has few minutes per consultation and no structured view of what happened to their hypertensive patients since the last appointment. ARIA fixes this by:
 
 - Ingesting patient EHR data via FHIR R4 Bundle
 - Generating clinically realistic synthetic home BP readings and medication confirmations
@@ -16,7 +16,7 @@ A between-visit clinical intelligence platform for hypertension management. A PC
 - Providing a clinician chatbot for real-time patient data queries
 - Collecting home BP readings and medication confirmations via a patient PWA
 
-**Current state:** Four demo patients, 94.3% shadow mode accuracy, full three-layer pipeline operational, patient PWA live, clinician chatbot live.
+**Current state:** Four demo patients, full three-layer pipeline operational, patient PWA live, clinician chatbot live.
 
 **Regulatory context:** ARIA is built for the US healthcare market. Clinical guidelines follow ACC/AHA 2017. Compliance framework is HIPAA. De-identified patients are used for the summer physician validation study — HIPAA does not apply to de-identified data. Before onboarding real US patients, Supabase must be upgraded to Team plan ($599/month) for HIPAA BAA, and all vendors handling PHI (Railway, Sentry, Anthropic, Doppler) must sign BAAs.
 
