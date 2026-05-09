@@ -1289,12 +1289,10 @@ These items were considered and deliberately deferred — not forgotten.
 | Vercel Pro (clinician frontend) | Pro | Advanced analytics, 1TB bandwidth, password-protected preview deployments | $20 | $80 |
 | GitHub Team (6 members) | Team | Unlimited Actions minutes — free tier exhausted in week 1 with full CI | $24 | $96 |
 | Sentry Team | Team | 50k errors/month, alerting rules, 90-day retention | $26 | $104 |
-| Secrets management | — | Managed via Railway environment variables — no separate secrets service needed | $0 | $0 |
-| Cloudflare | Free tier | Basic WAF and DDoS protection sufficient for physician validation study scale | $0 | $0 |
-| Resend (email alerts) | Free tier | 3k emails/month — sufficient for study scale (20 patients × 2 emails/day × 30 days = 1,200/month) | $0 | $0 |
-| Expo EAS Build | Free tier | 15 iOS builds/month — sufficient for active development sprint pace | $0 | $0 |
-| Domain (.com, 1 year) | — | Production URL for physician validation study | — | $12 |
+| Domain (.com, 1 year) | Annual | Production URL for physician validation study | N/A | $12 |
 | **Infrastructure total** | | | | **$612** |
+
+Free services in use: Cloudflare (WAF + DDoS protection), Resend (3k emails/month), Expo EAS Build (15 iOS builds/month), Railway environment variables for secrets management.
 
 **HIPAA note:** Supabase Pro does not include a HIPAA Business Associate Agreement. The summer study uses de-identified patients so this is not required. Before onboarding real US patients post-summer, upgrade to Supabase Team ($599/month) and obtain BAAs from all vendors handling PHI.
 
@@ -1315,22 +1313,22 @@ These items were considered and deliberately deferred — not forgotten.
 | Item | Qty | Unit Price | Total | Purpose |
 |---|---|---|---|---|
 | Withings BPM Connect Pro | 2 | $100 | $200 | Primary wearable — 2 units allows concurrent patient testing + 1 spare |
-| iPad Air | 0 | — | $0 | Use team-owned device for clinician dashboard tablet testing |
-| Android test phone (Samsung A-series) | 1 | $120 | $120 | React Native patient app testing — Android push notifications and BLE behaviour differ from iOS |
-| USB charging hub + cable set | 1 | $50 | $50 | Device lab management |
 | Apple Developer Program (1 year) | 1 | $99 | $99 | Required for iOS TestFlight + App Store submission |
 | Google Play Console (one-time) | 1 | $25 | $25 | Required for Android Play Store submission |
-| **Hardware total** | | | **$494** | |
+| **Hardware total** | | | **$324** | |
+
+iOS and Android physical device testing uses team-owned phones and tablets.
 
 ---
 
 ### Category 4 — ML & Cloud Compute
 
-| Item | Service | Usage | Cost |
-|---|---|---|---|
-| CUSUM + Isolation Forest + CausalImpact | Railway Pro worker (already paid) | All three run in the Celery worker on CPU — no separate compute needed | $0 |
-| CUSUM parameter sweep (k, h calibration) | AWS EC2 t3.medium (spot instance) | One-time calibration run against patient cohort data — CPU-bound statistics, no GPU needed | $42 |
-| **ML compute total** | | | **$42** |
+| Item | Service | Cost |
+|---|---|---|
+| CUSUM parameter sweep (k, h calibration) | AWS EC2 t3.medium spot instance — one-time run against patient cohort data | $42 |
+| **ML compute total** | | **$42** |
+
+CUSUM, Isolation Forest, and CausalImpact all run on the existing Railway Pro worker (budgeted in Category 1) — no additional compute required.
 
 ---
 
@@ -1358,13 +1356,13 @@ These items were considered and deliberately deferred — not forgotten.
 |---|---|
 | Infrastructure (paid tiers, 4 months) | $612 |
 | AI / API | $400 |
-| Hardware device lab + App Store accounts | $494 |
+| Hardware device lab + App Store accounts | $324 |
 | ML & cloud compute | $42 |
 | Professional tools & development | $144 |
 | Security audit | $200 |
-| **Subtotal** | **$1,892** |
+| **Subtotal** | **$1,722** |
 | **Buffer (held in reserve)** | **$200** |
-| **Total** | **$2,092** |
+| **Total** | **$1,922** |
 
 ---
 
