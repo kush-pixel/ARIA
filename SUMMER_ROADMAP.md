@@ -43,7 +43,6 @@ Four members, each owning a technical domain. Every member contributes across al
 
 | | Member 1 | Member 2 | Member 3 | Member 4 |
 |---|---|---|---|---|
-| **Domain** | Data & Infrastructure | Clinical Intelligence | Clinician Experience | Patient & Integrations |
 | **Phase 1 — Foundation (Wks 1–3)** | Leads: Alembic, CI/CD, Celery, SSE, multi-tenancy RLS | Week 1 model fix, drug interaction alert | Week 1 guardrails fix, SSE frontend integration | Integration test suite |
 | **Phase 2 — Intelligence (Wks 4–8)** | Schema changes and API endpoints for all new detectors and ML features | Leads: detection engine (10 items), CUSUM, Isolation Forest, risk scorer, medication response tracker | Dashboard updates for each new alert type and briefing section | New reading fields in patient app, offline architecture design |
 | **Phase 3 — Interface (Wks 9–11)** | API endpoints for all chatbot tools | Lab result clinical rules | Leads: all chatbot work — persistent history, 6 tools, clinical note generator, prompt caching | Patient API contract review for React Native |
@@ -1358,7 +1357,7 @@ iOS and Android physical device testing uses team-owned phones and tablets. If d
 | CUSUM parameter sweep (k, h calibration) | AWS EC2 t3.medium spot instance : one-time run against patient cohort data | $42 |
 | **ML compute total** | | **$42** |
 
-CUSUM, Isolation Forest, and CausalImpact all run on the existing Railway Pro worker (budgeted in Category 1) : no additional compute required.
+CUSUM, Isolation Forest, and CausalImpact are planned to run on the existing Railway Pro worker (budgeted in Category 1) : extra compute costs may incur depending on patient cohort size and processing load.
 
 ---
 
