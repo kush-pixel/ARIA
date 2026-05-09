@@ -300,3 +300,75 @@ Panel risk distribution, briefing read rate, alert response time, inertia preval
 | New Sprint 7 items | 6 |
 | New Sprint 8 items | 3 |
 | **Total changes** | **55** |
+
+---
+
+## 6. Logical Review Fixes (May 2026)
+
+Thirteen issues identified in a full logical review of the document. All fixed in-place.
+
+| # | Issue | Fix Applied |
+|---|---|---|
+| 1 | RLS (Sprint 8) scheduled Week 16 — physician study starts Week 8 | RLS moved to Sprint 1 as S1.7 — ships before any practice is onboarded |
+| 2 | Clinician workflow UX (Sprint 7) scheduled Week 15 — study starts Week 9 | 30-second briefing and alert inbox moved to Sprint 3 (items 3.5, 3.6) |
+| 3 | Week 1.6 creates new alert_type before Alembic migration framework exists | Added schema note: raw constraint update in Week 1, reconciled into Sprint S1.1 baseline migration |
+| 4 | 16-week project budgeted at 3-month infrastructure rates ($612 short by $200) | Infrastructure updated to 4-month rates ($812). Buffer removed. Total stays $5,000. |
+| 5 | Week 1.6 and Sprint 6.3 described the same mechanism with no distinction | 1.6 now covers FHIR re-ingestion only. 6.3 explicitly adds wearable and clinician pathways. |
+| 6 | CausalImpact and Medication Response Tracker produce contradictory briefing outputs | CausalImpact scoped to chatbot tool only. Deterministic tracker is the briefing output. Reconciliation rule documented. |
+| 7 | Webhook system for EMR Push had no sprint assignment — orphaned in timeline | Moved into Sprint 6 as item 6.6. Timeline table updated. |
+| 8 | Week 13 had 16 developer-days of work in a 5-day week | 5.11 Secure Messaging and 5.14 Accessibility moved to Week 14. |
+| 9 | Apple CalDAV integration not achievable from a PWA | Section 5.12 updated to Google Calendar only. .ics retained for Apple. Effort updated to 3 days. |
+| 10 | CUSUM control limit h derived from current elevated window instead of stable baseline | h now uses Phase I historic_bp_systolic stable baseline. Population SD fallback documented. |
+| 11 | ARV 10 mmHg threshold from clinic data — may not apply to daily home readings | Threshold note added. Calibration against home data planned during physician study. |
+| 12 | tfcausalimpact (TensorFlow) dependency not mentioned — major conflict risk | pycausalimpact (PyMC-based) recommended instead. Dependency validation step added before Sprint 3. |
+| 13 | Section numbering collision — Week 1 and Sprint 1 both used ### 1.1–1.6 | Sprint 1 items renamed S1.1–S1.7. Cross-references updated. |
+
+---
+
+## 7. React Native Migration (May 2026)
+
+**Decision:** Patient app migrated from Next.js 14 PWA to React Native with Expo. Full rationale in `NATIVE_APP_MIGRATION.md`.
+
+### Impact on Timeline
+
+| | Before (PWA) | After (React Native) |
+|---|---|---|
+| Sprint 5 duration | Weeks 12–13 (2 weeks) | Weeks 12–13 (2 weeks, parallel dev) |
+| Sprint 6 | Week 14 | Week 14 |
+| Sprint 7 | Week 15 | Week 15 |
+| Sprint 8 | Week 16 | Week 16 |
+| **Total** | **16 weeks** | **16 weeks** |
+
+**How 2 weeks is maintained:** 6-person team develops React Native screens in parallel (~60 person-days capacity vs ~20 person-days of feature work). App Store submission happens at end of Week 13; Apple review (5–7 days) runs in parallel during Sprint 6 Week 14 — no dedicated submission week needed. Deferred to post-summer: secure messaging (5.11), full Section 508 accessibility audit (5.14), full streaks system (5.13 — streak number shown on home hub only).
+
+### Impact on Budget
+
+| Item | Change | Amount |
+|---|---|---|
+| Infrastructure | 4 months → 5 months | +$200 ($812 → $1,012) |
+| Apple Watch Series 9 | Removed (post-summer, not needed this summer) | −$399 |
+| Apple Developer Program ($99/year) | Added — required for App Store | +$99 |
+| Google Play Console (one-time) | Added — required for Play Store | +$25 |
+| **Net budget change** | | **−$75 (savings)** |
+| **Buffer** | | **$75** |
+| **Total** | | **$5,000** |
+
+### Technology Replacements in Sprint 5
+
+| Feature | PWA (removed) | React Native (new) | Effort change |
+|---|---|---|---|
+| Biometric login | WebAuthn challenge-response (3 days) | `expo-local-authentication` (1.5 days) | −1.5 days |
+| Push notifications | Web Push API (2 days) | APNs + FCM via `expo-notifications` (1 day) | −1 day |
+| Offline support | IndexedDB + Service Worker (2 days) | AsyncStorage + Background Fetch (1 day) | −1 day |
+| OCR camera scan | Browser ML Kit (2 days) | `expo-camera` + native ML Kit (1 day) | −1 day |
+| Calendar integration | Google OAuth web only, Apple impossible (3 days) | `react-native-calendar-events` for both (1 day) | −2 days |
+| Accessibility | WCAG web ARIA (3 days) | Native a11y APIs (2 days) | −1 day |
+| **Feature savings** | | | **−7.5 days** |
+| Setup + rewrite + App Store | — | Added (Week 12 + Week 15) | +2 weeks |
+| **Net timeline addition** | | | **+3 weeks** |
+
+### New Capabilities (not possible in PWA)
+- Apple HealthKit integration (post-summer, infrastructure now in place)
+- Google Health Connect (post-summer)
+- Background sync while app is closed
+- App Store discoverability for physician validation study patients

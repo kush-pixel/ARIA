@@ -28,7 +28,7 @@ A between-visit clinical intelligence platform for hypertension management. A PC
 - Per-comorbidity ACC/AHA-aligned thresholds replacing the flat adjustment across all detectors
 - ML-grade algorithms: CUSUM replacing linear slope, Isolation Forest anomaly scoring, CausalImpact medication response assessment
 - A chatbot that cites its sources, persists conversations, proactively surfaces hypotheses, and communicates uncertainty explicitly
-- A patient app that guides clinically valid measurements, supports OCR input from older monitors, sends push notifications, works offline, and integrates directly with Google and Apple Calendar
+- A **native React Native (Expo)** patient app on iOS and Android — guided clinically valid measurements, Face ID/Touch ID biometric login, APNs/FCM push notifications, offline support, OCR camera scan, direct Apple and Google Calendar integration, Apple HealthKit and Google Health Connect ready
 - One validated wearable device integration eliminating manual transcription
 - Clinician workflow tools: 30-second briefing layout, tablet-responsive dashboard, one-click actions, medication adjustment from dashboard, post-appointment feedback
 - Multi-practice infrastructure: Row-Level Security, practice admin role, practice-level analytics
@@ -94,13 +94,15 @@ No rate limiting exists on any endpoint. The chatbot, briefing, and reading subm
 ### 1.6 Drug Interaction Immediate Alert
 Currently `medication_safety.py` only runs when a briefing is generated. If a FHIR re-ingestion adds a new medication that creates a dangerous combination (triple whammy, k-sparing + ACE/ARB etc.), the combination sits in the database undetected until the next briefing — potentially days.
 
-**Fix:** Whenever `clinical_context.current_medications` is updated by any pathway, enqueue a `pattern_recompute` job. The worker re-runs drug interaction detection and fires a `drug_interaction` alert immediately if a new dangerous combination is detected.
+**Fix:** Whenever `clinical_context.current_medications` is updated via **FHIR re-ingestion**, enqueue a `pattern_recompute` job. The worker re-runs drug interaction detection and fires a `drug_interaction` alert immediately if a new dangerous combination is detected. (Sprint 6.3 extends this to wearable sync and clinician-recorded adjustments — two additional pathways added when those features exist.)
 
 **Alert behaviour:**
 - New `alert_type = "drug_interaction"` in the alerts table
 - Deduplication check — only fire if no unacknowledged drug interaction alert already exists for this patient
 - `off_hours = TRUE` if triggered 6PM–8AM or weekend — clinician sees it at start of next working day
-- SSE push delivers it to the dashboard in real time (Sprint 1.5 infrastructure)
+- SSE push delivers it to the dashboard in real time (Sprint S1.5 infrastructure — real-time SSE endpoint)
+
+**Schema note:** The `drug_interaction` alert_type is added in Week 1 via a raw `ALTER TABLE alerts DROP CONSTRAINT IF EXISTS alerts_alert_type_check; ALTER TABLE alerts ADD CONSTRAINT alerts_alert_type_check CHECK (alert_type IN ('gap_urgent','gap_briefing','inertia','deterioration','adherence','drug_interaction'));` statement — acceptable before Alembic exists. Sprint S1.1 reconciles this into the baseline Alembic migration as the first tracked schema change.
 
 **Alert card in clinician inbox:**
 ```
@@ -119,7 +121,7 @@ Currently `medication_safety.py` only runs when a briefing is generated. If a FH
 
 ## Sprint 1 — Infrastructure Hardening (Weeks 2–3)
 
-### 1.1 Alembic Database Migrations
+### S1.1 Alembic Database Migrations
 
 **Problem:** All schema changes are raw `ALTER TABLE ADD COLUMN IF NOT EXISTS` statements in `setup_db.py`. No rollback capability. Breaks if two instances start simultaneously. 17 existing `ADD COLUMN` statements across 6 tables need reconciliation.
 
@@ -131,7 +133,7 @@ Currently `medication_safety.py` only runs when a briefing is generated. If a FH
 
 **Effort:** 2 days (baseline reconciliation requires careful testing against real Supabase).
 
-### 1.2 GitHub Actions CI/CD Pipeline
+### S1.2 GitHub Actions CI/CD Pipeline
 
 **Problem:** No automated pipeline. Every deploy is manual. Lint failures reach production.
 
@@ -160,7 +162,7 @@ CI uses a dedicated Supabase free-tier project. Never touches production.
 
 **Effort:** 1 day.
 
-### 1.3 Celery + Redis Worker
+### S1.3 Celery + Redis Worker
 
 **Problem:** The current 30-second polling loop means:
 - Jobs wait up to 30 seconds before pickup
@@ -176,7 +178,7 @@ CI uses a dedicated Supabase free-tier project. Never touches production.
 
 **Effort:** 2 days.
 
-### 1.4 Sentry Error Tracking
+### S1.4 Sentry Error Tracking
 
 **Problem:** If Layer 3 silently degrades or the pattern engine throws a partial exception, nobody knows until a clinician complains.
 
@@ -188,7 +190,7 @@ CI uses a dedicated Supabase free-tier project. Never touches production.
 
 **Effort:** 2 hours.
 
-### 1.5 Real-Time Dashboard — Server-Sent Events
+### S1.5 Real-Time Dashboard — Server-Sent Events
 
 **Problem:** Dashboard polls every 10 seconds via `setInterval`. Clinician sees stale data between polls.
 
@@ -200,7 +202,7 @@ CI uses a dedicated Supabase free-tier project. Never touches production.
 
 **Effort:** 1 day.
 
-### 1.6 Integration Test Suite
+### S1.6 Integration Test Suite
 
 **Problem:** Current tests mock the database. Clinical accuracy regressions are only caught by manual shadow mode.
 
@@ -212,6 +214,30 @@ CI uses a dedicated Supabase free-tier project. Never touches production.
   - Layer 3 passes all 15 validation checks
   - No guardrail strings in `readable_summary`
 - Playwright E2E: login → dashboard → patient detail → briefing renders → alert acknowledge → audit event created
+
+**Effort:** 3 days.
+
+### S1.7 Multi-Tenancy + Row-Level Security (Infrastructure)
+
+**Infrastructure prerequisite — must exist before any real practice is onboarded.** Without RLS, Practice A can see Practice B's patients. This ships in Sprint 1 so the physician validation study (Weeks 9–16) can safely onboard multiple practices.
+
+**Staged migration (safe to run against existing data):**
+```sql
+-- Stage 1: add as nullable
+ALTER TABLE patients ADD COLUMN practice_id TEXT;
+
+-- Stage 2: backfill all existing rows
+UPDATE patients SET practice_id = 'default_practice' WHERE practice_id IS NULL;
+
+-- Stage 3: add NOT NULL constraint
+ALTER TABLE patients ALTER COLUMN practice_id SET NOT NULL;
+
+-- Stage 4: RLS policy
+CREATE POLICY patient_isolation ON patients
+    USING (practice_id = current_setting('app.practice_id'));
+```
+
+Every JWT includes `practice_id` as a claim. FastAPI middleware sets `SET LOCAL app.practice_id` at the start of each request. No query changes required — RLS enforces isolation at the database level.
 
 **Effort:** 3 days.
 
@@ -317,6 +343,8 @@ ARV = mean(|SBP[i] - SBP[i-1]|)  for consecutive readings ≤2 days apart
 ```
 ARV > 10 mmHg is the validated clinical threshold (Rothwell et al., Lancet 2010).
 
+**Threshold note:** The 10 mmHg threshold comes from clinic visit-to-visit data (weeks between measurements). Daily home readings have naturally higher session-to-session variability. The physician validation study will calibrate this threshold against real home monitoring data — if the false positive rate is high, raise to 12–15 mmHg. The 10 mmHg value is a starting point, not a fixed clinical rule for home BP.
+
 **Gap handling:** Pairs separated by 3+ days (device outage) excluded from ARV — avoids inflating variability due to normal between-outage drift.
 
 **Risk scorer:** Add `_VARIABILITY_WEIGHT = 0.10`, reduce other weights proportionally. Import `variability_detector` in `risk_scorer.py`.
@@ -388,7 +416,7 @@ S_high[t] = max(0, S_high[t-1] + (reading - (baseline + k)))
 Alert when S_high[t] >= h
 ```
 
-Where `k` = 5 mmHg systolic / 3 mmHg diastolic (minimum shift to detect), `h` = 4×patient SD derived from the same adaptive window used by the detector.
+Where `k` = 5 mmHg systolic / 3 mmHg diastolic (minimum shift to detect), `h` = 4×patient SD derived from **Phase I stable baseline** — the `historic_bp_systolic` array filtered to visits before the current elevated window. Using the current detection window would inflate SD with the very readings being alarmed on, reducing CUSUM sensitivity. Falls back to population SD (12 mmHg systolic) if fewer than 10 stable historic readings exist.
 
 Applied to both systolic and diastolic, consistent with Sprint 2.1. More sensitive than rolling averages. Naturally handles variable reading frequency and gaps.
 
@@ -426,6 +454,8 @@ Incorporating diastolic (Sprint 2.1) and variability (Sprint 2.7) requires a sin
 
 For every medication change in `med_history`, models the counterfactual BP trajectory — what would BP have been if the medication had not changed? Pre-intervention period trains a Bayesian structural time series model. Post-intervention actuals vs. predicted counterfactual yield a causal effect estimate with a 95% confidence interval.
 
+**Dependency note:** Use `pycausalimpact` (pure Python, no TensorFlow dependency) rather than `tfcausalimpact`. `pycausalimpact` uses `pymc` for Bayesian inference — compatible with Python 3.11 and the existing async stack. Add `pycausalimpact` to `requirements.txt` and validate no numpy version conflicts before Sprint 3 begins. CausalImpact models run in the Celery worker, not in the FastAPI request path — async isolation prevents event loop conflicts.
+
 **Requirements:**
 - Minimum 21 days of readings before the medication change to fit the BSTS model
 - Drug-class titration window must elapse before analysis runs — reuses existing `TITRATION_WINDOWS` constants (diuretics/beta-blockers 14d, ACE/ARBs 28d, amlodipine 56d, default 42d)
@@ -440,6 +470,47 @@ Assessment: BP responded to medication change — within expected titration wind
 ```
 
 This answers the physician's most common post-prescription question: "Did it work?"
+
+**Surface:** CausalImpact output appears as a chatbot tool response (`get_medication_response`) — not directly in the briefing. The deterministic Medication Response Tracker (see New Features section) provides the briefing-level output. If they disagree, the chatbot notes both: "The deterministic tracker classified this as no_response, but the statistical model estimates a 68% probability of a real effect — below the 75% display threshold." This prevents contradictory claims appearing side-by-side in the briefing.
+
+**Effort:** 2 days.
+
+### 3.5 30-Second Briefing Layout
+
+This is frontend work that runs in parallel with Sprint 3 backend ML work. Must ship before physician validation study begins.
+
+Physicians have 8 minutes per consultation. The current briefing layout puts the AI summary at the top. Urgent flags must be first in plain English — AI summary moves below the fold as supporting detail.
+
+**New layout priority:**
+```
+┌─────────────────────────────────────────────┐
+│  DAVID PATEL  ·  High Risk  ·  Score: 78   │
+│  Next appointment: TODAY 10:30 AM           │
+├─────────────────────────────────────────────┤
+│  ⚠  TREATMENT REVIEW WARRANTED              │
+│  BP avg 163/94 mmHg · no med change 2013   │
+│  ⚠  MONITORING GAP: 12 days (since Apr 24) │
+├─────────────────────────────────────────────┤
+│  [90-day sparkline]       Adherence: 91%   │
+├─────────────────────────────────────────────┤
+│  "Why was treatment review flagged?"        │
+│  "What happened during the gap?"           │
+└─────────────────────────────────────────────┘
+```
+
+**Effort:** 2 days.
+
+### 3.6 Alert Triage Inbox Redesign
+
+This is frontend work that runs in parallel with Sprint 3 backend ML work. Must ship before physician validation study begins.
+
+With 40 patients across multiple practices in the validation study, the current inbox requires clicking every alert individually. This turns ARIA into a burden rather than a tool.
+
+**New features:**
+- Batch acknowledge: "Mark all inertia alerts as reviewed"
+- Urgency sort: `drug_interaction` and `gap_urgent` always first regardless of when they fired
+- Snooze: "Remind me at next appointment" — removes from inbox until then
+- Filter by type: view only adherence alerts across all patients
 
 **Effort:** 2 days.
 
@@ -552,7 +623,57 @@ Hard rules for what the chatbot must acknowledge before any trend statement. Ove
 
 ---
 
-## Sprint 5 — Patient App Redesign (Weeks 12–13)
+## Sprint 5 — Patient App: React Native with Expo (Weeks 12–13)
+
+**Decision:** The patient app is migrated from Next.js 14 PWA to **React Native with Expo**. Full rationale is in `NATIVE_APP_MIGRATION.md`. Key reasons: biometric login, push notifications, OCR, and calendar integration are all meaningfully simpler natively; Apple HealthKit and Google Health Connect are only possible natively; BLE device SDKs are more reliable than web APIs; and the physician validation study will use real elderly patients where native accessibility is meaningfully better.
+
+**How 2 weeks is achievable:** The 6-person team develops screens in parallel — different team members own different features simultaneously. Total feature work is ~20 person-days; with 6 people over 2 weeks (60 person-days of capacity), this is feasible. App Store submission happens at the end of Week 13 — Apple's review (5–7 days) runs in parallel during Sprint 6 (Week 14), not in a dedicated week. Features deferred to post-summer: full streaks system, secure patient messaging, Section 508 accessibility compliance (basic accessibility included natively, full audit post-summer).
+
+**What gets rewritten:** The entire `patient-app/` directory (3 pages). Backend, clinician dashboard, and all API contracts are unchanged.
+
+**Technology replacements:**
+
+| PWA (Current) | React Native Replacement | Simpler? |
+|---|---|---|
+| WebAuthn (Face ID/Touch ID) | `expo-local-authentication` | **Yes** — one function call vs full challenge-response |
+| Web Push API | APNs + FCM via `expo-notifications` | **Yes** — works when app is closed |
+| IndexedDB + Service Worker | AsyncStorage + Expo Background Fetch | **Yes** — no service worker complexity |
+| Browser ML Kit (OCR) | `expo-camera` + ML Kit native SDK | **Yes** — full camera control |
+| Google Calendar OAuth web | `react-native-calendar-events` | **Yes** — direct OS calendar access |
+| Apple CalDAV (not feasible in PWA) | `react-native-calendar-events` (EventKit) | **Now possible** |
+| CSS / Tailwind | StyleSheet / NativeWind | Different |
+| HTML elements | Native components (`View`, `TextInput`) | Different |
+
+**New capabilities (not possible in PWA):**
+- Apple HealthKit — read/write BP readings to Apple Health
+- Google Health Connect — same for Android
+- Background sync while app is closed
+- Home screen widget (today's tasks + streak)
+- App Store discoverability
+
+---
+
+### Week 12 — Setup + Toolchain + Rewrite Existing Screens
+
+**Expo setup (2 days):**
+- `npx create-expo-app aria-patient --template typescript`
+- EAS Build configuration, app signing (iOS provisioning profile + Android keystore)
+- Apple Developer Program enrollment ($99/year — see budget)
+- Google Play Console setup ($25 one-time — see budget)
+- Metro bundler, Xcode, Android Studio installed on team machines
+- Physical device testing: iOS (iPhone) + Android (Samsung A-series) from device lab
+
+**Rewrite existing 3 screens (3 days):**
+
+| Current PWA | React Native Replacement |
+|---|---|
+| `src/app/page.tsx` (login) | `screens/LoginScreen.tsx` |
+| `src/app/submit/page.tsx` | `screens/ReadingScreen.tsx` |
+| `src/app/confirm/page.tsx` | `screens/MedicationsScreen.tsx` |
+
+Same JWT auth logic, `AsyncStorage` instead of `localStorage`. Same API calls (`src/lib/api.ts` logic moved to RN context). React Navigation replaces Next.js router (stack navigator + tab navigator).
+
+---
 
 ### 5.1 Home Hub
 
@@ -607,20 +728,27 @@ Current app presents all fields simultaneously with no measurement guidance. ACC
 
 **Problem:** JWT expires after 8 hours. Patients must re-login for both morning and evening readings. Research ID retyped every login.
 
-**Redesign:**
-- Research ID entered once on first login
-- Patient creates a 6-digit PIN
-- Face ID / Touch ID via Web Authentication API (iOS Safari 16.4+ as PWA, Android Chrome any version)
-- 30-day refresh token alongside 8-hour access token — silently auto-refreshed
-- JWT access token moved from `localStorage` to `sessionStorage`
-- Auto-lock after 10 minutes of inactivity
-- Sign Out button in Settings (currently absent from the entire app)
+**Native implementation via `expo-local-authentication`:**
+```typescript
+const result = await LocalAuthentication.authenticateAsync({
+  promptMessage: 'Confirm your identity to continue',
+  fallbackLabel: 'Use PIN',
+});
+```
+No backend public key storage or challenge-response protocol required — the OS handles biometric verification. Works on Face ID (iOS), Touch ID (iOS/older devices), and fingerprint (Android).
 
-**Effort:** 3 days (WebAuthn requires backend public key storage + challenge-response in `auth.py`).
+- Research ID entered once on first login
+- Patient creates a 6-digit PIN as fallback
+- 30-day refresh token alongside 8-hour access token — silently auto-refreshed
+- JWT stored in encrypted `AsyncStorage` (replaces `sessionStorage`)
+- Auto-lock after 10 minutes of inactivity
+- Sign Out button in Settings
+
+**Effort:** 1.5 days (significantly simpler than WebAuthn — no backend public key storage or challenge-response in `auth.py` required).
 
 ### 5.4 Push Notifications
 
-`.ics` download requires: download file → locate file → tap file → import to calendar. Many elderly patients fail at step 3. Web Push API is the correct primary reminder mechanism.
+**Native implementation via `expo-notifications` (APNs for iOS, FCM for Android).** More reliable than Web Push — works when the app is closed, not just when the browser is open. No browser dependency.
 
 **Notification types:**
 - Medication time: "Time for your morning medications — tap to confirm"
@@ -630,9 +758,9 @@ Current app presents all fields simultaneously with no measurement guidance. ACC
 
 **Never send:** clinical values, risk scores, alert content, BP readings.
 
-**Consent:** Explicit push notification consent before subscribing. Consent timestamp stored alongside subscription endpoint.
+**Consent:** Explicit push notification permission prompt (iOS requires explicit grant). Consent timestamp stored alongside Expo push token.
 
-**Effort:** 2 days.
+**Effort:** 1 day (APNs/FCM via Expo is more straightforward than Web Push Service Worker registration).
 
 ### 5.5 Missed Dose + Late Confirmation
 
@@ -663,21 +791,22 @@ New personalised acknowledgment based on context:
 
 ### 5.7 Offline Support
 
-**What works offline:**
-- `/home` page loads from cached state
-- `/reading` form works entirely offline — reading saved to IndexedDB queue (`aria_reading_queue` namespace)
-- On reconnect: IndexedDB queue flushed to backend via Background Sync API
+**Native implementation — no Service Worker complexity:**
+- Home screen loads from cached AsyncStorage state
+- Reading form works entirely offline — reading saved to AsyncStorage queue (`aria_reading_queue`)
+- On reconnect: queue flushed to backend via Expo Background Fetch
 - Offline indicator banner: "You're offline — your data will sync when you reconnect."
+- Background Fetch runs even when app is closed — readings sync automatically on next network connection
 
-**Effort:** 2 days.
+**Effort:** 1 day (simpler than IndexedDB + Service Worker + Background Sync API).
 
 ### 5.8 OCR Camera Scan Input
 
-Elderly patients with older non-BLE monitors have no way to avoid manual transcription. Patient points phone camera at the BP monitor screen — Google ML Kit reads the three numbers on-device, offline-capable, free. Reading goes through the same guided flow and 60–250 mmHg range validation before submission. Adds `source="ocr_scan"` to readings.
+Elderly patients with older non-BLE monitors have no way to avoid manual transcription. Patient points phone camera at the BP monitor screen — **`expo-camera` + ML Kit native SDK** reads the three numbers on-device, offline-capable, free. Full native camera control (no browser sandbox limitations, faster and more accurate than browser ML Kit). Reading goes through the same guided flow and 60–250 mmHg range validation before submission. Adds `source="ocr_scan"` to readings.
 
 **Note:** This is distinct from the "Vision AI for medication photos" out-of-scope item — this is OCR of three digits from a screen, not AI identification of medication pills.
 
-**Effort:** 2 days.
+**Effort:** 1 day (full native camera access is simpler than browser sandbox ML Kit).
 
 ### 5.9 Daily Tips (1-Minute Bite-Sized Insights)
 
@@ -693,25 +822,23 @@ A simple "Foods to Watch" section in the patient app. Two columns: foods to redu
 
 ### 5.11 Secure Patient Messaging
 
-Patient sends a short message (max 500 characters) to their care team. Not two-way real-time chat. Not AI-mediated. Physician sees it in the alert inbox alongside clinical alerts. Mandatory non-emergency disclaimer before typing — "For urgent concerns, call the practice or dial 911." Full audit trail in `audit_events`.
+Deferred to post-summer to keep Sprint 5 within 2 weeks. The patient has the existing medication confirmation and reading submission flows in the meantime.
 
-**New table:**
-```sql
-CREATE TABLE patient_messages (
-    message_id UUID PRIMARY KEY,
-    patient_id TEXT REFERENCES patients(patient_id),
-    message_text TEXT NOT NULL,
-    sent_at TIMESTAMPTZ DEFAULT now(),
-    read_at TIMESTAMPTZ,
-    read_by TEXT
-);
+**Effort:** 2 days (post-summer).
+
+### 5.12 Google + Apple Calendar Integration
+
+**Native advantage via `react-native-calendar-events`:** Direct OS-level access to both Google Calendar and Apple Calendar (EventKit on iOS). No OAuth dance for Google, no CalDAV complexity for Apple — both work through the device's native calendar APIs with a single library call.
+
+```typescript
+await RNCalendarEvents.saveEvent('Morning Medications — ARIA', {
+  startDate: scheduledTime.toISOString(),
+  recurrenceRule: { frequency: 'daily' },
+  notes: 'Take before BP reading',
+});
 ```
 
-**Effort:** 2 days.
-
-### 5.12 Direct Google + Apple Calendar Integration
-
-Replaces `.ics` download as primary reminder mechanism. Patient connects Google or Apple account once in Settings (OAuth2 for Google, CalDAV for Apple). Medication reminders pushed directly as recurring calendar events. When medication schedule changes, existing events are updated not duplicated. `.ics` download retained as fallback for patients without Google/Apple accounts.
+Medication reminders pushed as recurring calendar events. When medication schedule changes, existing events are updated not duplicated. `.ics` download retained as fallback for patients without calendar access.
 
 **Schema addition:**
 ```sql
@@ -719,7 +846,7 @@ ALTER TABLE patients ADD COLUMN calendar_integration TEXT; -- google|apple|ics_o
 ALTER TABLE patients ADD COLUMN calendar_oauth_token TEXT; -- encrypted at application layer
 ```
 
-**Effort:** 2 days.
+**Effort:** 1 day (direct OS calendar access — significantly simpler than OAuth web flow).
 
 ### 5.13 Full Engagement and Streaks System
 
@@ -744,23 +871,29 @@ CREATE TABLE patient_engagement (
 
 ### 5.14 Accessibility — Section 508 / WCAG 2.1 AA
 
-Required under the Americans with Disabilities Act. Practically essential for the elderly patient demographic in the physician validation study.
+Deferred to post-summer to keep Sprint 5 within 2 weeks. Basic native accessibility is included automatically through React Native's `accessibilityLabel` and `accessibilityRole` properties on all components — a formal Section 508 audit and remediation is the post-summer deliverable.
 
-**Required changes:**
-- System font size respected (Tailwind currently overrides system preferences)
-- All interactive elements ≥44×44px touch target
-- High contrast mode respecting `prefers-contrast: high` media query
-- `+` / `−` stepper buttons alongside all numeric inputs
-- `aria-label` on all inputs, descriptive text on all icon buttons
-- Specific error messages ("Systolic must be between 60 and 250") not generic ("Invalid input")
-- Colour never used as the sole means of conveying information
-- **Simplified mode (Settings toggle):** Two large buttons on the home screen — "Take BP Reading" and "Confirm Medications" — for patients with cognitive difficulties
+**Native advantage:** React Native's accessibility APIs work directly with VoiceOver (iOS) and TalkBack (Android) — more comprehensive than web ARIA attributes. The full compliance effort becomes 2 days (not 3) when it runs.
 
-**Effort:** 3 days.
+**Effort:** 2 days (post-summer).
+
+### End of Week 13 — App Store Submission (Parallel, Not a Dedicated Week)
+
+Physical device testing and App Store submission happen at the end of Week 13 alongside feature completion. Apple's review (5–7 days) runs in parallel during Sprint 6 (Week 14) — not a dedicated week.
+
+| Task | When | Notes |
+|---|---|---|
+| iOS + Android physical device testing | Week 13 (ongoing) | Push notifications and BLE must be tested on physical devices, not simulators |
+| TestFlight beta distribution | End of Week 13 | Physician validation study participants install via TestFlight |
+| Apple App Store submission | End of Week 13 | Healthcare app — include clinical decision support disclaimer + privacy nutrition label |
+| Google Play submission | End of Week 13 | 1–2 day review — typically approved before Apple |
+| Apple review response (if any) | During Week 14 | Address any App Store feedback during Sprint 6 week |
 
 ---
 
 ## Sprint 6 — Wearable Integration + Clinical Validation (Week 14)
+
+**Note:** Weeks 12–13 deliver the core React Native patient app. App Store review runs in parallel this week. Secure messaging (5.11) and full accessibility compliance (5.14) are deferred to post-summer.
 
 ### 6.1 Withings BPM Connect Integration
 
@@ -768,7 +901,7 @@ One device, done properly. Withings is a widely used clinically-validated home B
 
 **Architecture:**
 ```
-Patient authorises Withings (OAuth2 in patient PWA)
+Patient authorises Withings (OAuth2 in patient app — React Native WebBrowser for OAuth flow)
         ↓
 wearable_enrollments row created
         ↓
@@ -821,9 +954,11 @@ Visit Agenda:
 
 ### 6.3 `medication_safety.py` Re-Trigger
 
-Whenever `clinical_context.current_medications` is updated by any pathway (FHIR re-ingestion, wearable sync, clinician-recorded adjustment from Sprint 6.4), enqueue a `pattern_recompute` job. The worker re-runs drug interaction detection as part of the recompute — not only at briefing generation time.
+Week 1.6 wires the re-trigger for FHIR re-ingestion only. This sprint extends it to the two remaining pathways: wearable sync (Sprint 6.1) and clinician-recorded adjustment (Sprint 6.4). Together, all three pathways are covered.
 
-This is the architectural fix that makes the Week 1.6 drug interaction alert reliable across all pathways.
+Whenever `clinical_context.current_medications` is updated by any of these pathways, enqueue a `pattern_recompute` job. The worker re-runs drug interaction detection as part of the recompute — not only at briefing generation time.
+
+This completes the coverage started in Week 1.6.
 
 **Effort:** 1 day.
 
@@ -890,34 +1025,61 @@ The most important deliverable of the summer. Getting practising physicians to r
 
 **Effort:** 2 weeks of data collection running in parallel with other sprints. Protocol design and physician outreach: 3 days.
 
+### 6.6 Webhook System for EMR Push
+
+ARIA currently only does batch FHIR ingestion — the physician manually triggers it. A webhook endpoint lets EMR systems push updates when a new medication is prescribed, a problem is added, or a visit is recorded.
+
+`POST /api/webhooks/fhir` — receives a FHIR Bundle, validates it, enqueues a `bundle_import` job. Also triggers `medication_safety.py` re-run via the Sprint 6.3 re-trigger mechanism.
+
+This is receiving data only, not writing back to the EMR. No regulatory complications.
+
+**Effort:** 1 day.
+
+### 5.11 Secure Patient Messaging (completing Week 14)
+
+Patient sends a short message (max 500 characters) to their care team. Not two-way real-time chat. Not AI-mediated. Physician sees it in the alert inbox alongside clinical alerts. Mandatory non-emergency disclaimer before typing — "For urgent concerns, call the practice or dial 911." Full audit trail in `audit_events`.
+
+**New table:**
+```sql
+CREATE TABLE patient_messages (
+    message_id UUID PRIMARY KEY,
+    patient_id TEXT REFERENCES patients(patient_id),
+    message_text TEXT NOT NULL,
+    sent_at TIMESTAMPTZ DEFAULT now(),
+    read_at TIMESTAMPTZ,
+    read_by TEXT
+);
+```
+
+**Effort:** 2 days.
+
+### 5.14 Accessibility — Section 508 / WCAG 2.1 AA (completing Week 14)
+
+Required under the Americans with Disabilities Act. Practically essential for the elderly patient demographic in the physician validation study.
+
+**Required changes:**
+- System font size respected (Tailwind currently overrides system preferences)
+- All interactive elements ≥44×44px touch target
+- High contrast mode respecting `prefers-contrast: high` media query
+- `+` / `−` stepper buttons alongside all numeric inputs
+- `aria-label` on all inputs, descriptive text on all icon buttons
+- Specific error messages ("Systolic must be between 60 and 250") not generic ("Invalid input")
+- Colour never used as the sole means of conveying information
+- **Simplified mode (Settings toggle):** Two large buttons on the home screen — "Take BP Reading" and "Confirm Medications" — for patients with cognitive difficulties
+
+**Effort:** 3 days.
+
 ---
 
 ## Sprint 7 — Clinician Workflow (Week 15)
 
-None of these items exist in the current system. They directly determine whether physicians can use ARIA efficiently during the validation study.
+Items 7.1 (30-second briefing layout) and 7.3 (alert triage inbox redesign) were moved to Sprint 3 as prerequisites for the physician validation study — see Sprint 3 items 3.5 and 3.6. Items 7.2 (tablet responsive) and 7.4 (one-click dashboard actions) are deferred to post-summer to keep the 16-week timeline — they improve efficiency but do not block the validation study.
 
 ### 7.1 30-Second Briefing Rule
 
-Physicians have 8 minutes per consultation. The current briefing layout puts the AI summary at the top. Urgent flags must be first in plain English — AI summary moves below the fold as supporting detail.
+Implemented in Sprint 3 (item 3.5) as a prerequisite for physician validation study. See Sprint 3 for details.
 
-**New layout priority:**
-```
-┌─────────────────────────────────────────────┐
-│  DAVID PATEL  ·  High Risk  ·  Score: 78   │
-│  Next appointment: TODAY 10:30 AM           │
-├─────────────────────────────────────────────┤
-│  ⚠  TREATMENT REVIEW WARRANTED              │
-│  BP avg 163/94 mmHg · no med change 2013   │
-│  ⚠  MONITORING GAP: 12 days (since Apr 24) │
-├─────────────────────────────────────────────┤
-│  [90-day sparkline]       Adherence: 91%   │
-├─────────────────────────────────────────────┤
-│  "Why was treatment review flagged?"        │
-│  "What happened during the gap?"           │
-└─────────────────────────────────────────────┘
-```
-
-**Effort:** 2 days.
+**Effort:** Already delivered.
 
 ### 7.2 Mobile-First / Tablet Responsive
 
@@ -932,15 +1094,9 @@ The hardware budget includes an iPad ($599) specifically for clinician tablet te
 
 ### 7.3 Alert Triage Inbox Redesign
 
-With 40 patients across multiple practices in the validation study, the current inbox requires clicking every alert individually. This turns ARIA into a burden rather than a tool.
+Implemented in Sprint 3 (item 3.6) as a prerequisite for physician validation study. See Sprint 3 for details.
 
-**New features:**
-- Batch acknowledge: "Mark all inertia alerts as reviewed"
-- Urgency sort: `drug_interaction` and `gap_urgent` always first regardless of when they fired
-- Snooze: "Remind me at next appointment" — removes from inbox until then
-- Filter by type: view only adherence alerts across all patients
-
-**Effort:** 2 days.
+**Effort:** Already delivered.
 
 ### 7.4 One-Click Dashboard Actions
 
@@ -1003,27 +1159,9 @@ This data feeds: calibration engine, alert quality metrics, and validation study
 
 ### 8.1 Multi-Tenancy + Row-Level Security
 
-Required before the physician validation study runs across multiple practices. Without RLS, Practice A can see Practice B's patients.
+Implemented in Sprint 1 (S1.7) as a prerequisite for physician validation study. See Sprint 1 for full implementation details.
 
-**Staged migration (safe to run against existing data):**
-```sql
--- Stage 1: add as nullable
-ALTER TABLE patients ADD COLUMN practice_id TEXT;
-
--- Stage 2: backfill all existing rows
-UPDATE patients SET practice_id = 'default_practice' WHERE practice_id IS NULL;
-
--- Stage 3: add NOT NULL constraint
-ALTER TABLE patients ALTER COLUMN practice_id SET NOT NULL;
-
--- Stage 4: RLS policy
-CREATE POLICY patient_isolation ON patients
-    USING (practice_id = current_setting('app.practice_id'));
-```
-
-Every JWT includes `practice_id` as a claim. FastAPI middleware sets `SET LOCAL app.practice_id` at the start of each request. No query changes required — RLS enforces isolation at the database level.
-
-**Effort:** 3 days.
+**Effort:** Already delivered in Sprint 1.
 
 ### 8.2 Practice Admin Role
 
@@ -1059,13 +1197,7 @@ Makes the physician validation study results presentable to a funder.
 
 ### Webhook System for EMR Push
 
-ARIA currently only does batch FHIR ingestion — the physician manually triggers it. A webhook endpoint lets EMR systems push updates when a new medication is prescribed, a problem is added, or a visit is recorded.
-
-`POST /api/webhooks/fhir` — receives a FHIR Bundle, validates it, enqueues a `bundle_import` job. Also triggers `medication_safety.py` re-run via the Sprint 6.3 re-trigger mechanism.
-
-This is receiving data only, not writing back to the EMR. No regulatory complications.
-
-**Effort:** 1 day.
+Implemented in Sprint 6 (item 6.6). See Sprint 6 for details.
 
 ### Medication Response Tracker
 
@@ -1076,6 +1208,7 @@ For every medication change in `med_history`, ARIA knows the date but never eval
 - Response classification: `good_response` (>10 mmHg drop) | `partial_response` (5–10 mmHg) | `no_response` (<5 mmHg) | `worsening`
 
 **Briefing output:** "BP did not respond to the medication change from March 15. Consider dose review."
+**Note:** This is the briefing-level output. CausalImpact (Sprint 3.4) is the chatbot-level output for the same question — deeper statistical analysis available on request, kept out of the briefing to avoid information overload.
 
 **Effort:** 2 days.
 
@@ -1122,43 +1255,44 @@ These items were considered and deliberately deferred — not forgotten.
 |---|---|---|
 | 1 | Critical fixes | Wrong model fixed, guardrails on chat/summary, credentials rotated, rate limiting, drug interaction alert system |
 | 2 | Infrastructure | Alembic migrations, GitHub Actions pipeline, Sentry |
-| 3 | Infrastructure | Celery + Redis worker, SSE dashboard, integration test suite |
+| 3 | Infrastructure | Celery + Redis worker, SSE dashboard, integration test suite, multi-tenancy + RLS |
 | 4 | Detection engine | Diastolic BP across all detectors, heart rate analysis, contextual severity modulation |
 | 5 | Detection engine | Symptom detector, `medication_taken` field, orthostatic hypotension |
 | 6 | Detection engine | Masked HTN classifier, ARV variability, detector audit trail, circadian pattern analysis |
-| 7 | ML algorithms | CUSUM, CausalImpact medication response |
+| 7 | ML algorithms | CUSUM, CausalImpact medication response, 30-second briefing layout, alert inbox redesign |
 | 8 | ML algorithms | Isolation Forest, risk scorer weight update, medication response tracker |
 | 9 | Chatbot | Persistent history, evidence cards, uncertainty communication |
 | 10 | Chatbot | 6 new tools, proactive hypothesis surfacing |
 | 11 | Chatbot | Clinical note generator, prompt caching, lab result rules |
-| 12 | Patient app | Home hub, guided BP measurement, OCR scan, daily tips, food suggestions |
-| 13 | Patient app | Biometric login, push notifications, offline support, Google/Apple calendar, streaks, accessibility, secure messaging |
-| 14 | Wearable + validation | Withings integration, polypharmacy flag, medication safety re-trigger, medication adjustment dashboard |
-| 15 | Clinician workflow | 30-second briefing redesign, tablet responsive, alert inbox, one-click actions, practice dashboard, post-appointment feedback |
-| 16 | Product | Multi-tenancy + RLS, practice admin role, practice analytics dashboard |
+| 12 | Patient app (React Native) | Expo setup + EAS Build + app signing, rewrite 3 existing screens, home hub, guided BP measurement |
+| 13 | Patient app (React Native) | Biometric login, push notifications (APNs/FCM), offline support, OCR scan, daily tips, food suggestions, missed dose, feedback, calendar, streaks — App Store submitted end of week |
+| 14 | Wearable + validation | Withings integration, polypharmacy flag, medication safety re-trigger, medication adjustment dashboard, EMR webhook — Apple review running in parallel |
+| 15 | Clinician workflow | Practice-level morning dashboard, post-appointment feedback loop |
+| 16 | Product | Practice admin role, practice analytics dashboard, bug fixes, validation study data review |
 
-**Physician validation study runs in parallel across Weeks 8–16.**
+**Physician validation study runs in parallel across Weeks 9–16.**
 
 ---
 
 ## Infrastructure & Budget
 
-### Category 1 — Infrastructure (Paid Tiers, 3 Months)
+### Category 1 — Infrastructure (Paid Tiers, 5 Months)
 
-| Service | Tier | Why Paid | Monthly | 3-Month |
+| Service | Tier | Why Paid | Monthly | 5-Month |
 |---|---|---|---|---|
-| Supabase Pro (production) | Pro | PITR backup, no pausing risk, 8GB storage | $25 | $75 |
-| Supabase Pro (CI/test) | Pro | Dedicated test project, isolated from production | $25 | $75 |
-| Railway Pro (backend + worker) | Pro | Dedicated resources, no cold starts, required for 7:30 AM scheduler reliability | $20 | $60 |
-| Redis — Upstash Pay-as-you-go | Paid | 50k commands/day for Celery queue under physician validation load | $10 | $30 |
-| Vercel Pro (frontend + patient PWA) | Pro | Advanced analytics, 1TB bandwidth, password-protected preview deployments | $20 | $60 |
-| GitHub Team (6 members) | Team | Unlimited Actions minutes — free tier exhausted in week 1 with full CI | $24 | $72 |
-| Sentry Team | Team | 50k errors/month, alerting rules, 90-day retention | $26 | $78 |
-| Doppler Team | Team | Secret audit logs, access control per member | $10 | $30 |
-| Cloudflare Pro | Pro | WAF rules, DDoS protection — production-grade for clinician-facing deployment | $20 | $60 |
-| Resend (email alerts) | Paid | 50k emails/month — free tier insufficient once practices are onboarded | $20 | $60 |
+| Supabase Pro (production) | Pro | PITR backup, no pausing risk, 8GB storage | $25 | $125 |
+| Supabase Pro (CI/test) | Pro | Dedicated test project, isolated from production | $25 | $125 |
+| Railway Pro (backend + worker) | Pro | Dedicated resources, no cold starts, required for 7:30 AM scheduler reliability | $20 | $100 |
+| Redis — Upstash Pay-as-you-go | Paid | 50k commands/day for Celery queue under physician validation load | $10 | $50 |
+| Vercel Pro (clinician frontend) | Pro | Advanced analytics, 1TB bandwidth, password-protected preview deployments | $20 | $100 |
+| GitHub Team (6 members) | Team | Unlimited Actions minutes — free tier exhausted in week 1 with full CI | $24 | $120 |
+| Sentry Team | Team | 50k errors/month, alerting rules, 90-day retention | $26 | $130 |
+| Doppler Team | Team | Secret audit logs, access control per member | $10 | $50 |
+| Cloudflare Pro | Pro | WAF rules, DDoS protection — production-grade for clinician-facing deployment | $20 | $100 |
+| Resend (email alerts) | Paid | 50k emails/month — free tier insufficient once practices are onboarded | $20 | $100 |
+| Expo EAS Build | Free tier | 15 iOS builds/month — sufficient for active development sprint pace | $0 | $0 |
 | Domain (.com, 1 year) | — | Production URL for physician validation study | — | $12 |
-| **Infrastructure total** | | | | **$612** |
+| **Infrastructure total** | | | | **$1,012** |
 
 **HIPAA note:** Supabase Pro does not include a HIPAA Business Associate Agreement. The summer study uses de-identified patients so this is not required. Before onboarding real US patients post-summer, upgrade to Supabase Team ($599/month) and obtain BAAs from all vendors handling PHI.
 
@@ -1170,8 +1304,7 @@ These items were considered and deliberately deferred — not forgotten.
 |---|---|---|
 | Anthropic Claude — Layer 3 briefings | ~5,000 calls: daily briefings for demo patients + physician validation study patients (20 patients × 90 days) | $150 |
 | Anthropic Claude — Chatbot (Sprint 4 dev + production) | ~15,000 conversation turns across development iteration, physician reviewer sessions, and validation testing | $250 |
-| Groq API — Paid tier | Production chatbot inference at physician validation scale | $100 |
-| **AI / API total** | | **$500** |
+| **AI / API total** | | **$400** |
 
 ---
 
@@ -1180,13 +1313,12 @@ These items were considered and deliberately deferred — not forgotten.
 | Item | Qty | Unit Price | Total | Purpose |
 |---|---|---|---|---|
 | Withings BPM Connect Pro | 3 | $100 | $300 | Primary wearable — 3 units allows concurrent patient testing + 1 spare |
-| Omron Connect (EVOLV) | 2 | $80 | $160 | Cross-device validation (post-summer integration) |
-| Apple Watch Series 9 | 1 | $399 | $399 | HealthKit API testing for post-summer integration |
-| Samsung Galaxy Watch 6 | 1 | $250 | $250 | Android wearable platform for post-summer integration |
-| iPad Air (10.9") | 1 | $599 | $599 | Clinician dashboard tablet testing — Sprint 7.2 mobile-first work |
-| Android test phone (Samsung A-series) | 1 | $120 | $120 | Patient PWA testing — PWA behaviour on Android Chrome differs from iOS Safari |
+| iPad Air (10.9") | 1 | $599 | $599 | Clinician dashboard tablet testing — Sprint 7 mobile-first work |
+| Android test phone (Samsung A-series) | 1 | $120 | $120 | React Native patient app testing — Android push notifications and BLE behaviour differ from iOS |
 | USB charging hub + cable set | 1 | $50 | $50 | Device lab management |
-| **Hardware total** | | | **$1,878** | |
+| Apple Developer Program (1 year) | 1 | $99 | $99 | Required for iOS TestFlight + App Store submission |
+| Google Play Console (one-time) | 1 | $25 | $25 | Required for Android Play Store submission |
+| **Hardware total** | | | **$1,193** | |
 
 ---
 
@@ -1194,12 +1326,9 @@ These items were considered and deliberately deferred — not forgotten.
 
 | Item | Service | Usage | Cost |
 |---|---|---|---|
-| CUSUM + Isolation Forest training runs | AWS EC2 t3.medium | Training runs across patient cohorts | $42 |
-| CausalImpact BSTS model fitting | Same EC2 instance | Per-patient post-medication-change analysis | $0 additional |
-| Model artifact storage | AWS S3 Standard | Trained model files, versioned per patient | $15 |
-| SageMaker Experiments (model tracking) | AWS SageMaker | Track metrics and model versions | $80 |
-| Cloud GPU for CUSUM parameter sweep | AWS EC2 g4dn.xlarge | Parameter sweep to calibrate k and h values against real BP data | $21 |
-| **ML compute total** | | | **$158** |
+| CUSUM + Isolation Forest + CausalImpact | Railway Pro worker (already paid) | All three run in the Celery worker on CPU — no separate compute needed | $0 |
+| CUSUM parameter sweep (k, h calibration) | AWS EC2 t3.medium (spot instance) | One-time calibration run against patient cohort data — CPU-bound statistics, no GPU needed | $42 |
+| **ML compute total** | | | **$42** |
 
 ---
 
@@ -1250,16 +1379,16 @@ These items were considered and deliberately deferred — not forgotten.
 
 | Category | Amount |
 |---|---|
-| Infrastructure (paid tiers, 3 months) | $612 |
-| AI / API | $500 |
-| Hardware device lab | $1,878 |
-| ML & cloud compute | $158 |
+| Infrastructure (paid tiers, 5 months) | $1,012 |
+| AI / API | $400 |
+| Hardware device lab + App Store accounts | $1,193 |
+| ML & cloud compute | $42 |
 | Clinical validation study | $800 |
 | Professional tools & development | $372 |
 | Security audit | $200 |
 | Conference & dissemination | $280 |
-| **Total** | **$4,800** |
-| **Buffer (held in reserve)** | **$200** |
+| **Subtotal** | **$4,299** |
+| **Buffer (held in reserve)** | **$701** |
 | **Total from LOF funding** | **$5,000** |
 
 ---
@@ -1272,7 +1401,7 @@ At the end of 16 weeks, ARIA will be:
 2. **Detection-complete** — diastolic, heart rate, symptoms, masked hypertension, orthostatic hypotension, circadian patterns, polypharmacy — signals no competitor system surfaces in a standard PCP workflow
 3. **ML-grade** — CUSUM and CausalImpact replace statistical heuristics; Isolation Forest adds per-patient anomaly detection
 4. **Production-ready infrastructure** — Alembic, CI/CD, Celery, SSE, proper secrets management
-5. **Patient app clinically valid and accessible** — guided measurements meeting ACC/AHA protocol, push notifications, offline support, OCR input for older monitors, Google/Apple Calendar integration, WCAG 2.1 AA compliant
+5. **Native patient app (iOS + Android)** — React Native with Expo, Face ID/Touch ID biometric login, APNs/FCM push notifications, offline support, OCR camera scan, direct Apple and Google Calendar integration, WCAG 2.1 AA / Section 508 compliant, App Store + Google Play distributed
 6. **Wearable-connected** — Withings BPM Connect readings flow automatically into the pipeline without manual transcription
 7. **Multi-practice ready** — Row-Level Security, practice admin role, practice analytics dashboard
 8. **Clinician workflow integrated** — 30-second briefing layout, tablet-responsive, one-click actions, medication adjustment from dashboard, post-appointment feedback
